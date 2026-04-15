@@ -1,0 +1,83 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Manrope:wght@400;500;600;700&display=swap');
+
+:root {
+  --background: #0d0b0a;
+  --background-alt: #171310;
+  --surface: #f9f5ef;
+  --text-strong: #f4efe7;
+  --text-soft: #dbd0c2;
+  --text-muted: #a89786;
+  --text-dim: #887868;
+  --accent: #d4a666;
+  --accent-soft: #e2be85;
+  --line: rgba(226, 190, 133, 0.12);
+  --panel-shadow: 0 24px 60px rgba(0, 0, 0, 0.38);
+  --font-sans: 'Manrope', sans-serif;
+  --font-display: 'Fraunces', serif;
+
+  font-family: var(--font-sans);
+  line-height: 1.45;
+  font-weight: 500;
+  color: var(--text-strong);
+  background:
+    radial-gradient(circle at top left, rgba(116, 82, 44, 0.16), transparent 28%),
+    radial-gradient(circle at top right, rgba(95, 53, 24, 0.16), transparent 26%),
+    linear-gradient(180deg, #120f0d 0%, #0d0b0a 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.015), rgba(255, 255, 255, 0.015)),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.015) 0,
+      rgba(255, 255, 255, 0.015) 1px,
+      transparent 1px,
+      transparent 88px
+    );
+  opacity: 0.4;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+#root {
+  width: min(1440px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 1.25rem 0 2rem;
+}
+
+@media (max-width: 720px) {
+  #root {
+    width: min(100%, calc(100% - 1rem));
+    padding: 0.75rem 0 1rem;
+  }
+}
