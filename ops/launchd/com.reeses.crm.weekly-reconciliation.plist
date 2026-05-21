@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.reeses.crm.weekly-reconciliation</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; cd /Users/tyler-macmini/code/reese-photography-crm &amp;&amp; npm run backup:reconcile</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>15</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/tyler-macmini/Library/Logs/reese-photography-crm/weekly-reconciliation.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/tyler-macmini/Library/Logs/reese-photography-crm/weekly-reconciliation.err.log</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/tyler-macmini/code/reese-photography-crm</string>
+</dict>
+</plist>

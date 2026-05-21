@@ -1,26 +1,94 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: "Times Now";
+  src: url("/fonts/times-now-light.woff") format("woff");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Times Now";
+  src: url("/fonts/times-now-light-italic.woff") format("woff");
+  font-weight: 300;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Copperplate CC";
+  src: url("/fonts/copperplatecc-heavy.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8f6f3;
+  --foreground: #222222;
+  --surface: #fffdfa;
+  --surface-muted: #eee8de;
+  --line: #d5d0c8;
+  --accent: #222222;
+  --accent-strong: #000000;
+  --ink-muted: #6f665b;
+  --danger: #9f352f;
+  --brand-stone: #b8ada2;
+  --brand-brown: #7a665c;
+  --brand-warm: #f3eee7;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: Arial, Helvetica, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand-brown);
+  outline-offset: 2px;
+}
+
+.brand-page-title {
+  font-family: "Times Now", Georgia, serif;
+  font-weight: 300;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  line-height: 0.95;
+}
+
+.brand-primary-button {
+  border: 1px solid var(--foreground);
+  background: var(--foreground);
+  color: var(--background);
+  font-family: "Copperplate CC", Arial, Helvetica, sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.brand-primary-button:hover {
+  background: transparent;
+  color: var(--foreground);
 }

@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "reese-scheduler-reminders",
+  "main": "workers/scheduler-reminders.ts",
+  "account_id": "765e233f8635f207a8a3db4847efd3e9",
+  "compatibility_date": "2026-04-28",
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
+  "vars": {
+    "REMINDER_ENDPOINT": "https://studio.bythereeses.com/api/cron/scheduler-reminders"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

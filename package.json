@@ -6,21 +6,43 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "deploy:pages-proxy": "wrangler pages deploy pages-proxy --project-name studio-bythereeses --branch main",
+    "smoke:perf": "node scripts/performance-smoke.mjs",
+    "test:origin-guard": "tsx src/lib/origin-guard.test.ts",
+    "cf:typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:seed": "tsx src/db/seed.ts",
+    "backup": "npm run backup:daily",
+    "backup:daily": "node scripts/backup.mjs",
+    "backup:data": "scripts/backup-data.sh",
+    "backup:reconcile": "node scripts/reconcile-backups.mjs",
+    "backup:install-launchd": "node scripts/install-backup-launchd.mjs"
   },
   "dependencies": {
+    "@opennextjs/cloudflare": "^1.19.5",
+    "better-sqlite3": "^12.9.0",
+    "drizzle-orm": "^0.45.2",
+    "lucide-react": "^1.11.0",
     "next": "16.2.4",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260426.1",
     "@tailwindcss/postcss": "^4",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "tsx": "^4.21.0",
+    "typescript": "^5",
+    "wrangler": "^4.86.0"
   }
 }

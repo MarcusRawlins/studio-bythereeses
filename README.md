@@ -1,36 +1,71 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Reese Photography CRM
 
-## Getting Started
+> Source-of-truth note: Obsidian holds durable business/system context and current priorities. This repo holds implementation, deployment, and engineering details. Before making strategic or durable changes, check `/Users/tyler-macmini/Documents/Obsidian Vault/02 Businesses/The Reeses/Reese Photography CRM - Source of Truth and Backups.md` and `/Users/tyler-macmini/Documents/Obsidian Vault/00 System/System Cleanup Command Center - 2026-05-21.md`.
 
-First, run the development server:
+Private, local-first CRM for Tyler Reese's photography business.
+
+## Locations
+
+- Primary working copy: `/Users/tyler-macmini/code/reese-photography-crm`
+- Local backup mirror: `/Volumes/reeseai-memory/code/reese-photography-crm`
+- Planning docs backup: `/Volumes/reeseai-memory/businesses/photography/crm`
+
+## Stack
+
+- Next.js App Router + TypeScript
+- Drizzle ORM
+- Local SQLite for development
+- Cloudflare D1 target for production
+- Cloudflare R2 target for future PDFs and attachments
+
+## Local Commands
 
 ```bash
+npm run db:migrate
+npm run db:seed
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run lint
+npm run build
+npm run backup
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Google Calendar Setup
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Copy `.env.example` to `.env.local`, add Google OAuth credentials, then visit:
 
-## Learn More
+```bash
+http://localhost:3000/api/google/auth
+```
 
-To learn more about Next.js, take a look at the following resources:
+The callback prints a `GOOGLE_REFRESH_TOKEN` to add to `.env.local`. Restart `npm run dev` after adding it.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## MVP Status
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Implemented:
 
-## Deploy on Vercel
+- Admin dashboard shell
+- Project list
+- Project creation with primary client
+- Project detail page
+- D1-compatible local schema and migration
+- Magic-link portal token generation
+- `/p/[token]` portal login handoff
+- `/portal` project-scoped client view
+- 30-day remembered portal cookies
+- Token revocation
+- Activity logging
+- Scheduler admin page
+- Public booking links
+- Local booking storage
+- Optional Google Calendar free/busy and event creation adapter
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Not yet implemented:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Admin Google OAuth
+- Proposals/contracts/invoices
+- Questionnaires
+- Email sending for scheduler confirmations
+- MCP server
+- Cloudflare production resources

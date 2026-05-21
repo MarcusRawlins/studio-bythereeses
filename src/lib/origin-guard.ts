@@ -1,0 +1,67 @@
+import { NextResponse } from "next/server";
+
+export const ORIGIN_SECRET_HEADER = "x-reese-origin-secret";
+
+const PUBLIC_PAGE_PREFIXES = [
+  "/book/",
+  "/p/",
+  "/proposal/",
+] as const;
+
+function isWorkersDevHost(hostname: string) {
+  return hostname === "workers.dev" || hostname.endsWith(".workers.dev");
+}
+
+export function isPublicOriginBypassPath(pathname: string) {
+  if (PUBLIC_PAGE_PREFIXES.some((prefix) => pathname.startsWith(prefix))) {
+    return true;
+  }
+
+  return /^\/questionnaires\/[^/]+\/(preview|confirmed)$/.test(pathname);
+}
+
+export function shouldBlockDirectWorkerOrigin({
+  hostname,
+  headers,
+  secret,
+}: {
+  hostname: string;
+  headers: Headers;
+  secret?: string | null;
+}) {
+  const configuredSecret = secret?.trim();
+  if (!configuredSecret) return false;
+  if (!isWorkersDevHost(hostname)) return false;
+
+  return headers.get(ORIGIN_SECRET_HEADER) !== configuredSecret;
+}
+
+export function guardDirectWorkerPageRequest(request: Request) {
+  const url = new URL(request.url);
+  if (isPublicOriginBypassPath(url.pathname)) {
+    return null;
+  }
+
+  if (!shouldBlockDirectWorkerOrigin({
+    hostname: url.hostname,
+    headers: request.headers,
+    secret: process.env.ORIGIN_PROXY_SECRET,
+  })) {
+    return null;
+  }
+
+  return new NextResponse("Not Found", { status: 404 });
+}
+
+export function guardDirectWorkerApiRequest(request: Request) {
+  const url = new URL(request.url);
+  if (!shouldBlockDirectWorkerOrigin({
+    hostname: url.hostname,
+    headers: request.headers,
+    secret: process.env.ORIGIN_PROXY_SECRET,
+  })) {
+    return null;
+  }
+
+  return NextResponse.json({ error: "Not found" }, { status: 404 });
+}

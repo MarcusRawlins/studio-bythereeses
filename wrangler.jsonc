@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "reese-photography-crm",
+  "main": ".open-next/worker.js",
+  "account_id": "765e233f8635f207a8a3db4847efd3e9",
+  "workers_dev": true,
+  "preview_urls": true,
+  "compatibility_date": "2026-04-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "studio-bythereeses",
+      "database_id": "e3bf2eed-a037-43b0-8a83-68dcd33513da"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "CRM_ASSETS",
+      "bucket_name": "studio-bythereeses"
+    }
+  ],
+  "vars": {
+    "NEXT_PUBLIC_APP_URL": "https://studio.bythereeses.com",
+    "NEXT_PUBLIC_SCHEDULE_URL": "https://schedule.bythereeses.com",
+    "GOOGLE_REDIRECT_URI": "https://studio.bythereeses.com/api/google/callback",
+    "GOOGLE_CALENDAR_IDS": "hello@bythereeses.com",
+    "GOOGLE_CALENDAR_ID": "hello@bythereeses.com",
+    "RESEND_FROM_EMAIL": "The Reeses <hello@bythereeses.com>",
+    "SCHEDULER_ADMIN_EMAIL": "hello@bythereeses.com"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
