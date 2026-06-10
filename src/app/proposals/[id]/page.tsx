@@ -2,7 +2,7 @@ import { AppShell } from "@/components/AppShell";
 import { ProposalPackageBuilder } from "@/components/ProposalPackageBuilder";
 import { formatDate, formatMoney } from "@/lib/format";
 import { getProposalReadiness } from "@/lib/proposal-readiness";
-import { getProposal, listContractTemplateOptions } from "@/lib/sales";
+import { getProposal, listContractTemplateOptions, listProposalPackageTemplateOptions } from "@/lib/sales";
 import { Check, ExternalLink, Eye, FileText, FileSignature, Link2, ReceiptText, RotateCcw, Send, Signature } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -28,6 +28,23 @@ function normalizeProposalShareUrl(value?: string) {
 
 function cleanStatus(value: string) {
   return value.replaceAll("_", " ");
+}
+
+function selectedOptionalLineItemIds(value: string | null) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function clientLabel(client: NonNullable<Awaited<ReturnType<typeof getProposal>>>["client"]) {
+  if (!client) return "Needs primary client";
+  return [client.firstName, client.lastName].filter(Boolean).join(" ") || client.email;
 }
 
 function workflowSummary({
@@ -160,9 +177,10 @@ export default async function ProposalDetailPage({
 }) {
   const { id } = await params;
   const { share } = await searchParams;
-  const [data, contractTemplates] = await Promise.all([
+  const [data, contractTemplates, proposalPackageTemplates] = await Promise.all([
     getProposal(id),
     listContractTemplateOptions(),
+    listProposalPackageTemplateOptions(),
   ]);
   if (!data) notFound();
   const shareUrl = normalizeProposalShareUrl(share);
@@ -178,6 +196,9 @@ export default async function ProposalDetailPage({
   const hasInvoice = data.invoices.length > 0 || readiness.invoiceReady;
   const isSigned = Boolean(data.proposal.signedAt);
   const isAccepted = data.proposal.status === "accepted" || Boolean(data.proposal.acceptedAt);
+  const canCreateClientProposalLink = readiness.packageComplete && readiness.contractReady;
+  const selectedOptionalIds = new Set(selectedOptionalLineItemIds(data.proposal.selectedOptionalLineItemIdsJson));
+  const selectedOptionalLineItems = data.lineItems.filter((item) => selectedOptionalIds.has(item.id));
   const summary = workflowSummary({
     proposal: data.proposal,
     readiness,
@@ -193,7 +214,7 @@ export default async function ProposalDetailPage({
           <div>
             <Link href="/proposals" className="text-sm font-semibold text-[var(--ink-muted)] transition hover:text-[var(--foreground)]">Back to proposals</Link>
             <h1 className="brand-page-title mt-3 text-4xl">{data.proposal.title}</h1>
-            <p className="mt-2 text-sm text-[var(--ink-muted)]">{data.project.name} · {data.client.firstName} {data.client.lastName}</p>
+            <p className="mt-2 text-sm text-[var(--ink-muted)]">{data.project.name} · {clientLabel(data.client)}</p>
           </div>
           <Link href={`/invoices/new?proposalId=${data.proposal.id}&projectId=${data.project.id}`} className="brand-primary-button inline-flex items-center justify-center gap-2 rounded-sm px-4 py-2.5 transition">
             <ReceiptText className="h-4 w-4" />
@@ -241,6 +262,32 @@ export default async function ProposalDetailPage({
             <ProgressStep label="Signed" complete={isSigned} current={(hasViewedLink || isAccepted) && !isSigned} detail={isSigned ? "Signature is stored." : "Client signature still required."} icon={<Signature className="h-3.5 w-3.5" />} />
           </div>
         </section>
+
+        {selectedOptionalLineItems.length > 0 && (
+          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
+            <div className="flex flex-col gap-2 border-b border-[var(--line)] pb-4 md:flex-row md:items-start md:justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">Selected add-ons</h2>
+                <p className="mt-1 text-sm text-[var(--ink-muted)]">Optional items chosen by the client during proposal acceptance.</p>
+              </div>
+              <span className="rounded-full border border-[var(--line)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--ink-muted)]">
+                {selectedOptionalLineItems.length} selected
+              </span>
+            </div>
+            <div className="mt-4 divide-y divide-[var(--line)] rounded-md border border-[var(--line)]">
+              {selectedOptionalLineItems.map((item) => (
+                <div key={item.id} className="grid gap-2 p-4 text-sm md:grid-cols-[1fr_auto_auto] md:items-center">
+                  <div>
+                    <div className="font-semibold">{item.name}</div>
+                    {item.description && <p className="mt-1 text-[var(--ink-muted)]">{item.description}</p>}
+                  </div>
+                  <div className="text-[var(--ink-muted)]">Qty {item.quantity}</div>
+                  <div className="font-semibold">{formatMoney(item.quantity * item.unitPriceCents)}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         <section className="grid gap-6 xl:grid-cols-[1fr_420px]">
           <form action={`/api/proposals/${data.proposal.id}`} method="post" className="grid gap-5 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
@@ -299,6 +346,14 @@ export default async function ProposalDetailPage({
                 <h3 className="mt-1 text-xl font-semibold">Package and scope</h3>
               </div>
               <div className="grid gap-4">
+                <label className="space-y-1.5 text-sm font-medium">
+                  Proposal package template
+                  <select name="proposalPackageTemplateId" defaultValue="" className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none">
+                    <option value="">No package template selected</option>
+                    {proposalPackageTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}{template.trigger ? ` · ${template.trigger}` : ""}</option>)}
+                  </select>
+                  <span className="block text-xs font-normal leading-5 text-[var(--ink-muted)]">Use a template when package name or scope are blank; typed values remain the source of truth.</span>
+                </label>
                 <ProposalPackageBuilder initialItems={data.lineItems} />
                 <label className="space-y-1.5 text-sm font-medium">
                   Scope summary
@@ -352,15 +407,29 @@ export default async function ProposalDetailPage({
               </div>
             )}
             <div className="mt-4 grid gap-2">
-              <form action={`/api/proposals/${data.proposal.id}/link`} method="post">
-                <input type="hidden" name="proposalId" value={data.proposal.id} />
-                <input type="hidden" name="projectId" value={data.project.id} />
-                <input type="hidden" name="clientId" value={data.client.id} />
-                <button className="brand-primary-button inline-flex w-full items-center justify-center gap-2 rounded-sm px-4 py-2.5 transition">
-                  <Send className="h-4 w-4" />
-                  Create client proposal link
-                </button>
-              </form>
+              {data.client && canCreateClientProposalLink ? (
+                <form action={`/api/proposals/${data.proposal.id}/link`} method="post">
+                  <input type="hidden" name="proposalId" value={data.proposal.id} />
+                  <input type="hidden" name="projectId" value={data.project.id} />
+                  <input type="hidden" name="clientId" value={data.client.id} />
+                  <button className="brand-primary-button inline-flex w-full items-center justify-center gap-2 rounded-sm px-4 py-2.5 transition">
+                    <Send className="h-4 w-4" />
+                    Create client proposal link
+                  </button>
+                </form>
+              ) : !data.client ? (
+                <div className="rounded-md border border-[var(--warning)] bg-[#fff9e8] p-3 text-xs leading-5 text-[var(--ink-muted)]">
+                  <span className="font-semibold text-[var(--foreground)]">Add a primary client before creating a client proposal link.</span> The proposal remains editable and invoice-ready while the project/client relationship is repaired.
+                </div>
+              ) : (
+                <div className="rounded-md border border-[var(--warning)] bg-[#fff9e8] p-3 text-xs leading-5 text-[var(--ink-muted)]">
+                  <span className="font-semibold text-[var(--foreground)]">
+                    {!readiness.packageComplete
+                      ? "Add an included priced package item before creating a client proposal link."
+                      : "Add contract language before creating a client proposal link."}
+                  </span> Studio keeps the draft editable until the client-facing package is ready to sign.
+                </div>
+              )}
               <form action={`/api/proposals/${data.proposal.id}/workflow`} method="post">
                 <input type="hidden" name="proposalId" value={data.proposal.id} />
                 <input type="hidden" name="projectId" value={data.project.id} />
@@ -370,6 +439,17 @@ export default async function ProposalDetailPage({
                   Mark sent manually
                 </button>
               </form>
+              {isAccepted && !hasInvoice && (
+                <form action={`/api/proposals/${data.proposal.id}/workflow`} method="post">
+                  <input type="hidden" name="proposalId" value={data.proposal.id} />
+                  <input type="hidden" name="projectId" value={data.project.id} />
+                  <input type="hidden" name="workflowAction" value="create_invoice" />
+                  <button className="brand-primary-button inline-flex w-full items-center justify-center gap-2 rounded-sm px-4 py-2.5 transition">
+                    <ReceiptText className="h-4 w-4" />
+                    Generate invoice from accepted package
+                  </button>
+                </form>
+              )}
               <form action={`/api/proposals/${data.proposal.id}/workflow`} method="post" className="grid grid-cols-2 gap-2">
                 <input type="hidden" name="proposalId" value={data.proposal.id} />
                 <input type="hidden" name="projectId" value={data.project.id} />
@@ -396,6 +476,32 @@ export default async function ProposalDetailPage({
               <FileSignature className="h-4 w-4 text-[var(--ink-muted)]" />
               <h2 className="text-lg font-semibold">Contract draft</h2>
             </div>
+            {isSigned && (
+              <div className="mt-4 rounded-md border border-[var(--line)] bg-[#faf7f1] p-3 text-sm">
+                <div className="font-semibold">Signature evidence</div>
+                <dl className="mt-3 grid gap-2 text-[var(--ink-muted)]">
+                  <div>
+                    <dt className="text-xs font-semibold uppercase tracking-[0.14em]">Signed</dt>
+                    <dd className="mt-1">{data.proposal.signedAt ? formatDate(data.proposal.signedAt.slice(0, 10)) : "Stored"}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-semibold uppercase tracking-[0.14em]">Signer</dt>
+                    <dd className="mt-1">{data.proposal.signerName ?? "Name stored"}{data.proposal.signerEmail ? ` · ${data.proposal.signerEmail}` : ""}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-semibold uppercase tracking-[0.14em]">Acceptance audit</dt>
+                    <dd className="mt-1 break-words">
+                      {data.proposal.signatureIp ? `IP ${data.proposal.signatureIp}` : "IP not captured"}
+                      {data.proposal.signatureUserAgent ? ` · ${data.proposal.signatureUserAgent}` : ""}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs font-semibold uppercase tracking-[0.14em]">Consent</dt>
+                    <dd className="mt-1">{data.proposal.signatureConsentVersion ?? "Consent version not captured"}</dd>
+                  </div>
+                </dl>
+              </div>
+            )}
             <div className="mt-4 rounded-md border border-[var(--line)] p-3">
               <div className="font-semibold">{data.proposal.contractTitle || "No contract selected yet"}</div>
               <p className="mt-2 whitespace-pre-line text-sm leading-6 text-[var(--ink-muted)]">

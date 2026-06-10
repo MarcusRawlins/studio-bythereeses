@@ -6,6 +6,16 @@ type ProposalLineItemLike = {
 
 const readyContractStatuses = new Set(["ready", "signed"]);
 
+export function canSignProposalContract({
+  contractBody,
+  contractStatus,
+}: {
+  contractBody?: string | null;
+  contractStatus: string;
+}) {
+  return Boolean(contractBody?.trim()) && readyContractStatuses.has(contractStatus);
+}
+
 export function getProposalReadiness({
   lineItems,
   contractBody,
@@ -18,7 +28,7 @@ export function getProposalReadiness({
   invoiceStatus: string;
 }) {
   const packageComplete = lineItems.some((item) => !item.isOptional && (item.quantity ?? 0) > 0 && (item.unitPriceCents ?? 0) > 0);
-  const contractReady = Boolean(contractBody?.trim()) && readyContractStatuses.has(contractStatus);
+  const contractReady = canSignProposalContract({ contractBody, contractStatus });
   const invoiceReady = invoiceStatus === "created";
 
   return {

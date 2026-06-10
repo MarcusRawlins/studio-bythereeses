@@ -1,12 +1,20 @@
 import { db } from "@/db/client";
-import { clients, invoicePayments, invoices, projectParticipants, projects, proposalAccessTokens, proposalLineItems, proposals, templates } from "@/db/schema";
+import { activityLogs, clients, invoicePayments, invoices, projectParticipants, projects, proposalAccessTokens, proposalLineItems, proposals, schedulerBookings, schedulerMeetingTypes, templates } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
-import { nextProposalStatus } from "@/lib/proposal-readiness";
+import { ensureEngagementPlaceholder } from "@/lib/crm";
+import { formatMoney } from "@/lib/format";
+import { invoiceClientPayableBalanceCents as calculateInvoiceClientPayableBalanceCents, invoiceClientPayableCents as calculateInvoiceClientPayableCents } from "@/lib/invoice-balances";
+import { canSignProposalContract, nextProposalStatus } from "@/lib/proposal-readiness";
 import { enabledPaymentMethods, getAppSettings, type PaymentMethodKey } from "@/lib/settings";
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, inArray, like, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, like, or } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+
+const DEFAULT_CARD_FEE_PERCENT_BPS = 290;
+const DEFAULT_CARD_FEE_FIXED_CENTS = 30;
+
+export { invoiceClientPayableBalanceCents, invoiceClientPayableCents } from "@/lib/invoice-balances";
 
 function textValue(formData: FormData, key: string) {
   return String(formData.get(key) ?? "").trim();
@@ -14,6 +22,20 @@ function textValue(formData: FormData, key: string) {
 
 function nullableTextValue(formData: FormData, key: string) {
   return textValue(formData, key) || null;
+}
+
+const invoicePaymentCheckoutStatuses = new Set(["not_created", "link_ready", "paid", "expired", "void"]);
+
+function invoicePaymentCheckoutStatus(value: string | null, checkoutUrl: string | null) {
+  const status = value?.trim() || (checkoutUrl ? "link_ready" : "not_created");
+  if (!invoicePaymentCheckoutStatuses.has(status)) {
+    throw new Error("Checkout status must be canonical.");
+  }
+  return status;
+}
+
+function packageIncludesEngagementSession(items: Array<{ name: string; description?: string | null }>) {
+  return items.some((item) => /\bengagement\b/i.test([item.name, item.description].filter(Boolean).join(" ")));
 }
 
 function toCents(value: FormDataEntryValue | null) {
@@ -59,8 +81,216 @@ function proposalBaseUrl() {
   return process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_SCHEDULE_URL || "http://localhost:3000";
 }
 
-function invoiceBalance(invoice: { totalCents: number; amountPaidCents: number }) {
-  return Math.max(invoice.totalCents - invoice.amountPaidCents, 0);
+export function reconciledInvoicePaymentStatus(invoice: { totalCents: number; status: string }, paidTotalCents: number) {
+  if (paidTotalCents >= invoice.totalCents) return "paid";
+  if (paidTotalCents > 0) return "partially_paid";
+  if (invoice.status === "draft" || invoice.status === "void") return invoice.status;
+  return "sent";
+}
+
+const RETAINER_STAGE = "retainer_paid";
+const RETAINER_STAGE_PRECEDENCE = new Map([
+  ["inquiry", 0],
+  ["proposal_sent", 1],
+  [RETAINER_STAGE, 2],
+  ["planning", 3],
+  ["editing", 4],
+  ["delivered", 5],
+  ["completed", 6],
+]);
+
+function isRetainerPaymentLabel(label: string | null) {
+  return /\b(retainer|deposit)\b/i.test(label ?? "");
+}
+
+function shouldAdvanceToRetainerPaid(stage: string, paymentLabel: string | null, status: string, paidAmountCents: number) {
+  const currentStageRank = RETAINER_STAGE_PRECEDENCE.get(stage);
+  const retainerStageRank = RETAINER_STAGE_PRECEDENCE.get(RETAINER_STAGE) ?? 2;
+  return (
+    status === "paid"
+    && paidAmountCents > 0
+    && isRetainerPaymentLabel(paymentLabel)
+    && currentStageRank !== undefined
+    && currentStageRank < retainerStageRank
+  );
+}
+
+export async function autoAdvanceProjectStageForRetainerPayment({
+  projectId,
+  invoiceId,
+  paymentId,
+  paymentLabel,
+  status,
+  paidAmountCents,
+  actorType,
+  actorName,
+  metadata,
+}: {
+  projectId: string;
+  invoiceId: string;
+  paymentId: string;
+  paymentLabel: string | null;
+  status: string;
+  paidAmountCents: number;
+  actorType?: "admin" | "client" | "system" | "agent";
+  actorName?: string | null;
+  metadata?: Record<string, unknown>;
+}) {
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project || !shouldAdvanceToRetainerPaid(project.stage, paymentLabel, status, paidAmountCents)) return;
+
+  const now = new Date().toISOString();
+  await db.update(projects).set({
+    stage: RETAINER_STAGE,
+    updatedAt: now,
+  }).where(eq(projects.id, projectId));
+
+  await logActivity({
+    projectId,
+    action: "project.stage_auto_advanced_from_invoice_payment",
+    actorType,
+    actorName,
+    metadata: {
+      invoiceId,
+      paymentId,
+      paymentLabel,
+      previousStage: project.stage,
+      nextStage: RETAINER_STAGE,
+      paidAmountCents,
+      ...metadata,
+    },
+  });
+}
+
+function calculateCardFeeAmountCents({
+  subtotalCents,
+  percentBps,
+  fixedCents,
+}: {
+  subtotalCents: number;
+  percentBps: number;
+  fixedCents: number;
+}) {
+  if (subtotalCents <= 0 || percentBps <= 0) return 0;
+  return Math.round(subtotalCents * (percentBps / 10000)) + Math.max(fixedCents, 0);
+}
+
+export function estimateInvoiceCardFeeCents(subtotalCents: number) {
+  return calculateCardFeeAmountCents({
+    subtotalCents,
+    percentBps: DEFAULT_CARD_FEE_PERCENT_BPS,
+    fixedCents: DEFAULT_CARD_FEE_FIXED_CENTS,
+  });
+}
+
+function invoicePaymentLedgerAmounts({
+  invoice,
+  paymentMethod,
+  paidAmountCents,
+}: {
+  invoice: Pick<typeof invoices.$inferSelect, "cardFeePolicy" | "cardFeePercentBps" | "cardFeeFixedCents" | "cardFeeAmountCents">;
+  paymentMethod: string | null;
+  paidAmountCents: number;
+}) {
+  if (paidAmountCents <= 0) {
+    return {
+      paidAmountCents: 0,
+      clientFeeCents: 0,
+      processingFeeCents: 0,
+      grossCollectedCents: 0,
+      netDepositCents: 0,
+    };
+  }
+
+  const isCardPayment = paymentMethod === "stripe" || paymentMethod === "credit_card";
+  const hasLegacyPayableFee = invoice.cardFeePolicy === "client_pays"
+    && invoice.cardFeeAmountCents > 0
+    && invoice.cardFeePercentBps === 0
+    && invoice.cardFeeFixedCents === 0;
+  const processingFeeCents = isCardPayment
+    ? calculateCardFeeAmountCents({
+        subtotalCents: paidAmountCents,
+        percentBps: hasLegacyPayableFee ? DEFAULT_CARD_FEE_PERCENT_BPS : invoice.cardFeePercentBps ?? DEFAULT_CARD_FEE_PERCENT_BPS,
+        fixedCents: hasLegacyPayableFee ? DEFAULT_CARD_FEE_FIXED_CENTS : invoice.cardFeeFixedCents ?? DEFAULT_CARD_FEE_FIXED_CENTS,
+      })
+    : 0;
+  const clientFeeCents = invoice.cardFeePolicy === "client_pays" && isCardPayment ? processingFeeCents : 0;
+  const grossCollectedCents = paidAmountCents + clientFeeCents;
+
+  return {
+    paidAmountCents,
+    clientFeeCents,
+    processingFeeCents,
+    grossCollectedCents,
+    netDepositCents: Math.max(grossCollectedCents - processingFeeCents, 0),
+  };
+}
+
+async function syncUnpaidProposalInvoicesToAcceptedTotal({
+  proposalId,
+  projectId,
+  totalCents,
+  now,
+}: {
+  proposalId: string;
+  projectId: string;
+  totalCents: number;
+  now: string;
+}) {
+  const linkedInvoices = await db.query.invoices.findMany({
+    where: eq(invoices.proposalId, proposalId),
+  });
+
+  for (const invoice of linkedInvoices) {
+    if (invoice.totalCents === totalCents || invoice.amountPaidCents > 0 || invoice.status === "paid" || invoice.status === "void") {
+      continue;
+    }
+
+    const payments = await db.query.invoicePayments.findMany({
+      where: eq(invoicePayments.invoiceId, invoice.id),
+      orderBy: [asc(invoicePayments.createdAt), asc(invoicePayments.label)],
+    });
+    if (payments.some((payment) => payment.status === "paid" || payment.paidAmountCents > 0)) {
+      continue;
+    }
+
+    const deltaCents = totalCents - invoice.totalCents;
+    const unpaidPayments = payments.filter((payment) => payment.status !== "paid");
+    const adjustablePayment = unpaidPayments.find((payment) => /final|balance/i.test(payment.label))
+      ?? [...unpaidPayments].reverse()[0]
+      ?? null;
+    const cardFeeAmountCents = calculateCardFeeAmountCents({
+      subtotalCents: totalCents,
+      percentBps: invoice.cardFeePolicy === "client_pays" ? invoice.cardFeePercentBps ?? DEFAULT_CARD_FEE_PERCENT_BPS : 0,
+      fixedCents: invoice.cardFeePolicy === "client_pays" ? invoice.cardFeeFixedCents ?? DEFAULT_CARD_FEE_FIXED_CENTS : 0,
+    });
+
+    await db.update(invoices).set({
+      totalCents,
+      cardFeeAmountCents,
+      updatedAt: now,
+    }).where(eq(invoices.id, invoice.id));
+
+    if (adjustablePayment) {
+      await db.update(invoicePayments).set({
+        amountCents: Math.max(adjustablePayment.amountCents + deltaCents, 0),
+        updatedAt: now,
+      }).where(eq(invoicePayments.id, adjustablePayment.id));
+    }
+
+    await logActivity({
+      projectId,
+      action: "invoice.synced_to_accepted_proposal",
+      metadata: {
+        invoiceId: invoice.id,
+        proposalId,
+        previousTotalCents: invoice.totalCents,
+        totalCents,
+        adjustedPaymentId: adjustablePayment?.id ?? null,
+        deltaCents,
+      },
+    });
+  }
 }
 
 function isPaymentMethodKey(value: string): value is PaymentMethodKey {
@@ -76,6 +306,23 @@ function defaultPaymentNotes(methods: ReturnType<typeof enabledPaymentMethods>) 
       return method.displayName;
     })
     .join("\n");
+}
+
+function parseAcceptedPaymentMethodKeys(value: string | null): PaymentMethodKey[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "key" in item && typeof item.key === "string") return item.key;
+        return null;
+      })
+      .filter((key): key is PaymentMethodKey => Boolean(key) && isPaymentMethodKey(key));
+  } catch {
+    return [];
+  }
 }
 
 export const proposalStatusOptions = [
@@ -142,6 +389,172 @@ function inferredContractStatus({
   return "not_started";
 }
 
+async function proposalContractMergeData({
+  projectId,
+  proposalTitle,
+  packageName,
+  totalCents,
+  scopeSummary,
+}: {
+  projectId: string;
+  proposalTitle: string;
+  packageName?: string | null;
+  totalCents?: number | null;
+  scopeSummary?: string | null;
+}) {
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  const primaryRows = await db
+    .select({ client: clients })
+    .from(projectParticipants)
+    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(eq(projectParticipants.projectId, projectId))
+    .orderBy(desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt));
+  const primaryClient = primaryRows[0]?.client ?? null;
+  const clientName = primaryClient
+    ? [primaryClient.firstName, primaryClient.lastName].filter(Boolean).join(" ")
+    : "";
+
+  return {
+    "project.name": project?.name ?? "",
+    "project.type": project?.type ?? "",
+    "project.event_date": project?.eventDate ?? "",
+    "project.venue_name": project?.venueName ?? "",
+    "project.venue_address": project?.venueAddress ?? "",
+    "project.city": project?.city ?? "",
+    "project.state": project?.state ?? "",
+    "client.name": clientName,
+    "client.first_name": primaryClient?.firstName ?? "",
+    "client.last_name": primaryClient?.lastName ?? "",
+    "client.preferred_name": primaryClient?.preferredName ?? primaryClient?.firstName ?? "",
+    "client.email": primaryClient?.email ?? "",
+    "client.phone": primaryClient?.phone ?? "",
+    "proposal.title": proposalTitle,
+    "proposal.package_name": packageName ?? "",
+    "proposal.total": typeof totalCents === "number" && totalCents > 0 ? formatMoney(totalCents) : "",
+    "proposal.scope_summary": scopeSummary ?? "",
+  };
+}
+
+async function renderContractTemplateBody({
+  templateBody,
+  projectId,
+  proposalTitle,
+  packageName,
+  totalCents,
+  scopeSummary,
+}: {
+  templateBody: string;
+  projectId: string;
+  proposalTitle: string;
+  packageName?: string | null;
+  totalCents?: number | null;
+  scopeSummary?: string | null;
+}) {
+  const mergeData = await proposalContractMergeData({
+    projectId,
+    proposalTitle,
+    packageName,
+    totalCents,
+    scopeSummary,
+  });
+
+  return templateBody.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (match, key: string) => (
+    Object.prototype.hasOwnProperty.call(mergeData, key) ? mergeData[key as keyof typeof mergeData] : match
+  ));
+}
+
+function mergeTemplateBody(body: string, data: Record<string, string>) {
+  return body.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (match, key: string) => (
+    Object.prototype.hasOwnProperty.call(data, key) ? data[key] : match
+  ));
+}
+
+async function renderInvoiceReminderTemplate({
+  body,
+  invoice,
+  project,
+  client,
+  payment,
+}: {
+  body: string;
+  invoice: typeof invoices.$inferSelect;
+  project: typeof projects.$inferSelect;
+  client: typeof clients.$inferSelect | null;
+  payment?: typeof invoicePayments.$inferSelect | null;
+}) {
+  const allPayments = await db.query.invoicePayments.findMany({ where: eq(invoicePayments.invoiceId, invoice.id) });
+  const clientName = client ? [client.firstName, client.lastName].filter(Boolean).join(" ") : "";
+  const balanceDue = calculateInvoiceClientPayableBalanceCents(invoice, allPayments);
+  const paymentBalance = payment ? Math.max(0, payment.amountCents - payment.paidAmountCents) : 0;
+
+  return mergeTemplateBody(body, {
+    "client.name": clientName,
+    "client.firstName": client?.firstName ?? "",
+    "client.first_name": client?.firstName ?? "",
+    "client.email": client?.email ?? "",
+    "project.name": project.name,
+    "project.eventDate": project.eventDate ?? "",
+    "project.event_date": project.eventDate ?? "",
+    "project.venueName": project.venueName ?? "",
+    "project.venue_name": project.venueName ?? "",
+    "invoice.number": invoice.invoiceNumber,
+    "invoice.total": formatMoney(calculateInvoiceClientPayableCents(invoice)),
+    "invoice.balanceDue": formatMoney(balanceDue),
+    "invoice.balance_due": formatMoney(balanceDue),
+    "payment.label": payment?.label ?? "",
+    "payment.dueDate": payment?.dueDate ?? "",
+    "payment.due_date": payment?.dueDate ?? "",
+    "payment.balanceDue": payment ? formatMoney(paymentBalance) : "",
+    "payment.balance_due": payment ? formatMoney(paymentBalance) : "",
+  });
+}
+
+async function renderProposalPackageTemplateBody({
+  templateBody,
+  projectId,
+  proposalTitle,
+  packageName,
+  totalCents,
+}: {
+  templateBody: string;
+  projectId: string;
+  proposalTitle: string;
+  packageName?: string | null;
+  totalCents?: number | null;
+}) {
+  const mergeData = await proposalContractMergeData({
+    projectId,
+    proposalTitle,
+    packageName,
+    totalCents,
+    scopeSummary: null,
+  });
+
+  return mergeTemplateBody(templateBody, mergeData);
+}
+
+async function activeProposalPackageTemplate(templateId: string | null) {
+  if (!templateId) return null;
+  const template = await db.query.templates.findFirst({
+    where: and(eq(templates.id, templateId), eq(templates.type, "proposal_package"), eq(templates.status, "active")),
+  });
+  if (!template) throw new Error("Proposal package template not found.");
+  return template;
+}
+
+async function activeContractTemplate(templateId: string | null) {
+  if (!templateId) return null;
+  const template = await db.query.templates.findFirst({
+    where: and(eq(templates.id, templateId), eq(templates.type, "contract"), eq(templates.status, "active")),
+  });
+  if (!template) throw new Error("Contract template not found.");
+  return template;
+}
+
+function proposalIsAcceptedOrSigned(proposal: Pick<typeof proposals.$inferSelect, "acceptedAt" | "signedAt" | "status" | "contractStatus">) {
+  return Boolean(proposal.acceptedAt || proposal.signedAt || proposal.status === "accepted" || proposal.contractStatus === "signed");
+}
+
 async function replaceProposalLineItems(proposalId: string, formData: FormData) {
   const now = new Date().toISOString();
   const items = packageLineItemsFromForm(formData);
@@ -169,8 +582,6 @@ async function replaceProposalLineItems(proposalId: string, formData: FormData) 
 export const invoiceStatusOptions = [
   { value: "draft", label: "Draft" },
   { value: "sent", label: "Sent" },
-  { value: "partially_paid", label: "Partially paid" },
-  { value: "paid", label: "Paid" },
   { value: "overdue", label: "Overdue" },
   { value: "void", label: "Void" },
 ];
@@ -186,9 +597,314 @@ function dbIncludedPackageTotalCents(items: Array<{ quantity: number; unitPriceC
   }, 0);
 }
 
+async function assertProposalCanBeShared(proposal: typeof proposals.$inferSelect) {
+  const lineItems = await db.query.proposalLineItems.findMany({
+    where: eq(proposalLineItems.proposalId, proposal.id),
+  });
+
+  if (!dbLineItemsHaveIncludedPricedItem(lineItems)) {
+    throw new Error("Proposal package must include at least one priced required line item.");
+  }
+  if (!canSignProposalContract({
+    contractBody: proposal.contractBody,
+    contractStatus: proposal.contractStatus,
+  })) {
+    throw new Error("Proposal contract must be ready before creating a client link.");
+  }
+}
+
+type AgentProposalLineItemInput = {
+  name: string;
+  description?: string | null;
+  quantity?: number | null;
+  unitPriceCents?: number | null;
+  isOptional?: boolean | null;
+};
+
+export type AgentProposalInput = {
+  title: string;
+  packageName?: string | null;
+  proposalPackageTemplateId?: string | null;
+  validUntil?: string | null;
+  scopeSummary?: string | null;
+  contractTemplateId?: string | null;
+  contractTitle?: string | null;
+  contractBody?: string | null;
+  lineItems: AgentProposalLineItemInput[];
+  sourceType?: string | null;
+  sourceId?: string | null;
+};
+
+export type AgentProposalUpdateInput = {
+  title?: string | null;
+  packageName?: string | null;
+  proposalPackageTemplateId?: string | null;
+  validUntil?: string | null;
+  scopeSummary?: string | null;
+  contractTemplateId?: string | null;
+  contractTitle?: string | null;
+  contractBody?: string | null;
+  lineItems?: AgentProposalLineItemInput[] | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+};
+
+export type AgentProposalLinkInput = {
+  clientId?: string | null;
+  label?: string | null;
+};
+
+export type AgentInvoiceInput = {
+  proposalId?: string | null;
+  invoiceNumber?: string | null;
+  status?: string | null;
+  totalCents?: number | null;
+  retainerAmountCents?: number | null;
+  retainerPercent?: number | null;
+  installmentCount?: number | null;
+  dueDate?: string | null;
+  paymentNotes?: string | null;
+  stripePaymentLink?: string | null;
+  acceptedPaymentMethods?: PaymentMethodKey[];
+  sourceType?: string | null;
+  sourceId?: string | null;
+};
+
+export type AgentInvoiceUpdateInput = {
+  status?: string | null;
+  totalCents?: number | null;
+  retainerAmountCents?: number | null;
+  retainerPercent?: number | null;
+  installmentCount?: number | null;
+  dueDate?: string | null;
+  paymentNotes?: string | null;
+  stripePaymentLink?: string | null;
+  acceptedPaymentMethods?: PaymentMethodKey[];
+  sourceType?: string | null;
+  sourceId?: string | null;
+};
+
+export type AgentInvoicePaymentInput = {
+  paymentId: string;
+  status?: string | null;
+  paymentMethod?: string | null;
+  paidAmountCents?: number | null;
+  paidAt?: string | null;
+  externalPaymentId?: string | null;
+  stripeCheckoutUrl?: string | null;
+  stripeCheckoutSessionId?: string | null;
+  stripeCheckoutStatus?: string | null;
+  notes?: string | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+};
+
+export type AgentInvoiceReminderInput = {
+  paymentId?: string | null;
+  channel?: string | null;
+  note?: string | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+};
+
+function cleanAgentText(value: string | null | undefined) {
+  return value?.trim() || null;
+}
+
+function requireTylerApprovalForAgentFinance(message: string): never {
+  throw new Error(message);
+}
+
+async function assertAgentProjectSource(projectId: string, sourceType: string | null, sourceId: string | null) {
+  if (!sourceType && sourceId) {
+    throw new Error("Project source links require sourceType when sourceId is set.");
+  }
+  if (sourceType !== "project_source") return;
+  if (!sourceId) {
+    throw new Error("Project source id is required.");
+  }
+
+  const source = await db.query.projectSources.findFirst({
+    where: (row, { and, eq }) => and(eq(row.id, sourceId), eq(row.projectId, projectId)),
+  });
+  if (!source) {
+    throw new Error("Project source not found for this project.");
+  }
+}
+
+function centsToFormMoney(value: number) {
+  return (value / 100).toFixed(2);
+}
+
+function safeRevalidatePath(path: string) {
+  try {
+    revalidatePath(path);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("static generation store missing")) {
+      return;
+    }
+    throw error;
+  }
+}
+
+function normalizedAgentLineItems(items: AgentProposalLineItemInput[]) {
+  return items.map((item, index) => ({
+    name: cleanAgentText(item.name) ?? "Package item",
+    description: cleanAgentText(item.description),
+    quantity: Math.max(Math.round(Number(item.quantity ?? 1)) || 1, 1),
+    unitPriceCents: Math.max(Math.round(Number(item.unitPriceCents ?? 0)) || 0, 0),
+    isOptional: Boolean(item.isOptional),
+    sortOrder: index,
+  })).filter((item) => item.name || item.unitPriceCents > 0);
+}
+
+function agentIncludedPackageTotalCents(items: ReturnType<typeof normalizedAgentLineItems>) {
+  return items.reduce((sum, item) => item.isOptional ? sum : sum + item.quantity * item.unitPriceCents, 0);
+}
+
+function agentPackageHasIncludedPricedItem(items: ReturnType<typeof normalizedAgentLineItems>) {
+  return items.some((item) => !item.isOptional && item.quantity > 0 && item.unitPriceCents > 0);
+}
+
+async function agentInvoicePaymentSettings(acceptedPaymentMethods?: PaymentMethodKey[] | null) {
+  const settings = await getAppSettings();
+  const enabledMethods = enabledPaymentMethods(settings.paymentMethods);
+  const enabledKeys = new Set(enabledMethods.map((method) => method.key));
+  const selectedKeys = (acceptedPaymentMethods ?? []).filter((key) => enabledKeys.has(key));
+  const acceptedKeys = selectedKeys.length ? selectedKeys : enabledMethods.map((method) => method.key);
+  const acceptedMethods = acceptedKeys
+    .map((key) => ({ key, ...settings.paymentMethods[key] }))
+    .filter((method) => method.enabled);
+  const clientPaysCardFees = acceptedKeys.includes("stripe") && settings.paymentMethods.stripe.passFees;
+
+  return {
+    settings,
+    acceptedKeys,
+    acceptedMethods,
+    cardFeePolicy: clientPaysCardFees ? "client_pays" : "studio_absorbs",
+    cardFeePercentBps: clientPaysCardFees ? DEFAULT_CARD_FEE_PERCENT_BPS : 0,
+    cardFeeFixedCents: clientPaysCardFees ? DEFAULT_CARD_FEE_FIXED_CENTS : 0,
+  };
+}
+
+function normalizedInvoiceScheduleRows({
+  invoiceId,
+  totalCents,
+  retainerAmountCents,
+  retainerPercent,
+  installmentCount,
+  dueDate,
+  now,
+}: {
+  invoiceId: string;
+  totalCents: number;
+  retainerAmountCents?: number | null;
+  retainerPercent?: number | null;
+  installmentCount?: number | null;
+  dueDate?: string | null;
+  now: string;
+}) {
+  const retainerCents = retainerAmountCents && retainerAmountCents > 0
+    ? Math.round(retainerAmountCents)
+    : Math.round(totalCents * ((typeof retainerPercent === "number" ? retainerPercent : 30) / 100));
+  const normalizedRetainerCents = Math.min(Math.max(retainerCents, 0), totalCents);
+  const normalizedInstallmentCount = Math.max(Math.trunc(installmentCount ?? 1), 0);
+  const remainingCents = Math.max(totalCents - normalizedRetainerCents, 0);
+  const rows: Array<{
+    invoiceId: string;
+    label: string;
+    amountCents: number;
+    dueDate: string | null;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  }> = [];
+
+  if (normalizedRetainerCents > 0) {
+    rows.push({
+      invoiceId,
+      label: "Retainer",
+      amountCents: normalizedRetainerCents,
+      dueDate: dueDate ?? null,
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  if (remainingCents > 0 && normalizedInstallmentCount > 0) {
+    const baseAmount = Math.floor(remainingCents / normalizedInstallmentCount);
+    let allocated = 0;
+    for (let index = 0; index < normalizedInstallmentCount; index += 1) {
+      const isLast = index === normalizedInstallmentCount - 1;
+      const amountCents = isLast ? remainingCents - allocated : baseAmount;
+      allocated += amountCents;
+      rows.push({
+        invoiceId,
+        label: normalizedInstallmentCount === 1 ? "Final payment" : `Payment ${index + 1}`,
+        amountCents,
+        dueDate: addDays(dueDate ?? null, 30 * (index + 1)),
+        status: "pending",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+  }
+
+  return rows;
+}
+
+async function replacePendingInvoiceSchedule(args: Parameters<typeof normalizedInvoiceScheduleRows>[0]) {
+  await db.delete(invoicePayments).where(eq(invoicePayments.invoiceId, args.invoiceId));
+
+  const rows = normalizedInvoiceScheduleRows(args);
+  if (rows.length) {
+    await db.insert(invoicePayments).values(rows.map((row) => ({
+      id: crypto.randomUUID(),
+      ...row,
+    })));
+  }
+}
+
+async function replaceAgentProposalLineItems(proposalId: string, lineItems: ReturnType<typeof normalizedAgentLineItems>, now: string) {
+  await db.delete(proposalLineItems).where(eq(proposalLineItems.proposalId, proposalId));
+
+  if (lineItems.length) {
+    await db.insert(proposalLineItems).values(lineItems.map((item) => ({
+      id: crypto.randomUUID(),
+      proposalId,
+      name: item.name,
+      description: item.description,
+      quantity: item.quantity,
+      unitPriceCents: item.unitPriceCents,
+      isOptional: item.isOptional,
+      sortOrder: item.sortOrder,
+      createdAt: now,
+      updatedAt: now,
+    })));
+  }
+}
+
+function proposalMissingFields({
+  packageComplete,
+  contractStatus,
+  invoiceStatus,
+}: {
+  packageComplete: boolean;
+  contractStatus: string;
+  invoiceStatus: string;
+}) {
+  const missing: string[] = [];
+  if (!packageComplete) missing.push("package");
+  if (!["ready", "signed"].includes(contractStatus)) missing.push("contract");
+  if (invoiceStatus !== "created") missing.push("invoice");
+  return missing;
+}
+
 type ProjectOptionRow = {
   project: typeof projects.$inferSelect;
-  client: typeof clients.$inferSelect;
+  client: typeof clients.$inferSelect | null;
+  participant: typeof projectParticipants.$inferSelect | null;
 };
 
 type ProposalOptionRow = {
@@ -199,14 +915,80 @@ type ProposalOptionRow = {
 type ProposalRow = {
   proposal: typeof proposals.$inferSelect;
   project: typeof projects.$inferSelect;
-  client: typeof clients.$inferSelect;
+  client: typeof clients.$inferSelect | null;
 };
 
 type InvoiceRow = {
   invoice: typeof invoices.$inferSelect;
   project: typeof projects.$inferSelect;
-  client: typeof clients.$inferSelect;
+  client: typeof clients.$inferSelect | null;
   proposal: typeof proposals.$inferSelect | null;
+  clientPayableBalanceCents?: number;
+};
+
+export type PaymentLedgerRow = {
+  sourceType: "invoice" | "scheduler_booking";
+  sourceId: string;
+  href: string;
+  paymentSourceType: string | null;
+  paymentSourceId: string | null;
+  payment: typeof invoicePayments.$inferSelect;
+  invoice: typeof invoices.$inferSelect;
+  project: typeof projects.$inferSelect;
+  client: typeof clients.$inferSelect | null;
+  clientName: string;
+  openCents: number;
+  clientPayableOpenCents: number;
+};
+
+export type AccountsReceivableAgingBucket = "current" | "1_30" | "31_60" | "61_90" | "90_plus";
+
+export type AccountsReceivableAgingRow = {
+  sourceType: PaymentLedgerRow["sourceType"];
+  sourceId: string;
+  href: string;
+  invoiceNumber: string;
+  paymentLabel: string;
+  projectId: string;
+  projectName: string;
+  clientId: string | null;
+  clientName: string;
+  dueDate: string | null;
+  status: string;
+  openCents: number;
+  daysPastDue: number;
+  bucket: AccountsReceivableAgingBucket;
+};
+
+export type PaymentLedgerReport = {
+  rows: PaymentLedgerRow[];
+  totals: {
+    scheduledCents: number;
+    paidCents: number;
+    grossCollectedCents: number;
+    clientFeeCents: number;
+    processingFeeCents: number;
+    netDepositCents: number;
+    openCents: number;
+    clientPayableOpenCents: number;
+  };
+  aging: {
+    asOfDate: string;
+    buckets: Array<{
+      bucket: AccountsReceivableAgingBucket;
+      label: string;
+      openCents: number;
+      count: number;
+    }>;
+    rows: AccountsReceivableAgingRow[];
+  };
+};
+
+export type PaymentLedgerReportInput = {
+  status?: string | null;
+  fromDate?: string | null;
+  toDate?: string | null;
+  asOfDate?: string | null;
 };
 
 export async function listProjectOptions() {
@@ -214,11 +996,12 @@ export async function listProjectOptions() {
     .select({
       project: projects,
       client: clients,
+      participant: projectParticipants,
     })
-    .from(projectParticipants)
-    .innerJoin(projects, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
-    .orderBy(desc(projects.createdAt)) as unknown as ProjectOptionRow[];
+    .from(projects)
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .orderBy(desc(projects.createdAt), desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as ProjectOptionRow[];
 
   const seen = new Set<string>();
   return rows.filter((row) => {
@@ -237,6 +1020,13 @@ export async function listClientOptions() {
 export async function listContractTemplateOptions() {
   return db.query.templates.findMany({
     where: and(eq(templates.type, "contract"), eq(templates.status, "active")),
+    orderBy: desc(templates.createdAt),
+  });
+}
+
+export async function listProposalPackageTemplateOptions() {
+  return db.query.templates.findMany({
+    where: and(eq(templates.type, "proposal_package"), eq(templates.status, "active")),
     orderBy: desc(templates.createdAt),
   });
 }
@@ -269,7 +1059,7 @@ export async function listProposals(search = "", status = "all") {
       : undefined,
   ].filter(Boolean);
 
-  return db
+  const rows = await db
     .select({
       proposal: proposals,
       project: projects,
@@ -277,10 +1067,17 @@ export async function listProposals(search = "", status = "all") {
     })
     .from(proposals)
     .innerJoin(projects, eq(proposals.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
     .where(filters.length ? and(...filters) : undefined)
-    .orderBy(desc(proposals.createdAt)) as unknown as Promise<ProposalRow[]>;
+    .orderBy(desc(proposals.createdAt), desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as ProposalRow[];
+
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    if (seen.has(row.proposal.id)) return false;
+    seen.add(row.proposal.id);
+    return true;
+  });
 }
 
 export async function getProposal(proposalId: string) {
@@ -292,9 +1089,10 @@ export async function getProposal(proposalId: string) {
     })
     .from(proposals)
     .innerJoin(projects, eq(proposals.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
-    .where(eq(proposals.id, proposalId)) as unknown as ProposalRow[];
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(eq(proposals.id, proposalId))
+    .orderBy(desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as ProposalRow[];
 
   const row = rows[0];
   if (!row) return null;
@@ -323,10 +1121,46 @@ export async function createProposalLinkFromForm(formData: FormData) {
 
   const proposal = await db.query.proposals.findFirst({ where: eq(proposals.id, proposalId) });
   if (!proposal) throw new Error("Proposal not found.");
+  if (proposal.projectId !== projectId) throw new Error("Proposal does not belong to this project.");
+  await assertProposalCanBeShared(proposal);
+  if (clientId) {
+    const participant = await db.query.projectParticipants.findFirst({
+      where: and(eq(projectParticipants.projectId, projectId), eq(projectParticipants.clientId, clientId)),
+    });
+    if (!participant) throw new Error("Proposal client is not linked to this project.");
+  }
 
   const now = new Date().toISOString();
   const token = randomBytes(32).toString("base64url");
   const url = `${proposalBaseUrl()}/proposal/${token}`;
+  const expiresAt = addTokenDays(45);
+  const label = textValue(formData, "label") || "Client proposal package";
+  const activeMatchingTokens = await db.query.proposalAccessTokens.findMany({
+    where: clientId
+      ? and(
+        eq(proposalAccessTokens.proposalId, proposalId),
+        eq(proposalAccessTokens.projectId, projectId),
+        eq(proposalAccessTokens.clientId, clientId),
+        isNull(proposalAccessTokens.revokedAt),
+      )
+      : and(
+        eq(proposalAccessTokens.proposalId, proposalId),
+        eq(proposalAccessTokens.projectId, projectId),
+        isNull(proposalAccessTokens.clientId),
+        isNull(proposalAccessTokens.revokedAt),
+      ),
+  });
+  if (activeMatchingTokens.length) {
+    await db.update(proposalAccessTokens).set({
+      revokedAt: now,
+    }).where(inArray(proposalAccessTokens.id, activeMatchingTokens.map((row) => row.id)));
+    await logActivity({
+      projectId,
+      clientId,
+      action: "proposal.link_replaced",
+      metadata: { proposalId, revokedTokenIds: activeMatchingTokens.map((row) => row.id) },
+    });
+  }
 
   await db.insert(proposalAccessTokens).values({
     id: crypto.randomUUID(),
@@ -334,8 +1168,8 @@ export async function createProposalLinkFromForm(formData: FormData) {
     projectId,
     clientId,
     tokenHash: hashProposalToken(token),
-    label: textValue(formData, "label") || "Client proposal package",
-    expiresAt: addTokenDays(45),
+    label,
+    expiresAt,
     sentAt: now,
     viewedAt: null,
     revokedAt: null,
@@ -354,14 +1188,23 @@ export async function createProposalLinkFromForm(formData: FormData) {
     projectId,
     clientId,
     action: "proposal.link_created",
-    metadata: { proposalId, expiresAt: addTokenDays(45) },
+    metadata: { proposalId, expiresAt },
   });
 
-  revalidatePath("/proposals");
-  revalidatePath(`/proposals/${proposalId}`);
-  revalidatePath(`/projects/${projectId}`);
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${proposalId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
 
-  return { proposalId, projectId, url };
+  return { proposalId, projectId, clientId, label, expiresAt, url };
+}
+
+export async function createProposalLinkFromAgent(projectId: string, proposalId: string, input: AgentProposalLinkInput = {}) {
+  const formData = new FormData();
+  formData.set("projectId", projectId);
+  formData.set("proposalId", proposalId);
+  if (input.clientId) formData.set("clientId", input.clientId);
+  if (input.label) formData.set("label", input.label);
+  return createProposalLinkFromForm(formData);
 }
 
 export async function createProposalLinkAction(formData: FormData) {
@@ -386,11 +1229,11 @@ export async function getProposalPackageByToken(token: string, lastUsedIp?: stri
     })
     .from(proposals)
     .innerJoin(projects, eq(proposals.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
     .where(eq(proposals.id, tokenRow.proposalId)) as unknown as ProposalRow[];
 
-  const row = rows.find((candidate) => candidate.client.id === tokenRow.clientId) ?? rows[0];
+  const row = rows.find((candidate) => candidate.client?.id === tokenRow.clientId) ?? rows[0];
   if (!row) return null;
 
   const [lineItems, linkedInvoices] = await Promise.all([
@@ -436,7 +1279,7 @@ export async function getProposalPackageByToken(token: string, lastUsedIp?: stri
       clientId: tokenRow.clientId,
       action: "proposal.viewed",
       actorType: "client",
-      actorName: `${row.client.firstName} ${row.client.lastName ?? ""}`.trim(),
+      actorName: row.client ? `${row.client.firstName} ${row.client.lastName ?? ""}`.trim() : "Client proposal viewer",
       metadata: { proposalId: row.proposal.id },
     });
   }
@@ -448,7 +1291,7 @@ export async function getProposalPackageByToken(token: string, lastUsedIp?: stri
     invoices: linkedInvoices.map((invoice) => ({
       ...invoice,
       payments: paymentsByInvoiceId.get(invoice.id) ?? [],
-      balanceCents: invoiceBalance(invoice),
+      balanceCents: calculateInvoiceClientPayableBalanceCents(invoice, paymentsByInvoiceId.get(invoice.id) ?? []),
     })),
   };
 }
@@ -456,7 +1299,14 @@ export async function getProposalPackageByToken(token: string, lastUsedIp?: stri
 export async function acceptProposalByToken(
   token: string,
   lastUsedIp?: string | null,
-  signature?: { signerName: string; signerEmail: string | null; selectedOptionalLineItemIds?: string[] },
+  signature?: {
+    signerName: string;
+    signerEmail: string | null;
+    selectedOptionalLineItemIds?: string[];
+    userAgent?: string | null;
+    consentText?: string | null;
+    consentVersion?: string | null;
+  },
 ) {
   if (!signature?.signerName) return null;
 
@@ -474,16 +1324,42 @@ export async function acceptProposalByToken(
     })
     .from(proposals)
     .innerJoin(projects, eq(proposals.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
     .where(eq(proposals.id, tokenRow.proposalId)) as unknown as ProposalRow[];
 
-  const row = rows.find((candidate) => candidate.client.id === tokenRow.clientId) ?? rows[0];
+  const row = rows.find((candidate) => candidate.client?.id === tokenRow.clientId) ?? rows[0];
   if (!row || ["declined", "expired"].includes(row.proposal.status)) return null;
 
   const now = new Date().toISOString();
   const firstAcceptance = !row.proposal.acceptedAt;
   const firstSignature = !row.proposal.signedAt;
+  if (proposalIsAcceptedOrSigned(row.proposal)) {
+    await db.update(proposalAccessTokens).set({
+      viewedAt: tokenRow.viewedAt ?? now,
+      lastUsedAt: now,
+      lastUsedIp: lastUsedIp ?? null,
+    }).where(eq(proposalAccessTokens.id, tokenRow.id));
+
+    safeRevalidatePath(`/proposal/${token}`);
+    return { proposalId: row.proposal.id, projectId: tokenRow.projectId };
+  }
+  if (!canSignProposalContract({
+    contractBody: row.proposal.contractBody,
+    contractStatus: row.proposal.contractStatus,
+  })) {
+    await db.update(proposalAccessTokens).set({
+      viewedAt: tokenRow.viewedAt ?? now,
+      lastUsedAt: now,
+      lastUsedIp: lastUsedIp ?? null,
+    }).where(eq(proposalAccessTokens.id, tokenRow.id));
+
+    safeRevalidatePath(`/proposal/${token}`);
+    return null;
+  }
+
+  const signerName = signature.signerName.trim().replace(/\s+/g, " ");
+  const signerEmail = signature.signerEmail?.trim().toLowerCase() || null;
   const selectedOptionalLineItemIds = Array.from(new Set(signature.selectedOptionalLineItemIds ?? []));
   let validSelectedOptionalLineItemIds: string[] = [];
 
@@ -507,6 +1383,9 @@ export async function acceptProposalByToken(
     ? await db.query.proposalLineItems.findMany({ where: eq(proposalLineItems.proposalId, row.proposal.id) })
     : [];
   const acceptedTotalCents = validSelectedOptionalLineItemIds.length ? dbIncludedPackageTotalCents(acceptedLineItems) : row.proposal.totalCents;
+  const acceptedPackageLineItems = acceptedLineItems.length
+    ? acceptedLineItems
+    : await db.query.proposalLineItems.findMany({ where: eq(proposalLineItems.proposalId, row.proposal.id) });
 
   await db.update(proposalAccessTokens).set({
     viewedAt: tokenRow.viewedAt ?? now,
@@ -518,12 +1397,24 @@ export async function acceptProposalByToken(
     status: "accepted",
     acceptedAt: row.proposal.acceptedAt ?? now,
     signedAt: row.proposal.signedAt ?? now,
-    signerName: row.proposal.signerName ?? signature.signerName,
-    signerEmail: row.proposal.signerEmail ?? signature.signerEmail,
+    signerName: row.proposal.signerName ?? signerName,
+    signerEmail: row.proposal.signerEmail ?? signerEmail,
+    signatureIp: row.proposal.signatureIp ?? lastUsedIp ?? null,
+    signatureUserAgent: row.proposal.signatureUserAgent ?? signature.userAgent?.trim() ?? null,
+    signatureConsentText: row.proposal.signatureConsentText ?? signature.consentText?.trim() ?? null,
+    signatureConsentVersion: row.proposal.signatureConsentVersion ?? signature.consentVersion?.trim() ?? null,
+    selectedOptionalLineItemIdsJson: row.proposal.selectedOptionalLineItemIdsJson ?? JSON.stringify(validSelectedOptionalLineItemIds),
     contractStatus: "signed",
     totalCents: acceptedTotalCents,
     updatedAt: now,
   }).where(eq(proposals.id, row.proposal.id));
+
+  await syncUnpaidProposalInvoicesToAcceptedTotal({
+    proposalId: row.proposal.id,
+    projectId: tokenRow.projectId,
+    totalCents: acceptedTotalCents ?? 0,
+    now,
+  });
 
   if (firstAcceptance) {
     await logActivity({
@@ -531,7 +1422,7 @@ export async function acceptProposalByToken(
       clientId: tokenRow.clientId,
       action: "proposal.accepted",
       actorType: "client",
-      actorName: `${row.client.firstName} ${row.client.lastName ?? ""}`.trim(),
+      actorName: row.client ? `${row.client.firstName} ${row.client.lastName ?? ""}`.trim() : signerName,
       metadata: { proposalId: row.proposal.id, selectedOptionalLineItemIds: validSelectedOptionalLineItemIds },
     });
   }
@@ -542,20 +1433,42 @@ export async function acceptProposalByToken(
       clientId: tokenRow.clientId,
       action: "proposal.signed",
       actorType: "client",
-      actorName: signature.signerName,
-      metadata: { proposalId: row.proposal.id, signerEmail: signature.signerEmail },
+      actorName: signerName,
+      metadata: {
+        proposalId: row.proposal.id,
+        signerEmail,
+        signatureIp: lastUsedIp ?? null,
+        signatureUserAgent: signature.userAgent?.trim() ?? null,
+        signatureConsentVersion: signature.consentVersion?.trim() ?? null,
+        selectedOptionalLineItemIds: validSelectedOptionalLineItemIds,
+      },
     });
   }
 
-  revalidatePath("/proposals");
-  revalidatePath(`/proposals/${row.proposal.id}`);
-  revalidatePath(`/projects/${tokenRow.projectId}`);
-  revalidatePath(`/proposal/${token}`);
+  if (firstAcceptance && packageIncludesEngagementSession(acceptedPackageLineItems.filter((item) => !item.isOptional))) {
+    const eventId = await ensureEngagementPlaceholder(tokenRow.projectId);
+    await logActivity({
+      projectId: tokenRow.projectId,
+      clientId: tokenRow.clientId,
+      action: "engagement.pending_added",
+      actorType: "system",
+      metadata: { proposalId: row.proposal.id, eventId },
+    });
+  }
+
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${row.proposal.id}`);
+  safeRevalidatePath(`/projects/${tokenRow.projectId}`);
+  safeRevalidatePath(`/proposal/${token}`);
 
   return { proposalId: row.proposal.id, projectId: tokenRow.projectId };
 }
 
 export async function listInvoices(search = "", status = "all") {
+  const primaryParticipantJoin = and(
+    eq(projectParticipants.projectId, projects.id),
+    eq(projectParticipants.isPrimaryContact, true),
+  );
   const filters = [
     status !== "all" ? eq(invoices.status, status) : undefined,
     search
@@ -568,23 +1481,6 @@ export async function listInvoices(search = "", status = "all") {
       : undefined,
   ].filter(Boolean);
 
-  return db
-    .select({
-      invoice: invoices,
-      project: projects,
-      client: clients,
-      proposal: proposals,
-    })
-    .from(invoices)
-    .innerJoin(projects, eq(invoices.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
-    .leftJoin(proposals, eq(invoices.proposalId, proposals.id))
-    .where(filters.length ? and(...filters) : undefined)
-    .orderBy(desc(invoices.createdAt)) as unknown as Promise<InvoiceRow[]>;
-}
-
-export async function getInvoice(invoiceId: string) {
   const rows = await db
     .select({
       invoice: invoices,
@@ -594,10 +1490,54 @@ export async function getInvoice(invoiceId: string) {
     })
     .from(invoices)
     .innerJoin(projects, eq(invoices.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .leftJoin(projectParticipants, primaryParticipantJoin)
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
     .leftJoin(proposals, eq(invoices.proposalId, proposals.id))
-    .where(eq(invoices.id, invoiceId)) as unknown as InvoiceRow[];
+    .where(filters.length ? and(...filters) : undefined)
+    .orderBy(desc(invoices.createdAt), desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as InvoiceRow[];
+
+  const seen = new Set<string>();
+  const uniqueRows = rows.filter((row) => {
+    if (seen.has(row.invoice.id)) return false;
+    seen.add(row.invoice.id);
+    return true;
+  });
+  const invoiceIds = uniqueRows.map((row) => row.invoice.id);
+  const paymentRows = invoiceIds.length
+    ? await db.query.invoicePayments.findMany({
+        where: (payment, { inArray }) => inArray(payment.invoiceId, invoiceIds),
+      })
+    : [];
+  const paymentsByInvoice = new Map<string, Array<typeof invoicePayments.$inferSelect>>();
+  for (const payment of paymentRows) {
+    paymentsByInvoice.set(payment.invoiceId, [...(paymentsByInvoice.get(payment.invoiceId) ?? []), payment]);
+  }
+
+  return uniqueRows.map((row) => ({
+    ...row,
+    clientPayableBalanceCents: calculateInvoiceClientPayableBalanceCents(row.invoice, paymentsByInvoice.get(row.invoice.id) ?? []),
+  }));
+}
+
+export async function getInvoice(invoiceId: string) {
+  const primaryParticipantJoin = and(
+    eq(projectParticipants.projectId, projects.id),
+    eq(projectParticipants.isPrimaryContact, true),
+  );
+  const rows = await db
+    .select({
+      invoice: invoices,
+      project: projects,
+      client: clients,
+      proposal: proposals,
+    })
+    .from(invoices)
+    .innerJoin(projects, eq(invoices.projectId, projects.id))
+    .leftJoin(projectParticipants, primaryParticipantJoin)
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .leftJoin(proposals, eq(invoices.proposalId, proposals.id))
+    .where(eq(invoices.id, invoiceId))
+    .orderBy(desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as InvoiceRow[];
 
   const row = rows[0];
   if (!row) return null;
@@ -606,8 +1546,439 @@ export async function getInvoice(invoiceId: string) {
     where: eq(invoicePayments.invoiceId, invoiceId),
     orderBy: desc(invoicePayments.createdAt),
   });
+  const reminders = await db.query.activityLogs.findMany({
+    where: and(
+      eq(activityLogs.projectId, row.project.id),
+      inArray(activityLogs.action, ["invoice.reminder_logged", "invoice.reminder_logged_by_agent"]),
+      like(activityLogs.metadata, `%${invoiceId}%`),
+    ),
+    orderBy: desc(activityLogs.createdAt),
+    limit: 8,
+  });
+  const proposalSyncs = await db.query.activityLogs.findMany({
+    where: and(
+      eq(activityLogs.projectId, row.project.id),
+      eq(activityLogs.action, "invoice.synced_to_accepted_proposal"),
+      like(activityLogs.metadata, `%${invoiceId}%`),
+    ),
+    orderBy: desc(activityLogs.createdAt),
+    limit: 4,
+  });
+  const reminderTemplates = await db.query.templates.findMany({
+    where: and(eq(templates.type, "reminder"), eq(templates.status, "active")),
+    orderBy: desc(templates.updatedAt),
+  });
 
-  return { ...row, payments, balanceCents: invoiceBalance(row.invoice) };
+  return { ...row, payments, reminders, proposalSyncs, reminderTemplates, balanceCents: calculateInvoiceClientPayableBalanceCents(row.invoice, payments) };
+}
+
+function paymentLedgerStatusFilter(status: string | null | undefined) {
+  const cleanStatus = cleanAgentText(status);
+  return !cleanStatus || cleanStatus === "all" ? null : cleanStatus;
+}
+
+function paymentLedgerNeedsReconciliation(row: PaymentLedgerRow) {
+  return row.payment.status === "paid" && (
+    !row.payment.externalPaymentId
+    || !row.paymentSourceType
+    || !row.paymentSourceId
+  );
+}
+
+function paymentLedgerSortValue(row: PaymentLedgerRow) {
+  return row.payment.dueDate ?? row.payment.paidAt ?? row.payment.createdAt ?? "";
+}
+
+function paymentLedgerDate(row: PaymentLedgerRow) {
+  return (row.payment.status === "paid" ? row.payment.paidAt : null)
+    ?? row.payment.dueDate
+    ?? row.payment.createdAt
+    ?? "";
+}
+
+function paymentLedgerMatchesRange(row: PaymentLedgerRow, input: PaymentLedgerReportInput) {
+  const date = paymentLedgerDate(row).slice(0, 10);
+  if (input.fromDate && date < input.fromDate) return false;
+  if (input.toDate && date > input.toDate) return false;
+  return true;
+}
+
+function ledgerClientName(client: typeof clients.$inferSelect | null) {
+  if (!client) return "Needs primary client";
+  return [client.firstName, client.lastName].filter(Boolean).join(" ") || client.email;
+}
+
+const AR_AGING_BUCKETS: Array<{ bucket: AccountsReceivableAgingBucket; label: string }> = [
+  { bucket: "current", label: "Current" },
+  { bucket: "1_30", label: "1-30" },
+  { bucket: "31_60", label: "31-60" },
+  { bucket: "61_90", label: "61-90" },
+  { bucket: "90_plus", label: "90+" },
+];
+
+function dateKey(value: string | null | undefined) {
+  return value?.slice(0, 10) || null;
+}
+
+function defaultAsOfDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function daysBetweenDateKeys(laterDateKey: string, earlierDateKey: string) {
+  const later = Date.parse(`${laterDateKey}T12:00:00.000Z`);
+  const earlier = Date.parse(`${earlierDateKey}T12:00:00.000Z`);
+  if (!Number.isFinite(later) || !Number.isFinite(earlier)) return 0;
+  return Math.max(Math.floor((later - earlier) / 86_400_000), 0);
+}
+
+function agingBucketForDays(daysPastDue: number): AccountsReceivableAgingBucket {
+  if (daysPastDue <= 0) return "current";
+  if (daysPastDue <= 30) return "1_30";
+  if (daysPastDue <= 60) return "31_60";
+  if (daysPastDue <= 90) return "61_90";
+  return "90_plus";
+}
+
+function buildAccountsReceivableAging(rows: PaymentLedgerRow[], asOfDate: string) {
+  const agingRows = rows
+    .filter((row) => row.openCents > 0 && !["paid", "waived", "refunded"].includes(row.payment.status))
+    .map<AccountsReceivableAgingRow>((row) => {
+      const dueDate = dateKey(row.payment.dueDate);
+      const daysPastDue = dueDate ? daysBetweenDateKeys(asOfDate, dueDate) : 0;
+      return {
+        sourceType: row.sourceType,
+        sourceId: row.sourceId,
+        href: row.href,
+        invoiceNumber: row.invoice.invoiceNumber,
+        paymentLabel: row.payment.label,
+        projectId: row.project.id,
+        projectName: row.project.name,
+        clientId: row.client?.id ?? null,
+        clientName: row.clientName,
+        dueDate,
+        status: row.payment.status,
+        openCents: row.openCents,
+        daysPastDue,
+        bucket: agingBucketForDays(daysPastDue),
+      };
+    })
+    .sort((a, b) => b.daysPastDue - a.daysPastDue || b.openCents - a.openCents || a.dueDate?.localeCompare(b.dueDate ?? "") || 0);
+
+  const buckets = AR_AGING_BUCKETS.map(({ bucket, label }) => {
+    const bucketRows = agingRows.filter((row) => row.bucket === bucket);
+    return {
+      bucket,
+      label,
+      openCents: bucketRows.reduce((sum, row) => sum + row.openCents, 0),
+      count: bucketRows.length,
+    };
+  });
+
+  return { asOfDate, buckets, rows: agingRows };
+}
+
+export async function getPaymentLedgerReport(input: PaymentLedgerReportInput = {}): Promise<PaymentLedgerReport> {
+  const cleanStatus = paymentLedgerStatusFilter(input.status);
+  const needsReconciliation = cleanStatus === "needs_reconciliation";
+  const invoiceStatusFilter = cleanStatus
+    ? eq(invoicePayments.status, needsReconciliation ? "paid" : cleanStatus)
+    : undefined;
+  const schedulerStatusFilter = cleanStatus
+    ? eq(schedulerBookings.paymentStatus, needsReconciliation ? "paid" : cleanStatus)
+    : undefined;
+  const rows = await db
+    .select({
+      payment: invoicePayments,
+      invoice: invoices,
+      project: projects,
+      client: clients,
+    })
+    .from(invoicePayments)
+    .innerJoin(invoices, eq(invoicePayments.invoiceId, invoices.id))
+    .innerJoin(projects, eq(invoices.projectId, projects.id))
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(invoiceStatusFilter)
+    .orderBy(asc(invoicePayments.dueDate), asc(invoicePayments.createdAt), desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as Array<{
+      payment: typeof invoicePayments.$inferSelect;
+      invoice: typeof invoices.$inferSelect;
+      project: typeof projects.$inferSelect;
+      client: typeof clients.$inferSelect | null;
+    }>;
+
+  const seenPayments = new Set<string>();
+  const ledgerRows: PaymentLedgerRow[] = [];
+
+  for (const row of rows) {
+    if (seenPayments.has(row.payment.id)) continue;
+    seenPayments.add(row.payment.id);
+    const paidCents = row.payment.status === "paid" ? row.payment.paidAmountCents : 0;
+    ledgerRows.push({
+      sourceType: "invoice",
+      sourceId: row.payment.id,
+      href: `/invoices/${row.invoice.id}#payment-${encodeURIComponent(row.payment.id)}`,
+      paymentSourceType: row.payment.sourceType,
+      paymentSourceId: row.payment.sourceId,
+      ...row,
+      clientName: ledgerClientName(row.client),
+      openCents: row.payment.status === "paid" || row.payment.status === "waived"
+        ? 0
+        : Math.max(row.payment.amountCents - paidCents, 0),
+      clientPayableOpenCents: 0,
+    });
+  }
+
+  const bookingRows = await db
+    .select({
+      booking: schedulerBookings,
+      meetingType: schedulerMeetingTypes,
+      project: projects,
+      client: clients,
+      participant: projectParticipants,
+    })
+    .from(schedulerBookings)
+    .innerJoin(schedulerMeetingTypes, eq(schedulerBookings.meetingTypeId, schedulerMeetingTypes.id))
+    .innerJoin(projects, eq(schedulerBookings.projectId, projects.id))
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(schedulerStatusFilter)
+    .orderBy(asc(schedulerBookings.startAt), desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as Array<{
+      booking: typeof schedulerBookings.$inferSelect;
+      meetingType: typeof schedulerMeetingTypes.$inferSelect;
+      project: typeof projects.$inferSelect;
+      client: typeof clients.$inferSelect | null;
+      participant: typeof projectParticipants.$inferSelect | null;
+    }>;
+
+  const seenBookings = new Set<string>();
+  for (const row of bookingRows) {
+    if (seenBookings.has(row.booking.id)) continue;
+    seenBookings.add(row.booking.id);
+    const amountCents = row.booking.paidAmountCents || row.meetingType.priceCents || 0;
+    const syntheticInvoice = {
+      id: row.booking.id,
+      projectId: row.project.id,
+      proposalId: null,
+      invoiceNumber: "BOOKING",
+      status: row.booking.paymentStatus,
+      totalCents: amountCents,
+      amountPaidCents: row.booking.paidAmountCents,
+      dueDate: row.booking.startAt,
+      paymentNotes: row.booking.paymentNotes,
+      acceptedPaymentMethodsJson: null,
+      cardFeePolicy: "studio_absorbs",
+      cardFeePercentBps: 0,
+      cardFeeFixedCents: 0,
+      cardFeeAmountCents: row.booking.clientFeeCents,
+      stripePaymentLink: row.booking.paymentLink,
+      zelleInfo: null,
+      venmoInfo: null,
+      sentAt: null,
+      paidAt: row.booking.paidAt,
+      createdAt: row.booking.createdAt,
+      updatedAt: row.booking.updatedAt,
+    } as typeof invoices.$inferSelect;
+    const syntheticPayment = {
+      id: row.booking.id,
+      invoiceId: row.booking.id,
+      label: row.meetingType.name,
+      amountCents,
+      dueDate: row.booking.startAt,
+      status: row.booking.paymentStatus,
+      paidAt: row.booking.paidAt,
+      paymentMethod: row.booking.paymentMethod,
+      paidAmountCents: row.booking.paidAmountCents,
+      clientFeeCents: row.booking.clientFeeCents,
+      processingFeeCents: row.booking.processingFeeCents,
+      grossCollectedCents: row.booking.grossCollectedCents,
+      netDepositCents: row.booking.netDepositCents,
+      externalPaymentId: row.booking.externalPaymentId,
+      notes: row.booking.paymentNotes,
+      sourceType: row.booking.paymentSourceType,
+      sourceId: row.booking.paymentSourceId,
+      createdAt: row.booking.createdAt,
+      updatedAt: row.booking.updatedAt,
+    } as typeof invoicePayments.$inferSelect;
+
+    ledgerRows.push({
+      sourceType: "scheduler_booking",
+      sourceId: row.booking.id,
+      href: `/scheduler/bookings/${row.booking.id}#payment-${encodeURIComponent(row.booking.id)}`,
+      paymentSourceType: row.booking.paymentSourceType,
+      paymentSourceId: row.booking.paymentSourceId,
+      payment: syntheticPayment,
+      invoice: syntheticInvoice,
+      project: row.project,
+      client: row.client,
+      clientName: ledgerClientName(row.client),
+      openCents: row.booking.paymentStatus === "paid" || row.booking.paymentStatus === "waived"
+        ? 0
+        : Math.max(amountCents - row.booking.paidAmountCents, 0),
+      clientPayableOpenCents: row.booking.paymentStatus === "paid" || row.booking.paymentStatus === "waived"
+        ? 0
+        : Math.max(amountCents - row.booking.paidAmountCents, 0),
+    });
+  }
+
+  const filteredRows = ledgerRows.filter((row) => (
+    paymentLedgerMatchesRange(row, input)
+    && (!needsReconciliation || paymentLedgerNeedsReconciliation(row))
+  ));
+
+  filteredRows.sort((a, b) => paymentLedgerSortValue(a).localeCompare(paymentLedgerSortValue(b)));
+
+  const invoiceRowsByInvoiceId = new Map<string, PaymentLedgerRow[]>();
+  for (const row of filteredRows) {
+    if (row.sourceType !== "invoice") continue;
+    invoiceRowsByInvoiceId.set(row.invoice.id, [...(invoiceRowsByInvoiceId.get(row.invoice.id) ?? []), row]);
+  }
+  for (const invoiceRows of invoiceRowsByInvoiceId.values()) {
+    const clientPayableOpenCents = !cleanStatus
+      ? calculateInvoiceClientPayableBalanceCents(
+          invoiceRows[0].invoice,
+          invoiceRows.map((row) => row.payment),
+        )
+      : invoiceRows.reduce((sum, row) => sum + row.openCents, 0);
+    for (const row of invoiceRows) {
+      row.clientPayableOpenCents = clientPayableOpenCents;
+    }
+  }
+
+  const totals = filteredRows.reduce<PaymentLedgerReport["totals"]>((sum, row) => ({
+    scheduledCents: sum.scheduledCents + row.payment.amountCents,
+    paidCents: sum.paidCents + row.payment.paidAmountCents,
+    grossCollectedCents: sum.grossCollectedCents + row.payment.grossCollectedCents,
+    clientFeeCents: sum.clientFeeCents + row.payment.clientFeeCents,
+    processingFeeCents: sum.processingFeeCents + row.payment.processingFeeCents,
+    netDepositCents: sum.netDepositCents + row.payment.netDepositCents,
+    openCents: sum.openCents + row.openCents,
+    clientPayableOpenCents: sum.clientPayableOpenCents + row.openCents,
+  }), {
+    scheduledCents: 0,
+    paidCents: 0,
+    grossCollectedCents: 0,
+    clientFeeCents: 0,
+    processingFeeCents: 0,
+    netDepositCents: 0,
+    openCents: 0,
+    clientPayableOpenCents: 0,
+  });
+
+  if (!cleanStatus) {
+    const invoiceClientPayableOpenCents = Array.from(invoiceRowsByInvoiceId.values())
+      .reduce((sum, invoiceRows) => sum + (invoiceRows[0]?.clientPayableOpenCents ?? 0), 0);
+    const schedulerOpenCents = filteredRows
+      .filter((row) => row.sourceType === "scheduler_booking")
+      .reduce((sum, row) => sum + row.openCents, 0);
+    totals.clientPayableOpenCents = invoiceClientPayableOpenCents + schedulerOpenCents;
+  }
+
+  return {
+    rows: filteredRows,
+    totals,
+    aging: buildAccountsReceivableAging(filteredRows, input.asOfDate?.slice(0, 10) || defaultAsOfDate()),
+  };
+}
+
+function csvCell(value: string | number | null | undefined) {
+  const text = String(value ?? "");
+  return /[",\n]/.test(text) ? `"${text.replaceAll("\"", "\"\"")}"` : text;
+}
+
+function centsCsv(value: number) {
+  return (value / 100).toFixed(2);
+}
+
+export function paymentLedgerCsv(rows: PaymentLedgerRow[]) {
+  const header = [
+    "Invoice",
+    "Project",
+    "Client",
+    "Payment",
+    "Due Date",
+    "Paid At",
+    "Status",
+    "Method",
+    "Scheduled",
+    "Paid",
+    "Gross Collected",
+    "Client Fee",
+    "Processor Fee",
+    "Net Deposit",
+    "Open",
+    "Client Payable Open",
+    "External Payment ID",
+    "Notes",
+    "Payment Source Type",
+    "Payment Source ID",
+    "Record Source Type",
+    "Record Source ID",
+    "Link",
+  ];
+
+  const body = rows.map((row) => [
+    row.invoice.invoiceNumber,
+    row.project.name,
+    row.clientName,
+    row.payment.label,
+    row.payment.dueDate,
+    row.payment.paidAt,
+    row.payment.status,
+    row.payment.paymentMethod,
+    centsCsv(row.payment.amountCents),
+    centsCsv(row.payment.paidAmountCents),
+    centsCsv(row.payment.grossCollectedCents),
+    centsCsv(row.payment.clientFeeCents),
+    centsCsv(row.payment.processingFeeCents),
+    centsCsv(row.payment.netDepositCents),
+    centsCsv(row.openCents),
+    centsCsv(row.clientPayableOpenCents),
+    row.payment.externalPaymentId,
+    row.payment.notes,
+    row.paymentSourceType,
+    row.paymentSourceId,
+    row.sourceType,
+    row.sourceId,
+    row.href,
+  ]);
+
+  return [header, ...body].map((row) => row.map(csvCell).join(",")).join("\n");
+}
+
+export function accountsReceivableAgingCsv(aging: PaymentLedgerReport["aging"]) {
+  const header = [
+    "As Of",
+    "Bucket",
+    "Invoice",
+    "Project",
+    "Client",
+    "Payment",
+    "Due Date",
+    "Days Past Due",
+    "Open",
+    "Status",
+    "Source Type",
+    "Source ID",
+    "Link",
+  ];
+
+  const body = aging.rows.map((row) => [
+    aging.asOfDate,
+    aging.buckets.find((bucket) => bucket.bucket === row.bucket)?.label ?? row.bucket,
+    row.invoiceNumber,
+    row.projectName,
+    row.clientName,
+    row.paymentLabel,
+    row.dueDate,
+    row.daysPastDue,
+    centsCsv(row.openCents),
+    row.status,
+    row.sourceType,
+    row.sourceId,
+    row.href,
+  ]);
+
+  return [header, ...body].map((row) => row.map(csvCell).join(",")).join("\n");
 }
 
 export async function createProposalFromForm(formData: FormData) {
@@ -620,14 +1991,19 @@ export async function createProposalFromForm(formData: FormData) {
   const now = new Date().toISOString();
   const invoiceStatus = "not_created";
   const validUntil = nullableTextValue(formData, "validUntil");
+  const proposalPackageTemplateId = nullableTextValue(formData, "proposalPackageTemplateId");
+  const proposalPackageTemplate = proposalPackageTemplateId
+    ? await db.query.templates.findFirst({ where: and(eq(templates.id, proposalPackageTemplateId), eq(templates.type, "proposal_package"), eq(templates.status, "active")) })
+    : null;
+  if (proposalPackageTemplateId && !proposalPackageTemplate) throw new Error("Proposal package template not found.");
   const contractTemplateId = nullableTextValue(formData, "contractTemplateId");
   const contractTemplate = contractTemplateId
     ? await db.query.templates.findFirst({ where: and(eq(templates.id, contractTemplateId), eq(templates.type, "contract")) })
     : null;
-  const contractBody = nullableTextValue(formData, "contractBody") ?? contractTemplate?.body ?? null;
-  const contractTitle = nullableTextValue(formData, "contractTitle") ?? contractTemplate?.name ?? null;
   const formLineItems = packageLineItemsFromForm(formData);
-  const contractStatus = inferredContractStatus({ contractBody, contractTemplateId });
+  let packageName = nullableTextValue(formData, "packageName");
+  let scopeSummary = nullableTextValue(formData, "scopeSummary");
+  const formTotalCents = includedPackageTotalCents(formLineItems);
 
   if (!projectId && clientId) {
     const client = await db.query.clients.findFirst({ where: eq(clients.id, clientId) });
@@ -664,15 +2040,43 @@ export async function createProposalFromForm(formData: FormData) {
 
   if (!projectId) throw new Error("Choose a project or client for this proposal.");
 
+  packageName = packageName ?? proposalPackageTemplate?.subject ?? proposalPackageTemplate?.name ?? null;
+  scopeSummary = scopeSummary ?? (
+    proposalPackageTemplate?.body
+      ? await renderProposalPackageTemplateBody({
+          templateBody: proposalPackageTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents: formTotalCents,
+        })
+      : null
+  );
+  const contractBodyInput = nullableTextValue(formData, "contractBody");
+  const contractBody = contractBodyInput ?? (
+    contractTemplate?.body
+      ? await renderContractTemplateBody({
+          templateBody: contractTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents: formTotalCents,
+          scopeSummary,
+        })
+      : null
+  );
+  const contractTitle = nullableTextValue(formData, "contractTitle") ?? contractTemplate?.name ?? null;
+  const contractStatus = inferredContractStatus({ contractBody, contractTemplateId });
+
   await db.insert(proposals).values({
     id,
     projectId,
     title,
     status: proposalStatusFromWorkflow({ contractStatus, invoiceStatus, validUntil, packageComplete: packageHasIncludedPricedItem(formLineItems) }),
-    packageName: nullableTextValue(formData, "packageName"),
+    packageName,
     totalCents: null,
     validUntil,
-    scopeSummary: nullableTextValue(formData, "scopeSummary"),
+    scopeSummary,
     contractStatus,
     contractTemplateId,
     contractTitle,
@@ -690,11 +2094,242 @@ export async function createProposalFromForm(formData: FormData) {
     updatedAt: new Date().toISOString(),
   }).where(eq(proposals.id, id));
 
-  await logActivity({ projectId, action: "proposal.created", metadata: { title, totalCents } });
-  revalidatePath("/proposals");
-  revalidatePath(`/projects/${projectId}`);
+  await logActivity({ projectId, action: "proposal.created", metadata: { title, totalCents, proposalPackageTemplateId: proposalPackageTemplate?.id } });
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/projects/${projectId}`);
 
   return { proposalId: id, projectId };
+}
+
+export async function createProposalFromAgent(projectId: string, input: AgentProposalInput) {
+  const title = cleanAgentText(input.title);
+  if (!title) throw new Error("Proposal title is required.");
+
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project) throw new Error("Project not found.");
+  const sourceType = cleanAgentText(input.sourceType);
+  const sourceId = cleanAgentText(input.sourceId);
+  await assertAgentProjectSource(projectId, sourceType, sourceId);
+
+  const now = new Date().toISOString();
+  const proposalId = crypto.randomUUID();
+  const lineItems = normalizedAgentLineItems(input.lineItems ?? []);
+  const totalCents = agentIncludedPackageTotalCents(lineItems);
+  const validUntil = cleanAgentText(input.validUntil);
+  const proposalPackageTemplateId = cleanAgentText(input.proposalPackageTemplateId);
+  const proposalPackageTemplate = await activeProposalPackageTemplate(proposalPackageTemplateId);
+  const packageName = cleanAgentText(input.packageName) ?? proposalPackageTemplate?.subject ?? proposalPackageTemplate?.name ?? null;
+  const scopeSummary = cleanAgentText(input.scopeSummary) ?? (
+    proposalPackageTemplate?.body
+      ? await renderProposalPackageTemplateBody({
+          templateBody: proposalPackageTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+        })
+      : null
+  );
+  const contractTemplateId = cleanAgentText(input.contractTemplateId);
+  const contractTemplate = await activeContractTemplate(contractTemplateId);
+  const contractTitle = cleanAgentText(input.contractTitle) ?? contractTemplate?.name ?? null;
+  const contractBody = cleanAgentText(input.contractBody) ?? (
+    contractTemplate?.body
+      ? await renderContractTemplateBody({
+          templateBody: contractTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+          scopeSummary,
+        })
+      : null
+  );
+  const contractStatus = inferredContractStatus({ contractBody, contractTemplateId });
+  const invoiceStatus = "not_created";
+  const packageComplete = agentPackageHasIncludedPricedItem(lineItems);
+  const status = proposalStatusFromWorkflow({
+    contractStatus,
+    invoiceStatus,
+    validUntil,
+    packageComplete,
+  });
+  const missingFields = proposalMissingFields({ packageComplete, contractStatus, invoiceStatus });
+
+  await db.insert(proposals).values({
+    id: proposalId,
+    projectId,
+    title,
+    status,
+    packageName,
+    totalCents: totalCents || null,
+    validUntil,
+    scopeSummary,
+    contractStatus,
+    contractTemplateId,
+    contractTitle,
+    contractBody,
+    invoiceStatus,
+    sentAt: null,
+    acceptedAt: null,
+    sourceType,
+    sourceId,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  await replaceAgentProposalLineItems(proposalId, lineItems, now);
+
+  await logActivity({
+    projectId,
+    action: "proposal.created_by_agent",
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    metadata: {
+      proposalId,
+      title,
+      status,
+      totalCents,
+      missingFields,
+      sourceType,
+      sourceId,
+      proposalPackageTemplateId: proposalPackageTemplate?.id,
+      contractTemplateId: contractTemplate?.id,
+    },
+  });
+
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${proposalId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
+
+  return { proposalId, projectId, status, totalCents, missingFields };
+}
+
+export async function updateProposalFromAgent(projectId: string, proposalId: string, input: AgentProposalUpdateInput) {
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project) throw new Error("Project not found.");
+
+  const existingProposal = await db.query.proposals.findFirst({
+    where: and(eq(proposals.id, proposalId), eq(proposals.projectId, projectId)),
+  });
+  if (!existingProposal) throw new Error("Proposal not found for this project.");
+  if (proposalIsAcceptedOrSigned(existingProposal)) {
+    throw new Error("Accepted or signed proposals cannot be updated by agent.");
+  }
+
+  const sourceType = cleanAgentText(input.sourceType) ?? existingProposal.sourceType;
+  const sourceId = cleanAgentText(input.sourceId) ?? existingProposal.sourceId;
+  await assertAgentProjectSource(projectId, sourceType, sourceId);
+
+  const now = new Date().toISOString();
+  const lineItems = Array.isArray(input.lineItems)
+    ? normalizedAgentLineItems(input.lineItems)
+    : await db.query.proposalLineItems.findMany({
+      where: eq(proposalLineItems.proposalId, proposalId),
+      orderBy: proposalLineItems.sortOrder,
+    });
+  const totalCents = agentIncludedPackageTotalCents(lineItems);
+  const packageComplete = agentPackageHasIncludedPricedItem(lineItems);
+  const validUntil = Object.prototype.hasOwnProperty.call(input, "validUntil")
+    ? cleanAgentText(input.validUntil)
+    : existingProposal.validUntil;
+  const title = Object.prototype.hasOwnProperty.call(input, "title")
+    ? cleanAgentText(input.title)
+    : existingProposal.title;
+  if (!title) throw new Error("Proposal title is required.");
+  const proposalPackageTemplateId = cleanAgentText(input.proposalPackageTemplateId);
+  const proposalPackageTemplate = await activeProposalPackageTemplate(proposalPackageTemplateId);
+  const packageName = proposalPackageTemplate
+    ? (cleanAgentText(input.packageName) ?? proposalPackageTemplate.subject ?? proposalPackageTemplate.name)
+    : Object.prototype.hasOwnProperty.call(input, "packageName") ? cleanAgentText(input.packageName) : existingProposal.packageName;
+  const scopeSummary = proposalPackageTemplate
+    ? (cleanAgentText(input.scopeSummary) ?? await renderProposalPackageTemplateBody({
+        templateBody: proposalPackageTemplate.body,
+        projectId,
+        proposalTitle: title,
+        packageName,
+        totalCents,
+      }))
+    : Object.prototype.hasOwnProperty.call(input, "scopeSummary") ? cleanAgentText(input.scopeSummary) : existingProposal.scopeSummary;
+  const hasContractTemplateInput = Object.prototype.hasOwnProperty.call(input, "contractTemplateId");
+  const contractTemplateId = hasContractTemplateInput ? cleanAgentText(input.contractTemplateId) : existingProposal.contractTemplateId;
+  const contractTemplate = await activeContractTemplate(contractTemplateId);
+  const contractTitle = Object.prototype.hasOwnProperty.call(input, "contractTitle")
+    ? cleanAgentText(input.contractTitle) ?? contractTemplate?.name ?? null
+    : contractTemplate?.name ?? existingProposal.contractTitle;
+  const contractBodyInput = Object.prototype.hasOwnProperty.call(input, "contractBody")
+    ? cleanAgentText(input.contractBody)
+    : undefined;
+  const contractBody = contractBodyInput ?? (
+    contractTemplate?.body
+      ? await renderContractTemplateBody({
+          templateBody: contractTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+          scopeSummary,
+        })
+      : Object.prototype.hasOwnProperty.call(input, "contractBody") ? null : existingProposal.contractBody
+  );
+  const contractStatus = inferredContractStatus({
+    existingStatus: existingProposal.contractStatus,
+    contractBody,
+    contractTemplateId,
+  });
+  const status = proposalStatusFromWorkflow({
+    currentStatus: existingProposal.status,
+    contractStatus,
+    invoiceStatus: existingProposal.invoiceStatus,
+    validUntil,
+    packageComplete,
+  });
+
+  await db.update(proposals).set({
+    title,
+    status,
+    packageName,
+    totalCents: totalCents || null,
+    validUntil,
+    scopeSummary,
+    contractStatus,
+    contractTemplateId,
+    contractTitle,
+    contractBody,
+    sourceType,
+    sourceId,
+    updatedAt: now,
+  }).where(eq(proposals.id, proposalId));
+
+  if (Array.isArray(input.lineItems)) {
+    await replaceAgentProposalLineItems(proposalId, lineItems, now);
+  }
+
+  const missingFields = proposalMissingFields({ packageComplete, contractStatus, invoiceStatus: existingProposal.invoiceStatus });
+
+  await logActivity({
+    projectId,
+    action: "proposal.updated_by_agent",
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    metadata: {
+      proposalId,
+      title,
+      status,
+      totalCents,
+      missingFields,
+      sourceType,
+      sourceId,
+      proposalPackageTemplateId: proposalPackageTemplate?.id,
+      contractTemplateId: contractTemplate?.id,
+    },
+  });
+
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${proposalId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
+
+  return { proposalId, projectId, status, totalCents, missingFields };
 }
 
 export async function createProposalAction(formData: FormData) {
@@ -712,20 +2347,51 @@ export async function updateProposalFromForm(formData: FormData) {
 
   const existing = await db.query.proposals.findFirst({ where: eq(proposals.id, id) });
   if (!existing) throw new Error("Proposal not found.");
+  if (existing.projectId !== projectId) throw new Error("Proposal does not belong to this project.");
+  if (proposalIsAcceptedOrSigned(existing)) throw new Error("Accepted or signed proposals cannot be edited.");
 
   const validUntil = nullableTextValue(formData, "validUntil");
+  const proposalPackageTemplateId = nullableTextValue(formData, "proposalPackageTemplateId");
+  const proposalPackageTemplate = proposalPackageTemplateId
+    ? await db.query.templates.findFirst({ where: and(eq(templates.id, proposalPackageTemplateId), eq(templates.type, "proposal_package"), eq(templates.status, "active")) })
+    : null;
+  if (proposalPackageTemplateId && !proposalPackageTemplate) throw new Error("Proposal package template not found.");
   const contractTemplateId = nullableTextValue(formData, "contractTemplateId");
   const contractTemplate = contractTemplateId
     ? await db.query.templates.findFirst({ where: and(eq(templates.id, contractTemplateId), eq(templates.type, "contract")) })
     : null;
-  const contractBody = nullableTextValue(formData, "contractBody") ?? contractTemplate?.body ?? null;
+  const totalCents = await replaceProposalLineItems(id, formData);
+  const packageName = nullableTextValue(formData, "packageName") ?? proposalPackageTemplate?.subject ?? proposalPackageTemplate?.name ?? null;
+  const scopeSummary = nullableTextValue(formData, "scopeSummary") ?? (
+    proposalPackageTemplate?.body
+      ? await renderProposalPackageTemplateBody({
+          templateBody: proposalPackageTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+        })
+      : null
+  );
+  const contractBodyInput = nullableTextValue(formData, "contractBody");
+  const contractBody = contractBodyInput ?? (
+    contractTemplate?.body
+      ? await renderContractTemplateBody({
+          templateBody: contractTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+          scopeSummary,
+        })
+      : null
+  );
   const contractTitle = nullableTextValue(formData, "contractTitle") ?? contractTemplate?.name ?? null;
   const contractStatus = inferredContractStatus({
     existingStatus: existing.contractStatus,
     contractBody,
     contractTemplateId,
   });
-  const totalCents = await replaceProposalLineItems(id, formData);
   const status = proposalStatusFromWorkflow({
     currentStatus: existing.status,
     contractStatus,
@@ -737,10 +2403,10 @@ export async function updateProposalFromForm(formData: FormData) {
   await db.update(proposals).set({
     title,
     status,
-    packageName: nullableTextValue(formData, "packageName"),
+    packageName,
     totalCents: totalCents || null,
     validUntil,
-    scopeSummary: nullableTextValue(formData, "scopeSummary"),
+    scopeSummary,
     contractStatus,
     contractTemplateId,
     contractTitle,
@@ -748,10 +2414,10 @@ export async function updateProposalFromForm(formData: FormData) {
     updatedAt: new Date().toISOString(),
   }).where(eq(proposals.id, id));
 
-  await logActivity({ projectId, action: "proposal.updated", metadata: { id, status } });
-  revalidatePath("/proposals");
-  revalidatePath(`/proposals/${id}`);
-  revalidatePath(`/projects/${projectId}`);
+  await logActivity({ projectId, action: "proposal.updated", metadata: { id, status, proposalPackageTemplateId: proposalPackageTemplate?.id } });
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${id}`);
+  safeRevalidatePath(`/projects/${projectId}`);
 
   return { proposalId: id, projectId };
 }
@@ -768,6 +2434,24 @@ export async function updateProposalWorkflowFromForm(formData: FormData) {
   const projectId = textValue(formData, "projectId");
   const workflowAction = textValue(formData, "workflowAction");
   if (!id || !projectId || !workflowAction) throw new Error("Proposal workflow action is required.");
+
+  const existing = await db.query.proposals.findFirst({ where: eq(proposals.id, id) });
+  if (!existing) throw new Error("Proposal not found.");
+  if (existing.projectId !== projectId) throw new Error("Proposal does not belong to this project.");
+  if (proposalIsAcceptedOrSigned(existing) && workflowAction === "reset_draft") {
+    throw new Error("Accepted or signed proposals cannot be moved back to draft.");
+  }
+
+  if (workflowAction === "create_invoice") {
+    const invoiceFormData = new FormData();
+    invoiceFormData.set("proposalId", id);
+    invoiceFormData.set("projectId", projectId);
+    invoiceFormData.set("status", "draft");
+    invoiceFormData.set("retainerPercent", "30");
+    invoiceFormData.set("installmentCount", "1");
+    const result = await createInvoiceFromForm(invoiceFormData);
+    return { proposalId: id, projectId, invoiceId: result.invoiceId };
+  }
 
   const now = new Date().toISOString();
   const patch: Partial<typeof proposals.$inferInsert> = { updatedAt: now };
@@ -793,9 +2477,9 @@ export async function updateProposalWorkflowFromForm(formData: FormData) {
   await db.update(proposals).set(patch).where(eq(proposals.id, id));
   await logActivity({ projectId, action: "proposal.workflow_updated", metadata: { id, workflowAction } });
 
-  revalidatePath("/proposals");
-  revalidatePath(`/proposals/${id}`);
-  revalidatePath(`/projects/${projectId}`);
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${id}`);
+  safeRevalidatePath(`/projects/${projectId}`);
 
   return { proposalId: id, projectId };
 }
@@ -822,6 +2506,12 @@ export async function createInvoiceFromForm(formData: FormData) {
   if (proposal?.projectId && formProjectId && formProjectId !== proposal.projectId) {
     throw new Error("Selected project does not match the selected proposal.");
   }
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project) throw new Error("Project not found.");
+  if (proposalId) {
+    const existingInvoice = await db.query.invoices.findFirst({ where: eq(invoices.proposalId, proposalId) });
+    if (existingInvoice) throw new Error("An invoice already exists for this proposal.");
+  }
 
   const settings = await getAppSettings();
   const enabledMethods = enabledPaymentMethods(settings.paymentMethods);
@@ -838,9 +2528,17 @@ export async function createInvoiceFromForm(formData: FormData) {
   const id = crypto.randomUUID();
   const totalCents = toCents(formData.get("total")) || proposal?.totalCents || dbIncludedPackageTotalCents(proposalItems);
   if (totalCents <= 0) throw new Error("Invoice total is required.");
-  const retainerCents = toCents(formData.get("retainerAmount")) || Math.round(totalCents * (formNumber(formData, "retainerPercent", 30) / 100));
-  const installmentCount = Math.max(formNumber(formData, "installmentCount", 1), 0);
-  const remainingCents = Math.max(totalCents - retainerCents, 0);
+  const clientPaysCardFees = acceptedKeys.includes("stripe") && settings.paymentMethods.stripe.passFees;
+  const cardFeePolicy = clientPaysCardFees ? "client_pays" : "studio_absorbs";
+  const cardFeePercentBps = clientPaysCardFees ? DEFAULT_CARD_FEE_PERCENT_BPS : 0;
+  const cardFeeFixedCents = clientPaysCardFees ? DEFAULT_CARD_FEE_FIXED_CENTS : 0;
+  const cardFeeAmountCents = calculateCardFeeAmountCents({
+    subtotalCents: totalCents,
+    percentBps: cardFeePercentBps,
+    fixedCents: cardFeeFixedCents,
+  });
+  const retainerAmountCents = toCents(formData.get("retainerAmount"));
+  const installmentCount = formNumber(formData, "installmentCount", 1);
   const invoiceNumber = textValue(formData, "invoiceNumber") || `INV-${todayKey()}-${id.slice(0, 6).toUpperCase()}`;
   const dueDate = nullableTextValue(formData, "dueDate");
 
@@ -855,66 +2553,269 @@ export async function createInvoiceFromForm(formData: FormData) {
     dueDate,
     paymentNotes: nullableTextValue(formData, "paymentNotes") ?? defaultPaymentNotes(acceptedMethods),
     acceptedPaymentMethodsJson: JSON.stringify(acceptedMethods),
-    stripePaymentLink: null,
+    cardFeePolicy,
+    cardFeePercentBps,
+    cardFeeFixedCents,
+    cardFeeAmountCents,
+    stripePaymentLink: nullableTextValue(formData, "stripePaymentLink"),
     zelleInfo: acceptedKeys.includes("zelle") ? settings.paymentMethods.zelle.instructions || null : null,
     venmoInfo: acceptedKeys.includes("venmo") ? settings.paymentMethods.venmo.instructions || null : null,
     createdAt: now,
     updatedAt: now,
   });
 
-  if (retainerCents > 0) {
-    await db.insert(invoicePayments).values({
+  const scheduleRows = normalizedInvoiceScheduleRows({
+    invoiceId: id,
+    totalCents,
+    retainerAmountCents,
+    retainerPercent: formNumber(formData, "retainerPercent", 30),
+    installmentCount,
+    dueDate,
+    now,
+  });
+  if (scheduleRows.length) {
+    await db.insert(invoicePayments).values(scheduleRows.map((row) => ({
       id: crypto.randomUUID(),
-      invoiceId: id,
-      label: "Retainer",
-      amountCents: retainerCents,
-      dueDate,
-      status: "pending",
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
-
-  if (remainingCents > 0 && installmentCount > 0) {
-    const baseAmount = Math.floor(remainingCents / installmentCount);
-    let allocated = 0;
-    for (let index = 0; index < installmentCount; index += 1) {
-      const isLast = index === installmentCount - 1;
-      const amountCents = isLast ? remainingCents - allocated : baseAmount;
-      allocated += amountCents;
-      await db.insert(invoicePayments).values({
-        id: crypto.randomUUID(),
-        invoiceId: id,
-        label: installmentCount === 1 ? "Final payment" : `Payment ${index + 1}`,
-        amountCents,
-        dueDate: addDays(dueDate, 30 * (index + 1)),
-        status: "pending",
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
+      ...row,
+    })));
   }
 
   if (proposalId) {
-    await db.update(proposals).set({
+    const proposalPatch: Partial<typeof proposals.$inferInsert> = {
       invoiceStatus: "created",
-      status: proposalStatusFromWorkflow({
+      updatedAt: now,
+    };
+    if (!proposal || !proposalIsAcceptedOrSigned(proposal)) {
+      proposalPatch.status = proposalStatusFromWorkflow({
         currentStatus: proposal?.status,
         contractStatus: proposal?.contractStatus ?? "not_started",
         invoiceStatus: "created",
         validUntil: proposal?.validUntil,
         packageComplete: dbLineItemsHaveIncludedPricedItem(proposalItems),
-      }),
-      updatedAt: now,
-    }).where(eq(proposals.id, proposalId));
+      });
+    }
+
+    await db.update(proposals).set(proposalPatch).where(eq(proposals.id, proposalId));
   }
 
-  await logActivity({ projectId, action: "invoice.created", metadata: { invoiceNumber, totalCents, proposalId } });
-  revalidatePath("/invoices");
-  revalidatePath("/proposals");
-  if (proposalId) revalidatePath(`/proposals/${proposalId}`);
-  revalidatePath(`/projects/${projectId}`);
+  await logActivity({
+    projectId,
+    action: "invoice.created",
+    metadata: {
+      invoiceNumber,
+      totalCents,
+      proposalId,
+      cardFeePolicy,
+      cardFeeAmountCents,
+      clientPayableCents: totalCents + cardFeeAmountCents,
+    },
+  });
+  safeRevalidatePath("/invoices");
+  safeRevalidatePath("/proposals");
+  if (proposalId) safeRevalidatePath(`/proposals/${proposalId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
   return { invoiceId: id, projectId, proposalId };
+}
+
+export async function createInvoiceFromAgent(projectId: string, input: AgentInvoiceInput) {
+  return requireTylerApprovalForAgentFinance("Invoices and payment schedules require Tyler approval before creation or changes. Agents may draft invoice recommendations as tasks, but cannot create invoices directly.");
+
+  const sourceType = cleanAgentText(input.sourceType);
+  const sourceId = cleanAgentText(input.sourceId);
+  await assertAgentProjectSource(projectId, sourceType, sourceId);
+
+  const formData = new FormData();
+  formData.set("projectId", projectId);
+  if (input.proposalId) formData.set("proposalId", String(input.proposalId));
+  if (input.invoiceNumber) formData.set("invoiceNumber", String(input.invoiceNumber));
+  if (input.status) formData.set("status", String(input.status));
+  const agentInvoiceTotalCents = input.totalCents ?? 0;
+  const agentInvoiceRetainerAmountCents = input.retainerAmountCents ?? 0;
+  if (agentInvoiceTotalCents > 0) formData.set("total", centsToFormMoney(agentInvoiceTotalCents));
+  if (agentInvoiceRetainerAmountCents > 0) {
+    formData.set("retainerAmount", centsToFormMoney(agentInvoiceRetainerAmountCents));
+  }
+  if (typeof input.retainerPercent === "number") formData.set("retainerPercent", String(input.retainerPercent));
+  if (typeof input.installmentCount === "number") formData.set("installmentCount", String(input.installmentCount));
+  if (input.dueDate) formData.set("dueDate", String(input.dueDate));
+  if (input.paymentNotes) formData.set("paymentNotes", String(input.paymentNotes));
+  if (input.stripePaymentLink) formData.set("stripePaymentLink", String(input.stripePaymentLink));
+  for (const method of input.acceptedPaymentMethods ?? []) {
+    formData.append("acceptedPaymentMethod", method);
+  }
+
+  const result = await createInvoiceFromForm(formData);
+  const invoice = await db.query.invoices.findFirst({ where: eq(invoices.id, result.invoiceId) });
+  if (!invoice) throw new Error("Invoice creation failed.");
+  const createdInvoice = invoice!;
+
+  await db.update(invoices).set({
+    sourceType,
+    sourceId,
+    updatedAt: new Date().toISOString(),
+  }).where(eq(invoices.id, result.invoiceId));
+
+  await db.update(activityLogs).set({
+    action: "invoice.created_by_agent",
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    metadata: JSON.stringify({
+      invoiceId: result.invoiceId,
+      invoiceNumber: createdInvoice.invoiceNumber,
+      totalCents: createdInvoice.totalCents,
+      proposalId: result.proposalId,
+      cardFeePolicy: createdInvoice.cardFeePolicy,
+      cardFeeAmountCents: createdInvoice.cardFeeAmountCents,
+      clientPayableCents: createdInvoice.totalCents + createdInvoice.cardFeeAmountCents,
+      stripePaymentLink: createdInvoice.stripePaymentLink,
+      sourceType,
+      sourceId,
+    }),
+  }).where(and(
+    eq(activityLogs.projectId, result.projectId),
+    eq(activityLogs.action, "invoice.created"),
+    like(activityLogs.metadata, `%${createdInvoice.invoiceNumber}%`),
+  ));
+
+  return {
+    invoiceId: result.invoiceId,
+    projectId: result.projectId,
+    proposalId: result.proposalId,
+    invoiceNumber: createdInvoice.invoiceNumber,
+    status: createdInvoice.status,
+    totalCents: createdInvoice.totalCents,
+    cardFeePolicy: createdInvoice.cardFeePolicy,
+    cardFeeAmountCents: createdInvoice.cardFeeAmountCents,
+    clientPayableCents: createdInvoice.totalCents + createdInvoice.cardFeeAmountCents,
+    stripePaymentLink: createdInvoice.stripePaymentLink,
+    sourceType,
+    sourceId,
+  };
+}
+
+export async function updateInvoiceFromAgent(projectId: string, invoiceId: string, input: AgentInvoiceUpdateInput) {
+  return requireTylerApprovalForAgentFinance("Invoices and payment schedules require Tyler approval before creation or changes. Agents may draft invoice recommendations as tasks, but cannot update invoices directly.");
+
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project) throw new Error("Project not found.");
+
+  const invoice = (await db.query.invoices.findFirst({
+    where: and(eq(invoices.id, invoiceId), eq(invoices.projectId, projectId)),
+  }))!;
+  if (!invoice) throw new Error("Invoice not found for this project.");
+
+  const payments = await db.query.invoicePayments.findMany({ where: eq(invoicePayments.invoiceId, invoiceId) });
+  if (invoice.amountPaidCents > 0 || payments.some((payment) => payment.status === "paid" || payment.paidAmountCents > 0)) {
+    throw new Error("Invoices with recorded payments cannot be updated by agent.");
+  }
+
+  const nextStatus = cleanAgentText(input.status) ?? invoice.status;
+  if (nextStatus === "paid" || nextStatus === "partially_paid") {
+    throw new Error("Use the invoice payment endpoint to record paid invoice state.");
+  }
+
+  const sourceType = cleanAgentText(input.sourceType) ?? invoice.sourceType;
+  const sourceId = cleanAgentText(input.sourceId) ?? invoice.sourceId;
+  await assertAgentProjectSource(projectId, sourceType, sourceId);
+
+  const agentUpdatedInvoiceTotalCents = input.totalCents ?? 0;
+  const totalCents = agentUpdatedInvoiceTotalCents > 0 ? Math.round(agentUpdatedInvoiceTotalCents) : invoice.totalCents;
+  if (totalCents <= 0) throw new Error("Invoice total is required.");
+
+  const agentAcceptedPaymentMethods = input.acceptedPaymentMethods ?? [];
+  const acceptedPaymentMethods = Array.isArray(agentAcceptedPaymentMethods) && agentAcceptedPaymentMethods.length
+    ? agentAcceptedPaymentMethods
+    : parseAcceptedPaymentMethodKeys(invoice.acceptedPaymentMethodsJson);
+  const paymentSettings = await agentInvoicePaymentSettings(acceptedPaymentMethods);
+  const cardFeeAmountCents = calculateCardFeeAmountCents({
+    subtotalCents: totalCents,
+    percentBps: paymentSettings.cardFeePercentBps,
+    fixedCents: paymentSettings.cardFeeFixedCents,
+  });
+  const dueDate = Object.prototype.hasOwnProperty.call(input, "dueDate") ? cleanAgentText(input.dueDate) : invoice.dueDate;
+  const now = new Date().toISOString();
+  const shouldRebuildSchedule = (
+    Object.prototype.hasOwnProperty.call(input, "totalCents")
+    || Object.prototype.hasOwnProperty.call(input, "retainerAmountCents")
+    || Object.prototype.hasOwnProperty.call(input, "retainerPercent")
+    || Object.prototype.hasOwnProperty.call(input, "installmentCount")
+    || Object.prototype.hasOwnProperty.call(input, "dueDate")
+  );
+
+  await db.update(invoices).set({
+    status: nextStatus,
+    totalCents,
+    dueDate,
+    paymentNotes: Object.prototype.hasOwnProperty.call(input, "paymentNotes") ? cleanAgentText(input.paymentNotes) : invoice.paymentNotes,
+    acceptedPaymentMethodsJson: JSON.stringify(paymentSettings.acceptedMethods),
+    cardFeePolicy: paymentSettings.cardFeePolicy,
+    cardFeePercentBps: paymentSettings.cardFeePercentBps,
+    cardFeeFixedCents: paymentSettings.cardFeeFixedCents,
+    cardFeeAmountCents,
+    stripePaymentLink: Object.prototype.hasOwnProperty.call(input, "stripePaymentLink") ? cleanAgentText(input.stripePaymentLink) : invoice.stripePaymentLink,
+    zelleInfo: paymentSettings.acceptedKeys.includes("zelle") ? paymentSettings.settings.paymentMethods.zelle.instructions || null : null,
+    venmoInfo: paymentSettings.acceptedKeys.includes("venmo") ? paymentSettings.settings.paymentMethods.venmo.instructions || null : null,
+    sourceType,
+    sourceId,
+    sentAt: nextStatus === "sent" ? invoice.sentAt ?? now : nextStatus === "draft" ? null : invoice.sentAt,
+    paidAt: null,
+    updatedAt: now,
+  }).where(eq(invoices.id, invoiceId));
+
+  if (shouldRebuildSchedule) {
+    await replacePendingInvoiceSchedule({
+      invoiceId,
+      totalCents,
+      retainerAmountCents: input.retainerAmountCents,
+      retainerPercent: input.retainerPercent,
+      installmentCount: input.installmentCount,
+      dueDate,
+      now,
+    });
+  }
+
+  await logActivity({
+    projectId,
+    action: "invoice.updated_by_agent",
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    metadata: {
+      invoiceId,
+      invoiceNumber: invoice.invoiceNumber,
+      status: nextStatus,
+      totalCents,
+      proposalId: invoice.proposalId,
+      cardFeePolicy: paymentSettings.cardFeePolicy,
+      cardFeeAmountCents,
+      clientPayableCents: totalCents + cardFeeAmountCents,
+      stripePaymentLink: Object.prototype.hasOwnProperty.call(input, "stripePaymentLink") ? cleanAgentText(input.stripePaymentLink) : invoice.stripePaymentLink,
+      sourceType,
+      sourceId,
+    },
+  });
+
+  safeRevalidatePath("/invoices");
+  safeRevalidatePath(`/invoices/${invoiceId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
+  if (invoice.proposalId) safeRevalidatePath(`/proposals/${invoice.proposalId}`);
+
+  const updatedInvoice = (await db.query.invoices.findFirst({ where: eq(invoices.id, invoiceId) }))!;
+  if (!updatedInvoice) throw new Error("Invoice update failed.");
+
+  return {
+    invoiceId,
+    projectId,
+    proposalId: updatedInvoice.proposalId,
+    invoiceNumber: updatedInvoice.invoiceNumber,
+    status: updatedInvoice.status,
+    totalCents: updatedInvoice.totalCents,
+    cardFeePolicy: updatedInvoice.cardFeePolicy,
+    cardFeeAmountCents: updatedInvoice.cardFeeAmountCents,
+    clientPayableCents: updatedInvoice.totalCents + updatedInvoice.cardFeeAmountCents,
+    stripePaymentLink: updatedInvoice.stripePaymentLink,
+    sourceType: updatedInvoice.sourceType,
+    sourceId: updatedInvoice.sourceId,
+  };
 }
 
 export async function createInvoiceAction(formData: FormData) {
@@ -929,17 +2830,23 @@ export async function updateInvoiceStatusFromForm(formData: FormData) {
   const projectId = textValue(formData, "projectId");
   const status = textValue(formData, "status") || "draft";
   if (!invoiceId || !projectId) throw new Error("Invoice and project are required.");
+  const invoice = (await db.query.invoices.findFirst({ where: eq(invoices.id, invoiceId) }))!;
+  if (!invoice) throw new Error("Invoice not found.");
+  if (invoice.projectId !== projectId) throw new Error("Invoice does not belong to this project.");
+  if (status === "paid" || status === "partially_paid") {
+    throw new Error("Use the invoice payment endpoint to record paid invoice state.");
+  }
 
   await db.update(invoices).set({
     status,
     sentAt: status === "sent" ? new Date().toISOString() : null,
-    paidAt: status === "paid" ? new Date().toISOString() : null,
+    paidAt: null,
     updatedAt: new Date().toISOString(),
   }).where(eq(invoices.id, invoiceId));
 
   await logActivity({ projectId, action: "invoice.status_updated", metadata: { invoiceId, status } });
-  revalidatePath("/invoices");
-  revalidatePath(`/invoices/${invoiceId}`);
+  safeRevalidatePath("/invoices");
+  safeRevalidatePath(`/invoices/${invoiceId}`);
   return { invoiceId, projectId };
 }
 
@@ -950,17 +2857,180 @@ export async function updateInvoiceStatusAction(formData: FormData) {
   redirect(`/invoices/${invoiceId}`);
 }
 
-export async function updateInvoicePaymentFromForm(formData: FormData) {
+export async function logInvoiceReminderFromForm(
+  formData: FormData,
+  activityOptions: {
+    action?: string;
+    actorType?: "admin" | "client" | "system" | "agent";
+    actorName?: string | null;
+    metadata?: Record<string, unknown>;
+  } = {},
+) {
+  const invoiceId = textValue(formData, "invoiceId");
+  const projectId = textValue(formData, "projectId");
+  const paymentId = nullableTextValue(formData, "paymentId");
+  const templateId = nullableTextValue(formData, "templateId");
+  const channel = nullableTextValue(formData, "channel") ?? "manual";
+  let note = nullableTextValue(formData, "note");
+  if (!invoiceId || !projectId) throw new Error("Invoice and project are required.");
+  const invoice = await db.query.invoices.findFirst({ where: eq(invoices.id, invoiceId) });
+  if (!invoice) throw new Error("Invoice not found.");
+  if (invoice.projectId !== projectId) throw new Error("Invoice does not belong to this project.");
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project) throw new Error("Project not found.");
+  const primaryRows = await db
+    .select({ client: clients })
+    .from(projectParticipants)
+    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(eq(projectParticipants.projectId, projectId))
+    .orderBy(desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt));
+  const primaryClient = primaryRows[0]?.client ?? null;
+  let payment: typeof invoicePayments.$inferSelect | null = null;
+  if (paymentId) {
+    payment = await db.query.invoicePayments.findFirst({ where: eq(invoicePayments.id, paymentId) }) ?? null;
+    if (!payment || payment.invoiceId !== invoiceId) throw new Error("Payment does not belong to this invoice.");
+  }
+  const template = templateId
+    ? await db.query.templates.findFirst({ where: and(eq(templates.id, templateId), eq(templates.type, "reminder"), eq(templates.status, "active")) })
+    : null;
+  if (templateId && !template) throw new Error("Reminder template not found.");
+  if (!note && template) {
+    note = await renderInvoiceReminderTemplate({
+      body: template.body,
+      invoice,
+      project,
+      client: primaryClient,
+      payment,
+    });
+  }
+
+  const activityLogId = await logActivity({
+    projectId,
+    action: activityOptions.action ?? "invoice.reminder_logged",
+    actorType: activityOptions.actorType,
+    actorName: activityOptions.actorName,
+    metadata: {
+      invoiceId,
+      invoiceNumber: invoice.invoiceNumber,
+      paymentId,
+      channel,
+      note,
+      templateId: template?.id,
+      templateName: template?.name,
+      ...activityOptions.metadata,
+    },
+  });
+
+  safeRevalidatePath("/invoices");
+  safeRevalidatePath(`/invoices/${invoiceId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
+
+  return { invoiceId, projectId, activityLogId };
+}
+
+export async function logInvoiceReminderFromAgent(invoiceId: string, input: AgentInvoiceReminderInput) {
+  const invoice = await db.query.invoices.findFirst({ where: eq(invoices.id, invoiceId) });
+  if (!invoice) throw new Error("Invoice not found.");
+
+  const paymentId = cleanAgentText(input.paymentId);
+  const sourceType = cleanAgentText(input.sourceType);
+  const sourceId = cleanAgentText(input.sourceId);
+  await assertAgentProjectSource(invoice.projectId, sourceType, sourceId);
+
+  const formData = new FormData();
+  formData.set("invoiceId", invoiceId);
+  formData.set("projectId", invoice.projectId);
+  if (paymentId) formData.set("paymentId", paymentId);
+  formData.set("channel", cleanAgentText(input.channel) ?? "agent");
+  if (input.note) formData.set("note", input.note);
+
+  const result = await logInvoiceReminderFromForm(formData, {
+    action: "invoice.reminder_logged_by_agent",
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    metadata: {
+      sourceType,
+      sourceId,
+    },
+  });
+
+  return {
+    ...result,
+    paymentId,
+    channel: cleanAgentText(input.channel) ?? "agent",
+    sourceType,
+    sourceId,
+  };
+}
+
+export async function updateInvoicePaymentFromForm(
+  formData: FormData,
+  activityOptions: {
+    action?: string;
+    actorType?: "admin" | "client" | "system" | "agent";
+    actorName?: string | null;
+    metadata?: Record<string, unknown>;
+  } = {},
+) {
   const invoiceId = textValue(formData, "invoiceId");
   const projectId = textValue(formData, "projectId");
   const paymentId = textValue(formData, "paymentId");
   const status = textValue(formData, "status") || "pending";
   if (!invoiceId || !projectId || !paymentId) throw new Error("Payment is required.");
+  const payment = await db.query.invoicePayments.findFirst({ where: eq(invoicePayments.id, paymentId) });
+  if (!payment || payment.invoiceId !== invoiceId) throw new Error("Payment not found.");
+  const invoice = await db.query.invoices.findFirst({ where: eq(invoices.id, invoiceId) });
+  if (!invoice) throw new Error("Invoice not found.");
+  if (invoice.projectId !== projectId) throw new Error("Invoice does not belong to this project.");
+
+  const externalPaymentId = nullableTextValue(formData, "externalPaymentId");
+  const hasStripeCheckoutUrl = formData.has("stripeCheckoutUrl");
+  const hasStripeCheckoutSessionId = formData.has("stripeCheckoutSessionId");
+  const hasStripeCheckoutStatus = formData.has("stripeCheckoutStatus");
+  const stripeCheckoutUrl = hasStripeCheckoutUrl ? nullableTextValue(formData, "stripeCheckoutUrl") : payment.stripeCheckoutUrl;
+  const stripeCheckoutSessionId = hasStripeCheckoutSessionId ? nullableTextValue(formData, "stripeCheckoutSessionId") : payment.stripeCheckoutSessionId;
+  const stripeCheckoutStatus = hasStripeCheckoutStatus || hasStripeCheckoutUrl
+    ? invoicePaymentCheckoutStatus(nullableTextValue(formData, "stripeCheckoutStatus"), stripeCheckoutUrl)
+    : payment.stripeCheckoutStatus;
+  if (externalPaymentId) {
+    const existingExternalPayment = await db.query.invoicePayments.findFirst({
+      where: eq(invoicePayments.externalPaymentId, externalPaymentId),
+    });
+    if (existingExternalPayment && existingExternalPayment.id !== paymentId) {
+      throw new Error("External payment is already linked to another invoice payment.");
+    }
+    const existingSchedulerPayment = await db.query.schedulerBookings.findFirst({
+      where: eq(schedulerBookings.externalPaymentId, externalPaymentId),
+    });
+    if (existingSchedulerPayment) {
+      throw new Error("External payment is already linked to a scheduler booking.");
+    }
+  }
+
+  const paymentMethod = nullableTextValue(formData, "paymentMethod");
+  const paidAmountCents = status === "paid"
+    ? toCents(formData.get("paidAmount")) || payment.amountCents
+    : 0;
+  if (paidAmountCents > payment.amountCents) {
+    throw new Error("Paid amount cannot exceed scheduled payment amount.");
+  }
+  const ledgerAmounts = invoicePaymentLedgerAmounts({
+    invoice,
+    paymentMethod,
+    paidAmountCents,
+  });
+
+  const paidAt = status === "paid" ? nullableTextValue(formData, "paidAt") ?? new Date().toISOString() : null;
 
   await db.update(invoicePayments).set({
     status,
-    paidAt: status === "paid" ? new Date().toISOString() : null,
-    paymentMethod: nullableTextValue(formData, "paymentMethod"),
+    paidAt,
+    paymentMethod,
+    ...ledgerAmounts,
+    externalPaymentId,
+    stripeCheckoutUrl,
+    stripeCheckoutSessionId,
+    stripeCheckoutStatus,
     notes: nullableTextValue(formData, "notes"),
     updatedAt: new Date().toISOString(),
   }).where(eq(invoicePayments.id, paymentId));
@@ -969,22 +3039,145 @@ export async function updateInvoicePaymentFromForm(formData: FormData) {
   const paidTotal = payments.reduce((sum, payment) => {
     const isThisPayment = payment.id === paymentId;
     const paymentStatus = isThisPayment ? status : payment.status;
-    return paymentStatus === "paid" ? sum + payment.amountCents : sum;
+    const servicePaidCents = isThisPayment ? ledgerAmounts.paidAmountCents : payment.paidAmountCents;
+    return paymentStatus === "paid" ? sum + servicePaidCents : sum;
   }, 0);
-  const invoice = await db.query.invoices.findFirst({ where: eq(invoices.id, invoiceId) });
-  const nextStatus = invoice && paidTotal >= invoice.totalCents ? "paid" : paidTotal > 0 ? "partially_paid" : invoice?.status ?? "draft";
+  const nextStatus = reconciledInvoicePaymentStatus(invoice, paidTotal);
+  const invoicePaidAt = payments
+    .filter((payment) => payment.status === "paid" && payment.paidAt)
+    .map((payment) => payment.paidAt as string)
+    .sort()
+    .at(-1) ?? paidAt;
 
   await db.update(invoices).set({
     amountPaidCents: paidTotal,
     status: nextStatus,
-    paidAt: nextStatus === "paid" ? new Date().toISOString() : null,
+    paidAt: nextStatus === "paid" ? invoicePaidAt : null,
     updatedAt: new Date().toISOString(),
   }).where(eq(invoices.id, invoiceId));
 
-  await logActivity({ projectId, action: "invoice.payment_updated", metadata: { invoiceId, paymentId, status } });
-  revalidatePath("/invoices");
-  revalidatePath(`/invoices/${invoiceId}`);
+  await logActivity({
+    projectId,
+    action: activityOptions.action ?? "invoice.payment_updated",
+    actorType: activityOptions.actorType,
+    actorName: activityOptions.actorName,
+    metadata: {
+      invoiceId,
+      paymentId,
+      status,
+      paymentMethod,
+      paidAt,
+      paidAmountCents: ledgerAmounts.paidAmountCents,
+      clientFeeCents: ledgerAmounts.clientFeeCents,
+      processingFeeCents: ledgerAmounts.processingFeeCents,
+      grossCollectedCents: ledgerAmounts.grossCollectedCents,
+      netDepositCents: ledgerAmounts.netDepositCents,
+      externalPaymentId,
+      stripeCheckoutUrl,
+      stripeCheckoutSessionId,
+      stripeCheckoutStatus,
+      ...activityOptions.metadata,
+    },
+  });
+  await autoAdvanceProjectStageForRetainerPayment({
+    projectId,
+    invoiceId,
+    paymentId,
+    paymentLabel: payment.label,
+    status,
+    paidAmountCents: ledgerAmounts.paidAmountCents,
+    actorType: activityOptions.actorType,
+    actorName: activityOptions.actorName,
+    metadata: activityOptions.metadata,
+  });
+  safeRevalidatePath("/invoices");
+  safeRevalidatePath(`/invoices/${invoiceId}`);
   return { invoiceId, projectId, paymentId };
+}
+
+export async function recordInvoicePaymentFromAgent(invoiceId: string, input: AgentInvoicePaymentInput) {
+  return requireTylerApprovalForAgentFinance("Payments require Tyler approval before creation or changes. Agents may draft payment reconciliation recommendations as tasks, but cannot record payments directly.");
+
+  return writeInvoicePaymentFromAgent(invoiceId, input, {
+    action: "invoice.payment_recorded_by_agent",
+    preserveExistingSource: false,
+  });
+}
+
+export async function updateInvoicePaymentFromAgent(invoiceId: string, input: AgentInvoicePaymentInput) {
+  return requireTylerApprovalForAgentFinance("Payments require Tyler approval before creation or changes. Agents may draft payment reconciliation recommendations as tasks, but cannot update payments directly.");
+
+  return writeInvoicePaymentFromAgent(invoiceId, input, {
+    action: "invoice.payment_updated_by_agent",
+    preserveExistingSource: true,
+  });
+}
+
+async function writeInvoicePaymentFromAgent(
+  invoiceId: string,
+  input: AgentInvoicePaymentInput,
+  options: { action: string; preserveExistingSource: boolean },
+) {
+  const invoice = await db.query.invoices.findFirst({ where: eq(invoices.id, invoiceId) });
+  if (!invoice) throw new Error("Invoice not found.");
+  const existingPayment = await db.query.invoicePayments.findFirst({
+    where: and(eq(invoicePayments.id, cleanAgentText(input.paymentId) ?? ""), eq(invoicePayments.invoiceId, invoiceId)),
+  });
+  const sourceType = cleanAgentText(input.sourceType) ?? (options.preserveExistingSource ? existingPayment?.sourceType ?? null : null);
+  const sourceId = cleanAgentText(input.sourceId) ?? (options.preserveExistingSource ? existingPayment?.sourceId ?? null : null);
+  await assertAgentProjectSource(invoice.projectId, sourceType, sourceId);
+
+  const formData = new FormData();
+  formData.set("invoiceId", invoiceId);
+  formData.set("projectId", invoice.projectId);
+  formData.set("paymentId", cleanAgentText(input.paymentId) ?? "");
+  formData.set("status", cleanAgentText(input.status) ?? "paid");
+  if (input.paymentMethod) formData.set("paymentMethod", input.paymentMethod);
+  if (input.paidAmountCents && input.paidAmountCents > 0) formData.set("paidAmount", centsToFormMoney(input.paidAmountCents));
+  if (input.paidAt) formData.set("paidAt", input.paidAt);
+  if (input.externalPaymentId) formData.set("externalPaymentId", input.externalPaymentId);
+  if (input.stripeCheckoutUrl) formData.set("stripeCheckoutUrl", input.stripeCheckoutUrl);
+  if (input.stripeCheckoutSessionId) formData.set("stripeCheckoutSessionId", input.stripeCheckoutSessionId);
+  if (input.stripeCheckoutStatus) formData.set("stripeCheckoutStatus", input.stripeCheckoutStatus);
+  if (input.notes) formData.set("notes", input.notes);
+
+  const result = await updateInvoicePaymentFromForm(formData, {
+    action: options.action,
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    metadata: {
+      sourceType,
+      sourceId,
+    },
+  });
+  const payment = (await db.query.invoicePayments.findFirst({ where: eq(invoicePayments.id, result.paymentId) }))!;
+  if (!payment) throw new Error("Payment not found.");
+
+  await db.update(invoicePayments).set({
+    sourceType,
+    sourceId,
+    updatedAt: new Date().toISOString(),
+  }).where(eq(invoicePayments.id, result.paymentId));
+
+  return {
+    invoiceId,
+    projectId: invoice.projectId,
+    paymentId: payment.id,
+    status: payment.status,
+    paymentMethod: payment.paymentMethod,
+    paidAt: payment.paidAt,
+    paidAmountCents: payment.paidAmountCents,
+    clientFeeCents: payment.clientFeeCents,
+    processingFeeCents: payment.processingFeeCents,
+    grossCollectedCents: payment.grossCollectedCents,
+    netDepositCents: payment.netDepositCents,
+    externalPaymentId: payment.externalPaymentId,
+    stripeCheckoutUrl: payment.stripeCheckoutUrl,
+    stripeCheckoutSessionId: payment.stripeCheckoutSessionId,
+    stripeCheckoutStatus: payment.stripeCheckoutStatus,
+    sourceType,
+    sourceId,
+  };
 }
 
 export async function updateInvoicePaymentAction(formData: FormData) {

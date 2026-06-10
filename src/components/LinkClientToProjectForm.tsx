@@ -1,5 +1,4 @@
 import type { Project } from "@/db/schema";
-import { linkClientToProjectAction } from "@/lib/crm";
 
 const inputClass =
   "w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none transition placeholder:text-[#aaa197] focus:border-[var(--accent)] focus:ring-2 focus:ring-[rgba(47,93,80,0.14)]";
@@ -12,8 +11,7 @@ export function LinkClientToProjectForm({
   projects: Project[];
 }) {
   return (
-    <form action={linkClientToProjectAction} className="grid gap-3 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm md:grid-cols-[1fr_190px_1fr_auto] md:items-end">
-      <input type="hidden" name="clientId" value={clientId} />
+    <form action={`/api/clients/${clientId}/links`} method="post" className="grid gap-3 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm md:grid-cols-[1fr_190px_1fr_auto] md:items-end">
       <label className="space-y-1.5 text-sm font-medium">
         Link to project
         <select name="projectId" className={inputClass} disabled={!projects.length}>

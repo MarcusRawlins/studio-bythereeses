@@ -1,6 +1,6 @@
 import { AppShell } from "@/components/AppShell";
-import { createTemplateAction, deleteTemplateAction, listTemplates, updateTemplateAction } from "@/lib/templates";
-import { CalendarClock, ClipboardList, Mail, Pencil, Plus, Trash2 } from "lucide-react";
+import { listTemplates } from "@/lib/templates";
+import { Bell, CalendarClock, ClipboardList, FileText, Mail, Pencil, Plus, Trash2 } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
@@ -8,8 +8,20 @@ const typeLabels: Record<string, string> = {
   email: "Email",
   questionnaire: "Questionnaire",
   contract: "Contract",
+  proposal_package: "Proposal package",
   workflow: "Workflow",
+  reminder: "Reminder",
 };
+
+const mergeFields = [
+  "{{client.name}}",
+  "{{client.email}}",
+  "{{project.name}}",
+  "{{project.eventDate}}",
+  "{{project.venueName}}",
+  "{{proposal.packageName}}",
+  "{{invoice.balanceDue}}",
+];
 
 function countByType(templates: Awaited<ReturnType<typeof listTemplates>>, type: string) {
   return templates.filter((template) => template.type === type).length;
@@ -29,7 +41,9 @@ function TemplateFields({
           <option value="email">Email</option>
           <option value="questionnaire">Questionnaire</option>
           <option value="contract">Contract</option>
+          <option value="proposal_package">Proposal package</option>
           <option value="workflow">Workflow rule</option>
+          <option value="reminder">Reminder</option>
         </select>
       </label>
       <label className="space-y-1.5 text-sm font-medium">
@@ -50,11 +64,11 @@ function TemplateFields({
       </label>
       <label className="space-y-1.5 text-sm font-medium md:col-span-2">
         Subject
-        <input name="subject" defaultValue={template?.subject ?? ""} placeholder="Only needed for email templates" className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+        <input name="subject" defaultValue={template?.subject ?? ""} placeholder="Email subject, proposal/package label, or reminder heading" className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
       </label>
       <label className="space-y-1.5 text-sm font-medium md:col-span-2">
         Body / Notes
-        <textarea name="body" defaultValue={template?.body ?? ""} rows={5} placeholder="Template content, questionnaire outline, or workflow description." className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+        <textarea name="body" defaultValue={template?.body ?? ""} rows={5} placeholder="Template content, package copy, questionnaire outline, reminder, or workflow description." className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
       </label>
     </div>
   );
@@ -69,11 +83,11 @@ export default async function TemplatesPage() {
         <header className="flex flex-col justify-between gap-4 border-b border-[var(--line)] pb-5 sm:flex-row sm:items-end">
           <div>
             <h1 className="brand-page-title text-4xl">Templates</h1>
-            <p className="mt-2 text-sm text-[var(--ink-muted)]">Email, questionnaire, and scheduled workflow templates for repeatable client communication.</p>
+            <p className="mt-2 text-sm text-[var(--ink-muted)]">Email, questionnaire, contract, proposal-package, reminder, and workflow templates for repeatable Studio operations.</p>
           </div>
         </header>
 
-        <section className="grid gap-4 lg:grid-cols-3">
+        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
           <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
             <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
               <Mail className="h-4 w-4" />
@@ -92,6 +106,22 @@ export default async function TemplatesPage() {
           </div>
           <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
             <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
+              <FileText className="h-4 w-4" />
+              Proposal packages
+            </div>
+            <div className="mt-3 text-3xl font-semibold">{countByType(templates, "proposal_package")}</div>
+            <p className="mt-2 text-xs text-[var(--ink-muted)]">Reusable collection copy, package framing, and proposal structure.</p>
+          </div>
+          <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
+            <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
+              <Bell className="h-4 w-4" />
+              Reminder templates
+            </div>
+            <div className="mt-3 text-3xl font-semibold">{countByType(templates, "reminder")}</div>
+            <p className="mt-2 text-xs text-[var(--ink-muted)]">Invoice, questionnaire, scheduler, and project follow-up prompts.</p>
+          </div>
+          <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
+            <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
               <CalendarClock className="h-4 w-4" />
               Workflow rules
             </div>
@@ -101,12 +131,24 @@ export default async function TemplatesPage() {
         </section>
 
         <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
+          <h2 className="text-lg font-semibold">Merge fields</h2>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {mergeFields.map((field) => (
+              <code key={field} className="rounded-sm border border-[var(--line)] bg-white px-2.5 py-1 text-xs font-semibold text-[var(--ink-muted)]">
+                {field}
+              </code>
+            ))}
+          </div>
+        </section>
+
+        <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
           <details>
             <summary className="flex cursor-pointer list-none items-center gap-2 text-lg font-semibold">
               <Plus className="h-4 w-4" />
               Create template
             </summary>
-            <form action={createTemplateAction} className="mt-5 rounded-md border border-[var(--line)] bg-[#faf7f1] p-4">
+            <form action="/api/templates" method="post" className="mt-5 rounded-md border border-[var(--line)] bg-[#faf7f1] p-4">
+              <input type="hidden" name="_action" value="create" />
               <TemplateFields />
               <button className="brand-primary-button mt-4 inline-flex items-center gap-2 rounded-sm px-4 py-2.5 transition">
                 <Plus className="h-4 w-4" />
@@ -134,14 +176,16 @@ export default async function TemplatesPage() {
                   </span>
                 </summary>
                 <div className="mt-4 rounded-md border border-[var(--line)] bg-[#faf7f1] p-4">
-                  <form action={updateTemplateAction}>
+                  <form action="/api/templates" method="post">
+                    <input type="hidden" name="_action" value="update" />
                     <TemplateFields template={template} />
                     <button className="brand-primary-button mt-4 inline-flex items-center gap-2 rounded-sm px-4 py-2.5 transition">
                       <Pencil className="h-4 w-4" />
                       Save template
                     </button>
                   </form>
-                  <form action={deleteTemplateAction} className="mt-3">
+                  <form action="/api/templates" method="post" className="mt-3">
+                    <input type="hidden" name="_action" value="delete" />
                     <input type="hidden" name="templateId" value={template.id} />
                     <button className="inline-flex items-center gap-2 rounded-sm border border-[var(--danger)] px-3 py-2 text-sm font-semibold text-[var(--danger)] transition hover:bg-[var(--danger)] hover:text-white">
                       <Trash2 className="h-4 w-4" />

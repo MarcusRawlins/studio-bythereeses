@@ -10,9 +10,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const { id } = await params;
     const formData = await request.formData();
     formData.set("proposalId", id);
-    const { proposalId } = await updateProposalWorkflowFromForm(formData);
+    const { proposalId, invoiceId } = await updateProposalWorkflowFromForm(formData);
 
-    return NextResponse.redirect(new URL(`/proposals/${proposalId}`, request.url), 303);
+    return NextResponse.redirect(new URL(invoiceId ? `/invoices/${invoiceId}` : `/proposals/${proposalId}`, request.url), 303);
   } catch (error) {
     console.error("Proposal workflow update failed", error);
     return NextResponse.json(

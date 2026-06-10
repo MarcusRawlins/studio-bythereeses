@@ -1,10 +1,11 @@
 import { acceptProposalByToken } from "@/lib/sales";
-import { normalizeProposalSignature } from "@/lib/proposal-client-experience";
+import { normalizeProposalSignature, proposalSignatureConsentText, proposalSignatureConsentVersion } from "@/lib/proposal-client-experience";
 import { NextResponse } from "next/server";
 
 export async function POST(request: Request, { params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
   const lastUsedIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
+  const userAgent = request.headers.get("user-agent")?.trim() || null;
   const formData = await request.formData();
   const signature = normalizeProposalSignature({
     signerName: formData.get("signatureName")?.toString(),
@@ -25,6 +26,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
     signerName: signature.signerName,
     signerEmail: signature.signerEmail,
     selectedOptionalLineItemIds,
+    userAgent,
+    consentText: proposalSignatureConsentText,
+    consentVersion: proposalSignatureConsentVersion,
   });
 
   if (!result) {

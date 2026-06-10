@@ -5,7 +5,6 @@ import {
 } from "@/lib/questionnaire-links";
 import { getQuestionnaire } from "@/lib/questionnaires";
 import { ArrowRight, CheckCircle2 } from "lucide-react";
-import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -31,7 +30,10 @@ export default async function QuestionnaireConfirmedPage({
   return (
     <main className="min-h-screen bg-[var(--background)] px-4 py-10 text-[var(--foreground)]">
       <div className="mx-auto max-w-2xl text-center">
-        <Image src="/brand/alex-tyler-logo.png" alt="Alex & Tyler" width={230} height={75} className="mx-auto h-auto w-56" priority />
+        <div>
+          <span className="studio-caps block text-[0.62rem] text-[var(--ink-muted)]">The Reeses</span>
+          <span className="font-serif text-3xl leading-none text-[var(--foreground)]">Studio</span>
+        </div>
         <section className="mt-10 rounded-md border border-[var(--line)] bg-[var(--surface)] px-7 py-10 shadow-sm">
           <CheckCircle2 className="mx-auto h-9 w-9 text-[var(--brand-brown)]" />
           <p className="mt-6 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--ink-muted)]">Questionnaire submitted</p>

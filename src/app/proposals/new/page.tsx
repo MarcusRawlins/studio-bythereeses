@@ -1,9 +1,16 @@
 import { AppShell } from "@/components/AppShell";
 import { ProposalPackageBuilder } from "@/components/ProposalPackageBuilder";
-import { listClientOptions, listContractTemplateOptions, listProjectOptions } from "@/lib/sales";
+import { listClientOptions, listContractTemplateOptions, listProjectOptions, listProposalPackageTemplateOptions } from "@/lib/sales";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
+
+function projectOptionLabel({ project, client }: Awaited<ReturnType<typeof listProjectOptions>>[number]) {
+  const clientName = client
+    ? [client.firstName, client.lastName].filter(Boolean).join(" ") || client.email
+    : "Needs primary client";
+  return `${project.name} · ${clientName}`;
+}
 
 export default async function NewProposalPage({
   searchParams,
@@ -11,10 +18,11 @@ export default async function NewProposalPage({
   searchParams?: Promise<{ projectId?: string }>;
 }) {
   const params = searchParams ? await searchParams : {};
-  const [projects, clients, contractTemplates] = await Promise.all([
+  const [projects, clients, contractTemplates, proposalPackageTemplates] = await Promise.all([
     listProjectOptions(),
     listClientOptions(),
     listContractTemplateOptions(),
+    listProposalPackageTemplateOptions(),
   ]);
 
   return (
@@ -60,7 +68,7 @@ export default async function NewProposalPage({
                 Project
                 <select name="projectId" defaultValue={params.projectId ?? ""} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none">
                   <option value="">Select project, or assign to a client below</option>
-                  {projects.map(({ project, client }) => <option key={project.id} value={project.id}>{project.name} · {client.firstName} {client.lastName}</option>)}
+                  {projects.map((row) => <option key={row.project.id} value={row.project.id}>{projectOptionLabel(row)}</option>)}
                 </select>
               </label>
               <label className="space-y-1.5 text-sm font-medium md:col-span-2">
@@ -95,6 +103,14 @@ export default async function NewProposalPage({
               <h3 className="mt-1 text-xl font-semibold">Package and scope</h3>
             </div>
             <div className="grid gap-4">
+              <label className="space-y-1.5 text-sm font-medium">
+                Proposal package template
+                <select name="proposalPackageTemplateId" defaultValue="" className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none">
+                  <option value="">No package template selected</option>
+                  {proposalPackageTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}{template.trigger ? ` · ${template.trigger}` : ""}</option>)}
+                </select>
+                <span className="block text-xs font-normal leading-5 text-[var(--ink-muted)]">If package name or scope are blank, Studio will use this template and render project/client merge fields.</span>
+              </label>
               <ProposalPackageBuilder />
               <label className="space-y-1.5 text-sm font-medium">
                 Scope summary

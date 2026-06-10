@@ -1,10 +1,22 @@
 import { AppShell } from "@/components/AppShell";
 import { formatMoney } from "@/lib/format";
-import { getProposal, invoiceStatusOptions, listProjectOptions, listProposalOptions } from "@/lib/sales";
+import { estimateInvoiceCardFeeCents, getProposal, invoiceStatusOptions, listProjectOptions, listProposalOptions } from "@/lib/sales";
 import { enabledPaymentMethods, getAppSettings } from "@/lib/settings";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
+
+function projectOptionLabel({ project, client }: Awaited<ReturnType<typeof listProjectOptions>>[number]) {
+  const clientName = client
+    ? [client.firstName, client.lastName].filter(Boolean).join(" ") || client.email
+    : "Needs primary client";
+  return `${project.name} · ${clientName}`;
+}
+
+function proposalClientLabel(client: NonNullable<Awaited<ReturnType<typeof getProposal>>>["client"]) {
+  if (!client) return "Needs primary client";
+  return [client.firstName, client.lastName].filter(Boolean).join(" ") || client.email;
+}
 
 export default async function NewInvoicePage({
   searchParams,
@@ -24,6 +36,8 @@ export default async function NewInvoicePage({
   const proposalTotalCents = selectedProposal?.proposal.totalCents ?? includedTotalCents;
   const proposalTotalDollars = proposalTotalCents > 0 ? String(proposalTotalCents / 100) : "";
   const defaultRetainerDollars = proposalTotalCents > 0 ? String(Math.round(proposalTotalCents * 0.3) / 100) : "";
+  const stripePassesFees = paymentMethods.some((method) => method.key === "stripe" && method.passFees);
+  const estimatedCardFeeCents = stripePassesFees && proposalTotalCents > 0 ? estimateInvoiceCardFeeCents(proposalTotalCents) : 0;
 
   return (
     <AppShell>
@@ -41,7 +55,7 @@ export default async function NewInvoicePage({
                 <div>
                   <p className="brand-label">Autopopulated from proposal</p>
                   <h2 className="mt-1 text-lg font-semibold">{selectedProposal.proposal.title}</h2>
-                  <p className="mt-1 text-sm text-[var(--ink-muted)]">{selectedProposal.project.name} · {selectedProposal.client.firstName} {selectedProposal.client.lastName}</p>
+                  <p className="mt-1 text-sm text-[var(--ink-muted)]">{selectedProposal.project.name} · {proposalClientLabel(selectedProposal.client)}</p>
                 </div>
                 <div className="text-left md:text-right">
                   <p className="brand-label">Invoice total</p>
@@ -97,7 +111,7 @@ export default async function NewInvoicePage({
             Project
             <select name="projectId" required defaultValue={selectedProjectId} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none">
               <option value="">Select project</option>
-              {projects.map(({ project, client }) => <option key={project.id} value={project.id}>{project.name} · {client.firstName} {client.lastName}</option>)}
+              {projects.map((row) => <option key={row.project.id} value={row.project.id}>{projectOptionLabel(row)}</option>)}
             </select>
           </label>
           <label className="space-y-1.5 text-sm font-medium md:col-span-2">
@@ -162,7 +176,22 @@ export default async function NewInvoicePage({
                 </p>
               )}
             </div>
+            {stripePassesFees && (
+              <div className="mt-4 border border-[var(--line)] bg-[var(--background)] p-3 text-sm">
+                <p className="font-semibold">Credit card fee policy</p>
+                <p className="mt-1 text-[var(--ink-muted)]">
+                  This invoice will snapshot credit card fees as client-paid when credit card is accepted. {estimatedCardFeeCents > 0
+                    ? `Estimated client card fee: ${formatMoney(estimatedCardFeeCents)}.`
+                    : "The exact fee amount is calculated from the invoice total when the invoice is created."}
+                </p>
+              </div>
+            )}
           </section>
+          <label className="space-y-1.5 text-sm font-medium md:col-span-2">
+            Stripe checkout link
+            <input name="stripePaymentLink" type="url" placeholder="https://pay.stripe.com/..." className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+            <span className="block text-xs font-normal leading-5 text-[var(--ink-muted)]">Optional canonical payment link shown on the invoice and secure client proposal view.</span>
+          </label>
           <label className="space-y-1.5 text-sm font-medium md:col-span-2">
             Payment notes override
             <textarea name="paymentNotes" rows={4} placeholder="Leave blank to use the instructions from Settings." className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />

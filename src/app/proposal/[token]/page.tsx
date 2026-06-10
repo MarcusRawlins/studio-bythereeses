@@ -1,4 +1,5 @@
 import { ClientProposalExperience } from "@/components/ClientProposalExperience";
+import { normalizeProposalSection } from "@/lib/proposal-client-experience";
 import { getProposalPackageByToken } from "@/lib/sales";
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
@@ -10,7 +11,7 @@ export default async function ClientProposalPage({
   searchParams,
 }: {
   params: Promise<{ token: string }>;
-  searchParams: Promise<{ accepted?: string; signature?: string }>;
+  searchParams: Promise<{ accepted?: string; signature?: string; section?: string }>;
 }) {
   const { token } = await params;
   const query = await searchParams;
@@ -19,8 +20,9 @@ export default async function ClientProposalPage({
   const data = await getProposalPackageByToken(token, ip);
   if (!data) notFound();
 
-  const clientName = data.client.preferredName || data.client.firstName;
+  const clientName = data.client?.preferredName || data.client?.firstName || "there";
   const location = [data.project.venueName, data.project.city, data.project.state].filter(Boolean).join(" · ");
+  const initialSection = normalizeProposalSection(query.section);
 
   return (
     <ClientProposalExperience
@@ -39,11 +41,13 @@ export default async function ClientProposalPage({
       signedAt={data.proposal.signedAt}
       signerName={data.proposal.signerName}
       signerEmail={data.proposal.signerEmail}
-      clientEmail={data.client.email}
+      clientEmail={data.client?.email ?? null}
       acceptedNotice={query.accepted === "1"}
       signatureError={query.signature ?? null}
+      initialSection={initialSection}
       contractTitle={data.proposal.contractTitle}
       contractBody={data.proposal.contractBody}
+      contractStatus={data.proposal.contractStatus}
       lineItems={data.lineItems.map((item) => ({
         id: item.id,
         name: item.name,
@@ -60,11 +64,14 @@ export default async function ClientProposalPage({
         balanceCents: invoice.balanceCents,
         acceptedPaymentMethodsJson: invoice.acceptedPaymentMethodsJson,
         paymentNotes: invoice.paymentNotes,
+        stripePaymentLink: invoice.stripePaymentLink,
         payments: invoice.payments.map((payment) => ({
           id: payment.id,
           label: payment.label,
           dueDate: payment.dueDate,
           amountCents: payment.amountCents,
+          stripeCheckoutUrl: payment.stripeCheckoutUrl,
+          stripeCheckoutStatus: payment.stripeCheckoutStatus,
         })),
       }))}
     />

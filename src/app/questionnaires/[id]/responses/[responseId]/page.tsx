@@ -1,6 +1,6 @@
 import { AppShell } from "@/components/AppShell";
 import { getQuestionnaireResponseDetail, questionnaireResponseStatus } from "@/lib/questionnaires";
-import { CalendarDays, FolderKanban, Mail, UserRound } from "lucide-react";
+import { CalendarDays, FolderKanban, Mail, Pencil, UserRound } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -52,9 +52,15 @@ export default async function QuestionnaireResponseDetailPage({
             <h1 className="brand-page-title mt-3 text-4xl">Questionnaire response</h1>
             <p className="mt-2 text-sm text-[var(--ink-muted)]">{response.questionnaireTitle}</p>
           </div>
-          <span className="h-fit w-fit rounded-full border border-[var(--line)] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-            {status}
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="h-fit w-fit rounded-full border border-[var(--line)] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+              {status}
+            </span>
+            <Link href={`/questionnaires/${id}/responses/${responseId}/edit`} className="inline-flex items-center gap-2 rounded-sm border border-[var(--line)] px-3 py-2 text-sm font-semibold transition hover:border-[var(--foreground)]">
+              <Pencil className="h-4 w-4" />
+              Edit responses
+            </Link>
+          </div>
         </header>
 
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">

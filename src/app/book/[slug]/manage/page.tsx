@@ -1,6 +1,5 @@
 import { cancelSchedulerBookingAction, getManagedBooking } from "@/lib/scheduler";
 import { CalendarDays, CheckCircle2, Clock, Mail, Video } from "lucide-react";
-import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -31,7 +30,10 @@ export default async function ManageBookingPage({
   return (
     <main className="min-h-screen bg-[#f6f3ee] px-5 py-10 text-[var(--foreground)]">
       <div className="mx-auto max-w-2xl rounded-md border border-[var(--line)] bg-[var(--surface)] p-8 shadow-sm">
-        <Image src="/brand/alex-tyler-logo.png" alt="Alex & Tyler" width={230} height={82} priority className="mx-auto h-auto w-52" />
+        <Link href="https://bythereeses.com" prefetch={false} aria-label="The Reeses website" className="block text-center">
+          <span className="studio-caps block text-[0.62rem] text-[var(--ink-muted)]">The Reeses</span>
+          <span className="font-serif text-3xl leading-none text-[var(--foreground)]">Studio</span>
+        </Link>
         <div className="mt-8 text-center">
           {isCancelled && <CheckCircle2 className="mx-auto h-10 w-10 text-[var(--brand-brown)]" />}
           <h1 className="brand-page-title mt-5 text-4xl">{isCancelled ? "Cancelled" : "Manage Booking"}</h1>

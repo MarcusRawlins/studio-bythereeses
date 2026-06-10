@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { getProposalReadiness, nextProposalStatus } from "./proposal-readiness";
+import { canSignProposalContract, getProposalReadiness, nextProposalStatus } from "./proposal-readiness";
 
 const readyPackage = [{ quantity: 1, unitPriceCents: 450000 }];
 const optionalOnlyPackage = [{ quantity: 1, unitPriceCents: 120000, isOptional: true }];
@@ -48,6 +48,11 @@ assert.equal(
   }).contractReady,
   false,
 );
+
+assert.equal(canSignProposalContract({ contractBody: "Agreement text", contractStatus: "ready" }), true);
+assert.equal(canSignProposalContract({ contractBody: "Agreement text", contractStatus: "signed" }), true);
+assert.equal(canSignProposalContract({ contractBody: "", contractStatus: "ready" }), false);
+assert.equal(canSignProposalContract({ contractBody: "Agreement text", contractStatus: "drafted" }), false);
 
 assert.equal(
   nextProposalStatus({

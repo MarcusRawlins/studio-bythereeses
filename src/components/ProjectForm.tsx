@@ -67,6 +67,16 @@ export function ProjectForm() {
         </label>
       </div>
 
+      <label className="flex items-start gap-3 rounded-md border border-[var(--line)] bg-white p-3 text-sm font-medium">
+        <input name="engagementSessionIncluded" type="checkbox" className="mt-1 h-4 w-4 rounded border-[var(--line)] accent-[var(--accent)]" />
+        <span>
+          Engagement session included
+          <span className="mt-1 block text-xs font-normal text-[var(--ink-muted)]">
+            Adds an unscheduled engagement reminder until the date is set.
+          </span>
+        </span>
+      </label>
+
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="space-y-1.5 text-sm font-medium sm:col-span-2">
           Primary client role
@@ -98,6 +108,18 @@ export function ProjectForm() {
         <label className="space-y-1.5 text-sm font-medium sm:col-span-2">
           Phone
           <input name="phone" placeholder="555-0123" className={inputClass} />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium">
+          Instagram
+          <input name="instagramHandle" placeholder="@emma" className={inputClass} />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium">
+          Source
+          <input name="referralSource" placeholder="Planner, referral, inquiry form" className={inputClass} />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium sm:col-span-2">
+          Communication preference
+          <textarea name="communicationPreference" rows={3} placeholder="Email for contracts; text for week-of logistics." className={inputClass} />
         </label>
       </div>
 

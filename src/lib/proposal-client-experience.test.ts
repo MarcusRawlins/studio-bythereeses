@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildProposalInvoicePreview, buildSelectedProposalPackage, normalizeProposalSignature } from "./proposal-client-experience";
+import { buildProposalInvoicePreview, buildSelectedProposalPackage, normalizeProposalSection, normalizeProposalSignature } from "./proposal-client-experience";
 
 const preview = buildProposalInvoicePreview({
   totalCents: null,
@@ -45,5 +45,12 @@ assert.deepEqual(normalizeProposalSignature({ signerName: "Hanna Richman", signe
   ok: false,
   error: "signature_consent_required",
 });
+
+assert.equal(normalizeProposalSection("contract"), "contract");
+assert.equal(normalizeProposalSection("invoice"), "invoice");
+assert.equal(normalizeProposalSection("proposal"), "proposal");
+assert.equal(normalizeProposalSection("welcome"), "welcome");
+assert.equal(normalizeProposalSection("anything-else"), null);
+assert.equal(normalizeProposalSection(undefined), null);
 
 console.log("proposal client experience tests passed");

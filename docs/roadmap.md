@@ -13,6 +13,7 @@
 - Native contract fields and signatures.
 - Stripe invoices and payment schedules.
 - Manual Zelle/Venmo payment instructions.
+- Canonical expense/vendor ledger for bookkeeping replacement.
 
 ## Phase 3: Questionnaires
 

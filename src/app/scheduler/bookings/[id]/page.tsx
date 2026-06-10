@@ -1,6 +1,6 @@
 import { AppShell } from "@/components/AppShell";
-import { createProjectFromBookingAction, getBookingManageUrls, getSchedulerBookingDetail, linkBookingToProjectAction } from "@/lib/scheduler";
-import { ArrowLeft, CalendarDays, ExternalLink, LinkIcon, Mail, Phone, User } from "lucide-react";
+import { createProjectFromBookingAction, getBookingManageUrls, getSchedulerBookingDetail, linkBookingToProjectAction, recordSchedulerBookingPaymentAction } from "@/lib/scheduler";
+import { ArrowLeft, CalendarDays, CreditCard, ExternalLink, LinkIcon, Mail, Phone, User } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -24,6 +24,15 @@ function parseAnswers(value: string | null) {
   } catch {
     return [];
   }
+}
+
+function formatMoney(cents: number | null | undefined) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format((cents ?? 0) / 100);
+}
+
+function paymentDateValue(value: string | null) {
+  if (!value) return "";
+  return value.slice(0, 16);
 }
 
 export default async function SchedulerBookingDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -85,6 +94,90 @@ export default async function SchedulerBookingDetailPage({ params }: { params: P
           </div>
 
           <div className="space-y-4">
+            <div
+              id={`payment-${data.booking.id}`}
+              className="scroll-mt-6 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 target:bg-[var(--accent-soft)]"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold">Payment</h2>
+                  <p className="mt-1 text-sm capitalize text-[var(--ink-muted)]">{data.booking.paymentStatus.replaceAll("_", " ")}</p>
+                </div>
+                <CreditCard className="h-5 w-5 text-[var(--ink-muted)]" />
+              </div>
+
+              <div className="mt-4 grid gap-3 text-sm md:grid-cols-2">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">Service paid</div>
+                  <div className="mt-1 font-semibold">{formatMoney(data.booking.paidAmountCents)}</div>
+                </div>
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">Gross collected</div>
+                  <div className="mt-1 font-semibold">{formatMoney(data.booking.grossCollectedCents)}</div>
+                </div>
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">Client fee</div>
+                  <div className="mt-1 font-semibold">{formatMoney(data.booking.clientFeeCents)}</div>
+                </div>
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">Net deposit</div>
+                  <div className="mt-1 font-semibold">{formatMoney(data.booking.netDepositCents)}</div>
+                </div>
+              </div>
+
+              {data.booking.paymentLink && (
+                <a href={data.booking.paymentLink} target="_blank" className="mt-4 inline-flex items-center gap-2 text-sm font-semibold underline">
+                  <ExternalLink className="h-4 w-4" />
+                  Open checkout link
+                </a>
+              )}
+
+              <form action={recordSchedulerBookingPaymentAction} className="mt-5 grid gap-3 border-t border-[var(--line)] pt-4">
+                <input type="hidden" name="bookingId" value={data.booking.id} />
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="space-y-1.5 text-sm font-medium">
+                    Status
+                    <select name="status" defaultValue={data.booking.paymentStatus} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none">
+                      <option value="unpaid">Unpaid</option>
+                      <option value="pending">Pending</option>
+                      <option value="paid">Paid</option>
+                      <option value="refunded">Refunded</option>
+                      <option value="waived">Waived</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium">
+                    Method
+                    <select name="paymentMethod" defaultValue={data.booking.paymentMethod ?? ""} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none">
+                      <option value="">Not set</option>
+                      <option value="stripe">Stripe</option>
+                      <option value="credit_card">Credit card</option>
+                      <option value="zelle">Zelle</option>
+                      <option value="venmo">Venmo</option>
+                      <option value="check">Check</option>
+                      <option value="cash">Cash</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium">
+                    Paid amount
+                    <input name="paidAmount" defaultValue={data.booking.paidAmountCents ? (data.booking.paidAmountCents / 100).toFixed(2) : data.meetingType.priceCents ? (data.meetingType.priceCents / 100).toFixed(2) : ""} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium">
+                    Paid at
+                    <input name="paidAt" type="datetime-local" defaultValue={paymentDateValue(data.booking.paidAt)} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+                  </label>
+                </div>
+                <label className="space-y-1.5 text-sm font-medium">
+                  External payment id
+                  <input name="externalPaymentId" defaultValue={data.booking.externalPaymentId ?? ""} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+                </label>
+                <label className="space-y-1.5 text-sm font-medium">
+                  Notes
+                  <textarea name="notes" defaultValue={data.booking.paymentNotes ?? ""} rows={3} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+                </label>
+                <button className="brand-primary-button rounded-sm px-4 py-2.5 transition">Save payment</button>
+              </form>
+            </div>
+
             <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
               <h2 className="text-lg font-semibold">Client and project</h2>
               <div className="mt-4 grid gap-3 text-sm">

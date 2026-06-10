@@ -12,6 +12,9 @@ export const clients = sqliteTable("clients", {
   email: text("email").notNull().unique(),
   phone: text("phone"),
   preferredName: text("preferred_name"),
+  instagramHandle: text("instagram_handle"),
+  communicationPreference: text("communication_preference"),
+  referralSource: text("referral_source"),
   notes: text("notes"),
   ...timestamps,
 });
@@ -47,6 +50,8 @@ export const projectEvents = sqliteTable("project_events", {
   googleCalendarEventId: text("google_calendar_event_id"),
   calendarSyncStatus: text("calendar_sync_status").notNull().default("not_connected"),
   notes: text("notes"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -60,6 +65,8 @@ export const projectLocations = sqliteTable("project_locations", {
   city: text("city"),
   state: text("state"),
   notes: text("notes"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -86,6 +93,7 @@ export const schedulerMeetingTypes = sqliteTable("scheduler_meeting_types", {
   inviteeQuestionsJson: text("invitee_questions_json"),
   collectPayment: integer("collect_payment", { mode: "boolean" }).notNull().default(false),
   priceCents: integer("price_cents"),
+  stripePaymentLink: text("stripe_payment_link"),
   smsOptInEnabled: integer("sms_opt_in_enabled", { mode: "boolean" }).notNull().default(true),
   confirmationMessage: text("confirmation_message"),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
@@ -139,6 +147,19 @@ export const schedulerBookings = sqliteTable("scheduler_bookings", {
   cancellationReason: text("cancellation_reason"),
   rescheduledFromBookingId: text("rescheduled_from_booking_id"),
   reminderSentAt: text("reminder_sent_at"),
+  paymentStatus: text("payment_status").notNull().default("unpaid"),
+  paymentMethod: text("payment_method"),
+  paidAt: text("paid_at"),
+  paidAmountCents: integer("paid_amount_cents").notNull().default(0),
+  clientFeeCents: integer("client_fee_cents").notNull().default(0),
+  processingFeeCents: integer("processing_fee_cents").notNull().default(0),
+  grossCollectedCents: integer("gross_collected_cents").notNull().default(0),
+  netDepositCents: integer("net_deposit_cents").notNull().default(0),
+  externalPaymentId: text("external_payment_id"),
+  paymentLink: text("payment_link"),
+  paymentNotes: text("payment_notes"),
+  paymentSourceType: text("payment_source_type"),
+  paymentSourceId: text("payment_source_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -210,6 +231,139 @@ export const questionnaireResponses = sqliteTable("questionnaire_responses", {
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
 
+export const projectTimelineItems = sqliteTable("project_timeline_items", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  description: text("description"),
+  startAt: text("start_at"),
+  endAt: text("end_at"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
+  createdBy: text("created_by").notNull().default("admin"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export const projectSources = sqliteTable("project_sources", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull().default("note"),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  summary: text("summary"),
+  occurredAt: text("occurred_at"),
+  externalUrl: text("external_url"),
+  capturedBy: text("captured_by"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
+  metadataJson: text("metadata_json"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export const agentTasks = sqliteTable("agent_tasks", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
+  title: text("title").notNull(),
+  instructions: text("instructions"),
+  status: text("status").notNull().default("queued"),
+  priority: text("priority").notNull().default("normal"),
+  requestedBy: text("requested_by"),
+  assignedAgent: text("assigned_agent"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
+  resultSummary: text("result_summary"),
+  outputJson: text("output_json"),
+  errorMessage: text("error_message"),
+  startedAt: text("started_at"),
+  completedAt: text("completed_at"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export const projectWorkflowRuns = sqliteTable("project_workflow_runs", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  workflowKey: text("workflow_key").notNull(),
+  workflowName: text("workflow_name").notNull(),
+  status: text("status").notNull().default("active"),
+  selectedStepKeysJson: text("selected_step_keys_json").notNull(),
+  createdBy: text("created_by").notNull().default("Tyler"),
+  startedAt: text("started_at"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export const projectWorkflowSteps = sqliteTable("project_workflow_steps", {
+  id: text("id").primaryKey(),
+  workflowRunId: text("workflow_run_id").notNull().references(() => projectWorkflowRuns.id, { onDelete: "cascade" }),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  stepKey: text("step_key").notNull(),
+  title: text("title").notNull(),
+  instructions: text("instructions").notNull(),
+  assignedAgent: text("assigned_agent").notNull(),
+  triggerLabel: text("trigger_label"),
+  status: text("status").notNull().default("configured"),
+  automationEnabled: integer("automation_enabled", { mode: "boolean" }).notNull().default(true),
+  agentTaskId: text("agent_task_id").references(() => agentTasks.id, { onDelete: "set null" }),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export const projectCommunications = sqliteTable("project_communications", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  clientId: text("client_id").references(() => clients.id, { onDelete: "set null" }),
+  direction: text("direction").notNull().default("outbound"),
+  channel: text("channel").notNull().default("email"),
+  status: text("status").notNull().default("draft"),
+  subject: text("subject"),
+  body: text("body").notNull(),
+  recipientName: text("recipient_name"),
+  recipientEmail: text("recipient_email"),
+  scheduledFor: text("scheduled_for"),
+  sentAt: text("sent_at"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
+  createdBy: text("created_by").notNull().default("admin"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export const vendors = sqliteTable("vendors", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  normalizedName: text("normalized_name").notNull().unique(),
+  email: text("email"),
+  websiteUrl: text("website_url"),
+  notes: text("notes"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export const expenses = sqliteTable("expenses", {
+  id: text("id").primaryKey(),
+  vendorId: text("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
+  projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
+  category: text("category").notNull().default("general"),
+  description: text("description").notNull(),
+  amountCents: integer("amount_cents").notNull().default(0),
+  status: text("status").notNull().default("paid"),
+  paidAt: text("paid_at"),
+  paymentMethod: text("payment_method"),
+  externalPaymentId: text("external_payment_id"),
+  receiptUrl: text("receipt_url"),
+  taxDeductible: integer("tax_deductible", { mode: "boolean" }).notNull().default(true),
+  notes: text("notes"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
 export const proposals = sqliteTable("proposals", {
   id: text("id").primaryKey(),
   projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
@@ -229,6 +383,13 @@ export const proposals = sqliteTable("proposals", {
   signedAt: text("signed_at"),
   signerName: text("signer_name"),
   signerEmail: text("signer_email"),
+  signatureIp: text("signature_ip"),
+  signatureUserAgent: text("signature_user_agent"),
+  signatureConsentText: text("signature_consent_text"),
+  signatureConsentVersion: text("signature_consent_version"),
+  selectedOptionalLineItemIdsJson: text("selected_optional_line_item_ids_json"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -273,9 +434,15 @@ export const invoices = sqliteTable("invoices", {
   dueDate: text("due_date"),
   paymentNotes: text("payment_notes"),
   acceptedPaymentMethodsJson: text("accepted_payment_methods_json"),
+  cardFeePolicy: text("card_fee_policy").notNull().default("studio_absorbs"),
+  cardFeePercentBps: integer("card_fee_percent_bps").notNull().default(0),
+  cardFeeFixedCents: integer("card_fee_fixed_cents").notNull().default(0),
+  cardFeeAmountCents: integer("card_fee_amount_cents").notNull().default(0),
   stripePaymentLink: text("stripe_payment_link"),
   zelleInfo: text("zelle_info"),
   venmoInfo: text("venmo_info"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
   sentAt: text("sent_at"),
   paidAt: text("paid_at"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
@@ -291,7 +458,18 @@ export const invoicePayments = sqliteTable("invoice_payments", {
   status: text("status").notNull().default("pending"),
   paidAt: text("paid_at"),
   paymentMethod: text("payment_method"),
+  paidAmountCents: integer("paid_amount_cents").notNull().default(0),
+  clientFeeCents: integer("client_fee_cents").notNull().default(0),
+  processingFeeCents: integer("processing_fee_cents").notNull().default(0),
+  grossCollectedCents: integer("gross_collected_cents").notNull().default(0),
+  netDepositCents: integer("net_deposit_cents").notNull().default(0),
+  externalPaymentId: text("external_payment_id"),
+  stripeCheckoutUrl: text("stripe_checkout_url"),
+  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
+  stripeCheckoutStatus: text("stripe_checkout_status").notNull().default("not_created"),
   notes: text("notes"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -333,6 +511,12 @@ export type Template = typeof templates.$inferSelect;
 export type Questionnaire = typeof questionnaires.$inferSelect;
 export type QuestionnaireQuestion = typeof questionnaireQuestions.$inferSelect;
 export type QuestionnaireResponse = typeof questionnaireResponses.$inferSelect;
+export type ProjectTimelineItem = typeof projectTimelineItems.$inferSelect;
+export type ProjectWorkflowRun = typeof projectWorkflowRuns.$inferSelect;
+export type ProjectWorkflowStep = typeof projectWorkflowSteps.$inferSelect;
+export type ProjectCommunication = typeof projectCommunications.$inferSelect;
+export type Vendor = typeof vendors.$inferSelect;
+export type Expense = typeof expenses.$inferSelect;
 export type Proposal = typeof proposals.$inferSelect;
 export type ProposalLineItem = typeof proposalLineItems.$inferSelect;
 export type ProposalAccessToken = typeof proposalAccessTokens.$inferSelect;
