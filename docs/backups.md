@@ -2,12 +2,15 @@
 
 This CRM uses Cloudflare D1/R2 in production, but operational backups live on `reeseai-memory` so the project is not dependent on Cloudflare as the only copy.
 
+Ops stabilization checklist (deploy gate, rollback, MCP scope): [`ops-stabilization-checklist.md`](ops-stabilization-checklist.md).
+
 ## What Gets Backed Up
 
 - Code mirror: `/Volumes/reeseai-memory/code/reese-photography-crm`
 - Local SQLite dev database snapshots: `/Volumes/reeseai-memory/backups/reese-photography-crm/sqlite`
 - Cloudflare D1 production SQL exports: `/Volumes/reeseai-memory/backups/reese-photography-crm/d1`
 - Backup manifests: `/Volumes/reeseai-memory/backups/reese-photography-crm/manifests`
+- Pre-deploy version captures: `/Volumes/reeseai-memory/backups/reese-photography-crm/manifests/latest-deploy-versions.json` (see `npm run deploy:capture-versions`)
 - Weekly reconciliation reports: `/Volumes/reeseai-memory/backups/reese-photography-crm/reconciliations`
 - Backup run logs: `/Volumes/reeseai-memory/backups/reese-photography-crm/logs`
 - LaunchAgent stdout/stderr logs: `~/Library/Logs/reese-photography-crm`
@@ -31,6 +34,32 @@ Run manually:
 npm run backup:daily
 npm run backup:reconcile
 ```
+
+## Restore Local Development From D1 Backup
+
+If local development starts showing only seed data, restore `data/local.db` from the latest D1 SQL export instead of reseeding:
+
+```bash
+npm run db:restore-local:d1 -- --dry-run
+npm run db:restore-local:d1 -- --yes
+```
+
+The restore command imports `/Volumes/reeseai-memory/backups/reese-photography-crm/d1/latest.sql` into a temporary SQLite database first, validates that Studio tables and project/client rows are present, saves a `local-before-d1-restore-*.db` snapshot of the current local database, replaces `data/local.db`, runs `npm run db:migrate`, and writes a JSON restore report under `/Volumes/reeseai-memory/backups/reese-photography-crm/logs`.
+
+To restore from a specific D1 export or into a temporary database:
+
+```bash
+npm run db:restore-local:d1 -- --source /path/to/studio-bythereeses.sql --database /tmp/studio-local.db --yes
+```
+
+The normal local start command also checks for this drift before opening the app:
+
+```bash
+npm run dev:studio -- --check
+npm run dev:studio
+```
+
+It fails if `localhost:3000` is already serving another repo, or if local SQLite only has seed data while the D1 backup has imported project data.
 
 ## Cloudflare Token
 

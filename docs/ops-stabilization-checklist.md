@@ -16,6 +16,7 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
   - `npm run lint`
   - `npm run build`
   - `npm run backup:data` (valid CF token)
+  - `npm run deploy:capture-versions` (snapshot Worker/Pages IDs + git HEAD)
   - `npm run deploy:preflight` (enforced in `npm run deploy`)
 - Preflight (see `scripts/deploy-preflight.mjs` + `docs/deployment-live-testing.md`):
   - Requires `CLOUDFLARE_API_TOKEN`
@@ -37,14 +38,13 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
 - Do not deploy on dirty baseline without explicit note.
 
 ## Rollback
-- No automated rollback script or gate yet (search confirmed zero mentions in docs/scripts).
-- Current manual path:
-  1. Note current Worker/Pages version IDs (Wrangler dashboard or `wrangler deployments list`).
-  2. `git checkout <prior-good-commit>` (or revert the bad change).
-  3. Re-run full deploy gate + `npm run deploy` (and pages-proxy).
-  4. Verify with `npm run smoke:production`.
-- Alternative (no git change): Cloudflare dashboard "Rollback" for the Worker + Pages project to a prior deployment.
-- Future: add explicit pre-deploy version capture + `scripts/rollback.sh` candidate in stabilization branch.
+- Pre-deploy capture: `npm run deploy:capture-versions` (writes `.../manifests/latest-deploy-versions.json` + stamped copy; needs `CLOUDFLARE_API_TOKEN` for live Worker/Pages IDs, always records git HEAD/branch/dirty).
+- Worker rollback helper: `npm run deploy:rollback -- --plan` (dry run) or `npm run deploy:rollback -- --yes` (executes `wrangler rollback` to prior captured Worker version). Shell wrapper: `scripts/rollback.sh`.
+- Pages front door: still manual via Cloudflare dashboard (`studio-bythereeses` > Deployments > Rollback). No wrangler Pages rollback command.
+- Git redeploy path (unchanged):
+  1. `git checkout <prior-good-commit>` (or revert the bad change).
+  2. Re-run full deploy gate + `npm run deploy` (and pages-proxy).
+  3. Verify with `npm run smoke:production`.
 - Always keep local + mirror at known-good baseline before risky deploys.
 
 ## Backup / Restore Drill
@@ -84,22 +84,24 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
 - Scope guard: agent paths intentionally bypass browser Google session; browser admin pages remain protected.
 
 ## Next Branch Plan (Stabilization)
-- Current state: `main` @ `6199013 chore: capture current CRM baseline`. Many untracked changes present (new agent routes, migrations 0010+, tests, data-health, scheduler enhancements) — do not revert/reset/delete unknown uncommitted.
-- Starter stabilization branch (next exact):
-  1. `git checkout -b stabilization/ops-2026-05` (or similar) from current main.
-  2. Land this checklist (and cross-link from README + AGENTS.md + deployment/backups docs).
-  3. Expand with Obsidian priorities (read outside this session) + relevant items from `docs/superpowers/plans/2026-05-20-project-reliability-efficiency.md` (reliability plan uses its own sub-skill discipline; keep gates/rollback/backup/MCP in scope).
-  4. Add concrete rollback procedure + version capture to preflight/smoke or new script (no code yet).
-  5. Add backup freshness + MCP tool surface assertions into deploy gate where cheap.
-  6. Document token rotation drill + "who has the token" inventory (keychain + CF secrets + launchd).
-  7. Run only non-destructive local verification (`lint`, `build`, `deploy:preflight` if token present locally, smoke against prod with token).
-  8. PR back to main only after checklist items pass review + no feature deltas in this slice.
+- Current state: branch `stabilization/ops-2026-06` from `main` @ `6199013`. Many uncommitted feature changes present — do not revert/reset/delete unknown work.
+- Slice progress:
+  - [x] 1. Create stabilization branch + land starter checklist.
+  - [x] 2. Cross-link checklist from README, AGENTS.md, `docs/deployment-live-testing.md`, `docs/backups.md`.
+  - [x] 3. Add version capture (`scripts/capture-deploy-versions.mjs`, `npm run deploy:capture-versions`) + rollback helper (`scripts/rollback-deploy.mjs`, `scripts/rollback.sh`, `npm run deploy:rollback`).
+  - [ ] 4. Expand with Obsidian priorities + `docs/superpowers/plans/2026-05-20-project-reliability-efficiency.md` items in scope.
+  - [ ] 5. Add backup freshness + MCP tool surface assertions into deploy gate where cheap.
+  - [ ] 6. Document token rotation drill + "who has the token" inventory (keychain + CF secrets + launchd).
+  - [ ] 7. Run non-destructive verification (`lint`, `build`, `deploy:preflight` if token present, `deploy:capture-versions`, smoke against prod with token).
+  - [ ] 8. PR back to main only after checklist items pass review + no feature deltas in stabilization slices.
 - Do not deploy from stabilization work until explicit sign-off.
 - Track via checkboxes in this doc + Obsidian.
 
 ## Quick Commands (for drill)
 See package.json scripts, `docs/backups.md`, `docs/deployment-live-testing.md`, `docs/studio-agent-access.md`.
 
+- Capture before deploy: `npm run deploy:capture-versions`
+- Rollback plan: `npm run deploy:rollback -- --plan`
 - Preflight+smoke loop: `npm run deploy:preflight && npm run smoke:production`
 - Backup drill: `npm run backup:reconcile`
 - Restore drill: `npm run db:restore-local:d1 -- --dry-run`

@@ -1,5 +1,7 @@
 # Deployment Live Testing
 
+Ops stabilization checklist (gates, rollback, backup/MCP drills): [`ops-stabilization-checklist.md`](ops-stabilization-checklist.md).
+
 ## Targets
 
 - Backoffice: `https://studio.bythereeses.com`
@@ -22,9 +24,12 @@ Set these as Cloudflare Worker secrets/variables before real client testing:
 - `NEXT_PUBLIC_APP_URL=https://studio.bythereeses.com`
 - `NEXT_PUBLIC_SCHEDULE_URL=https://schedule.bythereeses.com`
 - `SCHEDULER_LINK_SECRET`
+- `STUDIO_AGENT_API_TOKEN` - Worker secret used by trusted agent REST and MCP calls through `Authorization: Bearer ...`
 - `RESEND_API_KEY`
 - `RESEND_FROM_EMAIL=The Reeses <hello@bythereeses.com>`
 - `SCHEDULER_ADMIN_EMAIL=hello@bythereeses.com`
+- `STRIPE_SECRET_KEY` - Worker secret used to create hosted Checkout Sessions for invoice installments
+- `STRIPE_WEBHOOK_SECRET` - Worker secret for verifying Stripe webhook signatures at `/api/stripe/webhook`
 
 Do not commit secret values to the repo or Obsidian.
 
@@ -36,8 +41,12 @@ Google Calendar setup details live in `docs/google-calendar-setup.md`.
 2. Run `npm run lint`.
 3. Run `npm run build`.
 4. Run `npm run backup:data` with a valid Cloudflare API token in the shell.
-5. Confirm the remote D1 schema is current.
-6. Confirm custom domains are attached to the Cloudflare Worker, then confirm DNS points to that accepted Cloudflare target.
+5. Run `npm run deploy:capture-versions` to snapshot current Worker/Pages deployment IDs + git HEAD into `/Volumes/reeseai-memory/backups/reese-photography-crm/manifests/latest-deploy-versions.json`.
+6. Run `npm run deploy:preflight`.
+7. Confirm the remote D1 schema is current.
+8. Confirm custom domains are attached to the Cloudflare Worker, then confirm DNS points to that accepted Cloudflare target.
+
+`npm run deploy:preflight` checks the local deployment shape before upload. It fails when `CLOUDFLARE_API_TOKEN` is missing, when `src/middleware.ts` is missing, when legacy `src/proxy.ts` exists, or when core Cloudflare config files are missing. It also warns when `studio.bythereeses.com` or `schedule.bythereeses.com` still appear to serve stale Alex/Tyler branding.
 
 ## Current Domain Status
 
@@ -59,14 +68,33 @@ OAuth note: `studio.bythereeses.com/api/google/auth` is handled directly in the 
 
 Proxy form note: Pages buffers non-GET/non-HEAD request bodies before proxying them to the Worker and rewrites Worker-origin redirect locations back to the incoming custom domain. This keeps Studio admin POST forms reliable and prevents redirects to the internal workers.dev hostname.
 
+Agent API note: `studio.bythereeses.com/api/agent/*` and `studio.bythereeses.com/api/mcp` intentionally pass through the Pages front door without a Google browser session so trusted agents can authenticate with their bearer-token headers. Browser admin pages remain Google-protected, and `schedule.bythereeses.com` does not expose Studio agent/admin routes.
+
 ## Deploy Commands
 
 Use the OpenNext Cloudflare adapter:
 
 ```bash
+npm run deploy:capture-versions
+npm run deploy:preflight
 npm run preview
 npm run deploy
+npm run deploy:pages-proxy
+npm run smoke:production
 ```
+
+## Rollback
+
+Before a risky deploy, `npm run deploy:capture-versions` records the current Worker version, Pages production deployment, and git HEAD. If a deploy goes wrong:
+
+1. `npm run deploy:rollback -- --plan` — shows the prior Worker version from the latest capture.
+2. `npm run deploy:rollback -- --yes` — rolls the Worker back to that version (requires `CLOUDFLARE_API_TOKEN`).
+3. Roll back the Pages front door in the Cloudflare dashboard (`studio-bythereeses` project) if the proxy worker changed.
+4. `npm run smoke:production` — verify production health.
+
+Alternative: redeploy a known-good git commit after the full deploy gate. See [`ops-stabilization-checklist.md`](ops-stabilization-checklist.md).
+
+`npm run smoke:production` is a non-destructive live check. It verifies the Studio/Schedule host split, direct Worker-origin blocking, restored production project/client counts, zero data-health issues, trusted agent finance access, trusted agent task-list access, trusted agent workflow-list access, MCP finance tool availability, MCP agent task-loop/result-submission tool availability, and MCP project workflow automation tool availability. It reads `STUDIO_AGENT_API_TOKEN` from the shell or macOS Keychain service `reese-studio-agent-api-token`.
 
 ## First Live Scheduler Test
 

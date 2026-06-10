@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "deploy:capture-versions": "node scripts/capture-deploy-versions.mjs",
+    "deploy:rollback": "node scripts/rollback-deploy.mjs",
     "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "deploy:pages-proxy": "wrangler pages deploy pages-proxy --project-name studio-bythereeses --branch main",

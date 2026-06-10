@@ -4,6 +4,10 @@
 
 Private, local-first CRM for Tyler Reese's photography business.
 
+## Ops Stabilization
+
+Deploy gates, rollback/version capture, backup drills, and MCP scope: [`docs/ops-stabilization-checklist.md`](docs/ops-stabilization-checklist.md). Capture live Worker/Pages deployment IDs before risky deploys with `npm run deploy:capture-versions`.
+
 ## Locations
 
 - Primary working copy: `/Users/tyler-macmini/code/reese-photography-crm`
@@ -23,13 +27,26 @@ Private, local-first CRM for Tyler Reese's photography business.
 ```bash
 npm run db:migrate
 npm run db:seed
-npm run dev
+npm run db:restore-local:d1 -- --dry-run
+npm run dev:studio
 npm run lint
 npm run build
 npm run backup
 ```
 
 Open `http://localhost:3000`.
+
+`npm run dev:studio` checks that port `3000` is not serving another repo and that the local database has the expected Studio project/client data before it starts Next. For a one-off preflight without starting the server:
+
+```bash
+npm run dev:studio -- --check
+```
+
+If local development only shows seed projects, restore from the latest D1 backup with:
+
+```bash
+npm run db:restore-local:d1 -- --yes
+```
 
 ## Google Calendar Setup
 
