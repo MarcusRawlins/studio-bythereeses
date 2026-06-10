@@ -14,11 +14,11 @@ export function evaluateDeployPreflight({ env, files, productionSignals = {} }) 
   if (!env.CLOUDFLARE_API_TOKEN?.trim()) {
     errors.push("CLOUDFLARE_API_TOKEN is required for non-interactive Wrangler deploys.");
   }
-  if (!files.has("src/middleware.ts")) {
-    errors.push("src/middleware.ts is required so the origin guard deploys as Edge middleware.");
+  if (!files.has("src/proxy.ts")) {
+    errors.push("src/proxy.ts is required so the origin guard deploys as Next.js Edge proxy.");
   }
-  if (files.has("src/proxy.ts")) {
-    errors.push("src/proxy.ts is present; OpenNext Cloudflare currently rejects Next.js Node proxy middleware.");
+  if (files.has("src/middleware.ts")) {
+    errors.push("src/middleware.ts is present; Next.js 16 rejects having both middleware and proxy files.");
   }
   if (!files.has("wrangler.jsonc")) {
     errors.push("wrangler.jsonc is required for Cloudflare Worker deployment.");

@@ -46,7 +46,7 @@ Google Calendar setup details live in `docs/google-calendar-setup.md`.
 7. Confirm the remote D1 schema is current.
 8. Confirm custom domains are attached to the Cloudflare Worker, then confirm DNS points to that accepted Cloudflare target.
 
-`npm run deploy:preflight` checks the local deployment shape before upload. It fails when `CLOUDFLARE_API_TOKEN` is missing, when `src/middleware.ts` is missing, when legacy `src/proxy.ts` exists, or when core Cloudflare config files are missing. It also warns when `studio.bythereeses.com` or `schedule.bythereeses.com` still appear to serve stale Alex/Tyler branding.
+`npm run deploy:preflight` checks the local deployment shape before upload. It fails when `CLOUDFLARE_API_TOKEN` is missing, when `src/proxy.ts` is missing, when legacy `src/middleware.ts` exists, or when core Cloudflare config files are missing. It also warns when `studio.bythereeses.com` or `schedule.bythereeses.com` still appear to serve stale Alex/Tyler branding.
 
 ## Current Domain Status
 

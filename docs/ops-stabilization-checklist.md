@@ -20,8 +20,8 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
   - `npm run deploy:preflight` (enforced in `npm run deploy`)
 - Preflight (see `scripts/deploy-preflight.mjs` + `docs/deployment-live-testing.md`):
   - Requires `CLOUDFLARE_API_TOKEN`
-  - Requires `src/middleware.ts`, `wrangler.jsonc`, `pages-proxy/_worker.js`
-  - Rejects if `src/proxy.ts` present (legacy)
+  - Requires `src/proxy.ts`, `wrangler.jsonc`, `pages-proxy/_worker.js`
+  - Rejects if `src/middleware.ts` present (conflicts with Next.js 16 proxy)
   - Warns on stale Alex/Tyler branding at studio/schedule domains
 - Full flow (from package.json + deployment doc):
   ```
