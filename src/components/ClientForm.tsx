@@ -1,5 +1,4 @@
 import type { Client } from "@/db/schema";
-import { updateClientAction } from "@/lib/crm";
 import Link from "next/link";
 
 const inputClass =
@@ -7,7 +6,7 @@ const inputClass =
 
 export function ClientForm({ client }: { client: Client }) {
   return (
-    <form action={updateClientAction} className="grid gap-4 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
+    <form action={`/api/clients/${client.id}`} method="post" className="grid gap-4 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
       <input type="hidden" name="clientId" value={client.id} />
 
       <div>
@@ -36,7 +35,20 @@ export function ClientForm({ client }: { client: Client }) {
           Phone
           <input name="phone" defaultValue={client.phone ?? ""} className={inputClass} />
         </label>
+        <label className="space-y-1.5 text-sm font-medium">
+          Instagram
+          <input name="instagramHandle" defaultValue={client.instagramHandle ?? ""} placeholder="@handle" className={inputClass} />
+        </label>
+        <label className="space-y-1.5 text-sm font-medium">
+          Source
+          <input name="referralSource" defaultValue={client.referralSource ?? ""} placeholder="Planner, referral, inquiry form" className={inputClass} />
+        </label>
       </div>
+
+      <label className="space-y-1.5 text-sm font-medium">
+        Communication preference
+        <textarea name="communicationPreference" rows={3} defaultValue={client.communicationPreference ?? ""} className={inputClass} />
+      </label>
 
       <label className="space-y-1.5 text-sm font-medium">
         Notes

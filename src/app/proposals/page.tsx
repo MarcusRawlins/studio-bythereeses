@@ -10,6 +10,11 @@ function firstQueryValue(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function clientLabel(client: Awaited<ReturnType<typeof listProposals>>[number]["client"]) {
+  if (!client) return "Needs primary client";
+  return [client.firstName, client.lastName].filter(Boolean).join(" ") || client.email;
+}
+
 export default async function ProposalsPage({
   searchParams,
 }: {
@@ -25,55 +30,56 @@ export default async function ProposalsPage({
       <div className="space-y-6">
         <header className="flex flex-col justify-between gap-4 border-b border-[var(--line)] pb-5 sm:flex-row sm:items-end">
           <div>
-            <h1 className="brand-page-title text-4xl">Proposals</h1>
-            <p className="mt-2 text-sm text-[var(--ink-muted)]">Build and track proposal packages before contract signing and invoicing.</p>
+            <div className="studio-caps text-[0.58rem] text-[var(--ink-3)]">The Reeses Studio</div>
+            <h1 className="brand-page-title mt-2 text-5xl md:text-6xl">Proposals</h1>
+            <p className="mt-2 font-[var(--serif)] text-xl italic text-[var(--ink-2)]">Build and track proposal packages before contract signing and invoicing.</p>
           </div>
-          <Link href="/proposals/new" prefetch={false} className="brand-primary-button inline-flex items-center justify-center gap-2 rounded-sm px-4 py-2.5 transition">
+          <Link href="/proposals/new" prefetch={false} className="brand-primary-button inline-flex items-center justify-center gap-2 px-4 py-2.5 transition">
             <Plus className="h-4 w-4" />
             Create proposal
           </Link>
         </header>
 
         <section className="grid gap-4 md:grid-cols-3">
-          <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
-            <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
+          <div className="studio-card">
+            <div className="studio-caps flex items-center gap-2 text-[0.58rem] text-[var(--ink-3)]">
               <FileSignature className="h-4 w-4" />
               Active proposals
             </div>
-            <div className="mt-3 text-3xl font-semibold">{rows.filter(({ proposal }) => proposal.status !== "accepted" && proposal.status !== "declined").length}</div>
-            <p className="mt-2 text-xs text-[var(--ink-muted)]">Draft, sent, and expiring proposals.</p>
+            <div className="studio-stat-number mt-3">{rows.filter(({ proposal }) => proposal.status !== "accepted" && proposal.status !== "declined").length}</div>
+            <p className="mt-2 text-xs text-[var(--ink-3)]">Draft, sent, and expiring proposals.</p>
           </div>
-          <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
-            <div className="text-sm text-[var(--ink-muted)]">Accepted value</div>
-            <div className="mt-3 text-3xl font-semibold">{formatMoney(rows.filter(({ proposal }) => proposal.status === "accepted").reduce((sum, { proposal }) => sum + (proposal.totalCents ?? 0), 0))}</div>
-            <p className="mt-2 text-xs text-[var(--ink-muted)]">Proposal value marked accepted.</p>
+          <div className="studio-card">
+            <div className="studio-caps text-[0.58rem] text-[var(--ink-3)]">Accepted value</div>
+            <div className="studio-stat-number mt-3">{formatMoney(rows.filter(({ proposal }) => proposal.status === "accepted").reduce((sum, { proposal }) => sum + (proposal.totalCents ?? 0), 0))}</div>
+            <p className="mt-2 text-xs text-[var(--ink-3)]">Proposal value marked accepted.</p>
           </div>
-          <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
-            <div className="text-sm text-[var(--ink-muted)]">Needs invoice</div>
-            <div className="mt-3 text-3xl font-semibold">{rows.filter(({ proposal }) => proposal.status === "accepted" && proposal.invoiceStatus !== "created").length}</div>
-            <p className="mt-2 text-xs text-[var(--ink-muted)]">Accepted proposals without an invoice.</p>
+          <div className="studio-card">
+            <div className="studio-caps text-[0.58rem] text-[var(--ink-3)]">Needs invoice</div>
+            <div className="studio-stat-number mt-3">{rows.filter(({ proposal }) => proposal.status === "accepted" && proposal.invoiceStatus !== "created").length}</div>
+            <p className="mt-2 text-xs text-[var(--ink-3)]">Accepted proposals without an invoice.</p>
           </div>
         </section>
 
         <section className="border-b border-[var(--line)] pb-5">
           <form action="/proposals" className="grid gap-3 md:grid-cols-[1fr_210px_auto]">
-            <label className="space-y-1.5 text-sm font-medium">
-              Search proposals
-              <input name="q" defaultValue={search} placeholder="Project, client, package" className="w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm outline-none transition focus:border-[var(--foreground)]" />
+            <label className="grid gap-1.5 text-sm font-medium">
+              <span className="studio-caps text-[0.58rem] text-[var(--ink-3)]">Search proposals</span>
+              <input name="q" defaultValue={search} placeholder="Project, client, package" className="studio-input" />
             </label>
-            <label className="space-y-1.5 text-sm font-medium">
-              Status
-              <select name="status" defaultValue={status} className="w-full rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm outline-none transition focus:border-[var(--foreground)]">
+            <label className="grid gap-1.5 text-sm font-medium">
+              <span className="studio-caps text-[0.58rem] text-[var(--ink-3)]">Status</span>
+              <select name="status" defaultValue={status} className="studio-input">
                 <option value="all">All statuses</option>
                 {proposalStatusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
             </label>
-            <button className="brand-primary-button self-end rounded-sm px-4 py-2.5 transition">Apply</button>
+            <button className="brand-primary-button self-end px-4 py-2.5 transition">Apply</button>
           </form>
         </section>
 
-        <section className="overflow-hidden rounded-md border border-[var(--line)] bg-[var(--surface)] shadow-sm">
-          <div className="grid grid-cols-[1.2fr_1fr_150px_130px_130px] border-b border-[var(--line)] bg-[#eee8de] px-4 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)] max-lg:hidden">
+        <section className="overflow-hidden border border-[var(--line)] bg-[var(--paper)]">
+          <div className="studio-caps grid grid-cols-[1.2fr_1fr_150px_130px_130px] border-b border-[var(--line)] bg-[var(--paper-2)] px-4 py-3 text-[0.58rem] text-[var(--ink-3)] max-lg:hidden">
             <div>Proposal</div>
             <div>Project</div>
             <div>Valid until</div>
@@ -82,21 +88,21 @@ export default async function ProposalsPage({
           </div>
           <div className="divide-y divide-[var(--line)]">
             {rows.map(({ proposal, project, client }) => (
-              <Link key={proposal.id} href={`/proposals/${proposal.id}`} prefetch={false} className="grid gap-2 px-4 py-4 transition hover:bg-[#f6efe5] lg:grid-cols-[1.2fr_1fr_150px_130px_130px] lg:items-center">
+              <Link key={proposal.id} href={`/proposals/${proposal.id}`} prefetch={false} className="grid gap-2 px-4 py-4 transition hover:bg-[var(--paper-2)] lg:grid-cols-[1.2fr_1fr_150px_130px_130px] lg:items-center">
                 <div>
                   <div className="font-semibold">{proposal.title}</div>
-                  <div className="mt-1 text-sm text-[var(--ink-muted)]">{proposal.packageName || "Package TBD"}</div>
+                  <div className="mt-1 text-sm text-[var(--ink-3)]">{proposal.packageName || "Package TBD"}</div>
                 </div>
                 <div>
                   <div className="text-sm font-medium">{project.name}</div>
-                  <div className="mt-1 text-xs text-[var(--ink-muted)]">{client.firstName} {client.lastName}</div>
+                  <div className={`mt-1 text-xs ${client ? "text-[var(--ink-3)]" : "font-semibold text-[var(--warning)]"}`}>{clientLabel(client)}</div>
                 </div>
-                <div className="text-sm text-[var(--ink-muted)]">{formatDate(proposal.validUntil)}</div>
-                <div className="text-sm capitalize text-[var(--ink-muted)]">{proposal.status.replaceAll("_", " ")}</div>
+                <div className="text-sm text-[var(--ink-3)]">{formatDate(proposal.validUntil)}</div>
+                <div><span className="studio-chip">{proposal.status.replaceAll("_", " ")}</span></div>
                 <div className="text-sm font-semibold">{formatMoney(proposal.totalCents)}</div>
               </Link>
             ))}
-            {!rows.length && <div className="p-8 text-sm text-[var(--ink-muted)]">No proposals yet.</div>}
+            {!rows.length && <div className="p-8 text-sm text-[var(--ink-3)]">No proposals yet.</div>}
           </div>
         </section>
       </div>

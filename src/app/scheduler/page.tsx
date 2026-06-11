@@ -114,9 +114,14 @@ function MeetingTypeForm({
           </label>
           <label className="space-y-1.5 text-sm font-medium md:col-span-2">
             Price, dollars
-            <input name="priceDollars" inputMode="decimal" defaultValue={dollars(meetingType?.priceCents ?? null)} placeholder="Optional; Stripe connection comes later" className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+            <input name="priceDollars" inputMode="decimal" defaultValue={dollars(meetingType?.priceCents ?? null)} placeholder="250" className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
           </label>
         </div>
+        <label className="space-y-1.5 text-sm font-medium">
+          Stripe checkout link
+          <input name="stripePaymentLink" type="url" defaultValue={meetingType?.stripePaymentLink ?? ""} placeholder="https://pay.stripe.com/..." className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+          <span className="block text-xs font-normal leading-5 text-[var(--ink-muted)]">Optional canonical checkout URL shown on paid public booking links.</span>
+        </label>
         <label className="space-y-1.5 text-sm font-medium">
           Confirmation message
           <textarea name="confirmationMessage" rows={2} defaultValue={meetingType?.confirmationMessage ?? ""} placeholder="Shown after a successful booking." className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
@@ -234,7 +239,7 @@ export default async function SchedulerPage() {
                           )}
                         </div>
                         <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                          {meetingType.durationMinutes} min · {meetingType.locationLabel || "Zoom"} · {meetingType.collectPayment ? `$${(meetingType.priceCents ?? 0) / 100}` : "No payment"}
+                          {meetingType.durationMinutes} min · {meetingType.locationLabel || "Zoom"} · {meetingType.collectPayment ? `$${(meetingType.priceCents ?? 0) / 100}${meetingType.stripePaymentLink ? " · Checkout linked" : " · Checkout needed"}` : "No payment"}
                         </p>
                         <p className="mt-1 break-all text-xs text-[var(--ink-muted)]">{bookingUrl}</p>
                       </div>

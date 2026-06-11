@@ -5,7 +5,6 @@ import { questionnaireResponses } from "@/db/schema";
 import { verifyQuestionnaireContext } from "@/lib/questionnaire-links";
 import { getQuestionnaire, listQuestionnaireQuestions } from "@/lib/questionnaires";
 import { and, desc, eq, isNull } from "drizzle-orm";
-import Image from "next/image";
 import { notFound } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -50,7 +49,8 @@ export default async function QuestionnairePreviewPage({
     <main className="min-h-screen bg-[var(--background)] px-4 py-8 text-[var(--foreground)]">
       <div className="mx-auto max-w-3xl">
         <div className="mb-8 text-center">
-          <Image src="/brand/alex-tyler-logo.png" alt="Alex & Tyler" width={230} height={75} className="mx-auto h-auto w-56" priority />
+          <span className="studio-caps block text-[0.62rem] text-[var(--ink-muted)]">The Reeses</span>
+          <span className="font-serif text-3xl leading-none text-[var(--foreground)]">Studio</span>
         </div>
 
         <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] shadow-sm">

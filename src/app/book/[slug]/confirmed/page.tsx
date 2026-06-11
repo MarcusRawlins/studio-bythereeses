@@ -1,7 +1,6 @@
 import { getBookingById, getBookingManageUrls, getMeetingTypeBySlug, getSchedulerSettings } from "@/lib/scheduler";
 import { CalendarDays, CheckCircle2, Clock, Mail, Video } from "lucide-react";
 import type { Metadata } from "next";
-import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -15,7 +14,7 @@ export async function generateMetadata({
 
   return {
     title: meetingType ? `Confirmed: ${meetingType.name} | The Reeses Schedule` : "Confirmed | The Reeses Schedule",
-    description: "Your call with Alex & Tyler is confirmed.",
+    description: "Your call with The Reeses Studio is confirmed.",
   };
 }
 
@@ -50,7 +49,10 @@ export default async function BookingConfirmedPage({
   return (
     <main className="min-h-screen bg-[#f6f3ee] px-5 py-10 text-[var(--foreground)]">
       <div className="mx-auto max-w-2xl rounded-md border border-[var(--line)] bg-[var(--surface)] p-8 text-center shadow-sm">
-        <Image src="/brand/alex-tyler-logo.png" alt="Alex & Tyler" width={230} height={82} priority className="mx-auto h-auto w-52" />
+        <Link href="https://bythereeses.com" prefetch={false} aria-label="The Reeses website" className="block text-center">
+          <span className="studio-caps block text-[0.62rem] text-[var(--ink-muted)]">The Reeses</span>
+          <span className="font-serif text-3xl leading-none text-[var(--foreground)]">Studio</span>
+        </Link>
         <CheckCircle2 className="mx-auto mt-8 h-10 w-10 text-[var(--brand-brown)]" />
         <h1 className="brand-page-title mt-5 text-4xl">Confirmed</h1>
         <p className="mx-auto mt-4 max-w-lg text-sm leading-6 text-[var(--ink-muted)]">

@@ -1,7 +1,7 @@
 "use client";
 
 import type { Questionnaire, QuestionnaireQuestion } from "@/db/schema";
-import { ClipboardList, GripVertical, Save, Send } from "lucide-react";
+import { ClipboardList, FileQuestion, GripVertical, Save, Send } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
@@ -65,14 +65,19 @@ type QuestionnaireTemplateEditorProps = {
   questions: QuestionnaireQuestion[];
   updateQuestionnaire: (formData: FormData) => void | Promise<void>;
   updateQuestion: (formData: FormData) => void | Promise<void>;
+  addQuestion: (formData: FormData) => void | Promise<void>;
   reorderQuestions: (formData: FormData) => void | Promise<void>;
+  projectId?: string;
 };
 
-export function QuestionnaireTemplateEditor({ questionnaire, questions, updateQuestionnaire, updateQuestion, reorderQuestions }: QuestionnaireTemplateEditorProps) {
+export function QuestionnaireTemplateEditor({ questionnaire, questions, updateQuestionnaire, updateQuestion, addQuestion, reorderQuestions, projectId }: QuestionnaireTemplateEditorProps) {
   const [orderedQuestions, setOrderedQuestions] = useState(questions);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ id: string; position: "before" | "after" } | null>(null);
   const orderedQuestionIds = useMemo(() => orderedQuestions.map((question) => question.id).join(","), [orderedQuestions]);
+  const sendHref = projectId
+    ? `/questionnaires/${questionnaire.id}/send?projectId=${projectId}`
+    : `/questionnaires/${questionnaire.id}/send`;
 
   function dropOn(targetId: string, position: "before" | "after") {
     if (!draggedId || draggedId === targetId) return;
@@ -103,8 +108,8 @@ export function QuestionnaireTemplateEditor({ questionnaire, questions, updateQu
     <div className="space-y-6">
       <header className="flex flex-col justify-between gap-4 border-b border-[var(--line)] pb-5 lg:flex-row lg:items-center">
         <div>
-          <Link href="/questionnaires" className="text-sm font-semibold text-[var(--ink-muted)] transition hover:text-[var(--foreground)]">
-            Back to questionnaire templates
+          <Link href={projectId ? `/projects/${projectId}` : "/questionnaires"} className="text-sm font-semibold text-[var(--ink-muted)] transition hover:text-[var(--foreground)]">
+            {projectId ? "Back to project" : "Back to questionnaire templates"}
           </Link>
           <h1 className="mt-3 text-3xl font-semibold">Questionnaire template</h1>
         </div>
@@ -117,7 +122,7 @@ export function QuestionnaireTemplateEditor({ questionnaire, questions, updateQu
             <ClipboardList className="h-4 w-4" />
             Responses
           </Link>
-          <Link href={`/questionnaires/${questionnaire.id}/send`} className="brand-primary-button inline-flex items-center gap-2 rounded-sm px-4 py-2 text-xs">
+          <Link href={sendHref} className="brand-primary-button inline-flex items-center gap-2 rounded-sm px-4 py-2 text-xs">
             <Send className="h-4 w-4" />
             Send
           </Link>
@@ -127,6 +132,7 @@ export function QuestionnaireTemplateEditor({ questionnaire, questions, updateQu
       <section className="grid gap-5 lg:grid-cols-[minmax(0,0.78fr)_minmax(420px,1.22fr)]">
         <form action={updateQuestionnaire} className="h-fit rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
           <input type="hidden" name="questionnaireId" value={questionnaire.id} />
+          {projectId && <input type="hidden" name="projectId" value={projectId} />}
           <div className="grid gap-4">
             <label className="grid gap-1.5 text-sm font-semibold">
               Form title
@@ -163,11 +169,23 @@ export function QuestionnaireTemplateEditor({ questionnaire, questions, updateQu
                 <h3 className="text-lg font-semibold">Questions</h3>
                 <p className="mt-1 text-sm text-[var(--ink-muted)]">Drag from the handle, then save the order.</p>
               </div>
-              <form action={reorderQuestions}>
-                <input type="hidden" name="questionnaireId" value={questionnaire.id} />
-                <input type="hidden" name="orderedQuestionIds" value={orderedQuestionIds} />
-                <button className={subtleButtonClass}>Save order</button>
-              </form>
+              <div className="flex flex-wrap gap-2">
+                <form action={addQuestion} className="flex flex-wrap gap-2">
+                  <input type="hidden" name="questionnaireId" value={questionnaire.id} />
+                  {projectId && <input type="hidden" name="projectId" value={projectId} />}
+                  <input type="hidden" name="title" value="New question" />
+                  <input type="hidden" name="type" value="short_text" />
+                  <button className={subtleButtonClass}>
+                    <FileQuestion className="h-4 w-4" />
+                    Add question
+                  </button>
+                </form>
+                <form action={reorderQuestions}>
+                  <input type="hidden" name="questionnaireId" value={questionnaire.id} />
+                  <input type="hidden" name="orderedQuestionIds" value={orderedQuestionIds} />
+                  <button className={subtleButtonClass}>Save order</button>
+                </form>
+              </div>
             </div>
 
             <div className="space-y-3">
@@ -221,6 +239,7 @@ export function QuestionnaireTemplateEditor({ questionnaire, questions, updateQu
                     <form action={updateQuestion} className="grid gap-4">
                       <input type="hidden" name="questionnaireId" value={questionnaire.id} />
                       <input type="hidden" name="questionId" value={question.id} />
+                      {projectId && <input type="hidden" name="projectId" value={projectId} />}
                       <div className="grid gap-3 md:grid-cols-[1fr_180px]">
                         <label className="grid gap-1.5 text-sm font-semibold">
                           Question text

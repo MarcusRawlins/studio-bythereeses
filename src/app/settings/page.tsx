@@ -1,5 +1,5 @@
 import { AppShell } from "@/components/AppShell";
-import { enabledPaymentMethods, getAppSettings, updateAppSettingsAction, type PaymentMethodKey } from "@/lib/settings";
+import { enabledPaymentMethods, getAppSettings, type PaymentMethodKey } from "@/lib/settings";
 import { CreditCard, Landmark, Mail, Settings, WalletCards } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -48,7 +48,7 @@ export default async function SettingsPage() {
           </div>
         </header>
 
-        <form action={updateAppSettingsAction} className="grid gap-6 xl:grid-cols-[420px_1fr]">
+        <form action="/api/settings" method="post" className="grid gap-6 xl:grid-cols-[420px_1fr]">
           <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
             <div className="flex items-center gap-2">
               <Settings className="h-4 w-4 text-[var(--ink-muted)]" />

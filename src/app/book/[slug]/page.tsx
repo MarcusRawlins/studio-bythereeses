@@ -5,7 +5,6 @@ import {
 } from "@/lib/scheduler";
 import { CalendarDays, Check, Clock, Mail, MapPin, Phone, User, Video } from "lucide-react";
 import type { Metadata } from "next";
-import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -21,7 +20,7 @@ export async function generateMetadata({
 
   return {
     title: meetingType ? `${meetingType.name} | The Reeses Schedule` : "The Reeses Schedule",
-    description: "Book a call with Alex & Tyler.",
+    description: "Book a call with The Reeses Studio.",
   };
 }
 
@@ -139,7 +138,10 @@ export default async function BookingPage({
   return (
     <main className="min-h-screen bg-[#f6f3ee] px-4 py-6 text-[var(--foreground)] sm:py-10">
       <header className="mx-auto mb-6 flex max-w-6xl justify-center">
-        <Image src="/brand/alex-tyler-logo.png" alt="Alex & Tyler" width={250} height={90} priority className="h-auto w-56" />
+        <Link href="https://bythereeses.com" prefetch={false} aria-label="The Reeses website" className="text-center">
+          <span className="studio-caps block text-[0.62rem] text-[var(--ink-muted)]">The Reeses</span>
+          <span className="font-serif text-3xl leading-none text-[var(--foreground)]">Studio</span>
+        </Link>
       </header>
 
       <div className="mx-auto grid max-w-6xl overflow-hidden rounded-md border border-[var(--line)] bg-[var(--surface)] shadow-sm lg:grid-cols-[360px_1fr]">
@@ -183,7 +185,9 @@ export default async function BookingPage({
             <p className="text-sm leading-6 text-[var(--foreground)]">{meetingType.description}</p>
             {meetingType.collectPayment && (
               <p className="rounded-md border border-[var(--line)] bg-[#faf7f1] p-3 text-xs leading-5 text-[var(--ink-muted)]">
-                Payment collection is enabled for this event type, but Stripe checkout is not connected yet. Scheduling will stay available without taking payment until Stripe is live.
+                {meetingType.stripePaymentLink
+                  ? "Payment is collected through the secure checkout link shown after you choose a time."
+                  : "Payment collection is enabled for this event type, but no checkout link is attached yet. Scheduling will stay available without taking payment."}
               </p>
             )}
           </div>
@@ -317,7 +321,19 @@ export default async function BookingPage({
                 </label>
                 {meetingType.collectPayment && (
                   <div className="rounded-md border border-[var(--line)] bg-[#faf7f1] p-4 text-sm leading-6">
-                    Payment collection is enabled for this event type. Stripe checkout will appear here once payment processing is connected.
+                    {meetingType.stripePaymentLink ? (
+                      <div>
+                        <div className="font-semibold">Payment due for this booking</div>
+                        <p className="mt-1 text-[var(--ink-muted)]">
+                          Use the secure checkout link before or immediately after scheduling so the session is reserved cleanly.
+                        </p>
+                        <a href={meetingType.stripePaymentLink} target="_blank" rel="noreferrer" className="mt-3 inline-flex rounded-sm border border-[var(--brand-brown)] px-3 py-2 text-sm font-semibold text-[var(--brand-brown)] transition hover:bg-[#efe7dc]">
+                          Open secure checkout
+                        </a>
+                      </div>
+                    ) : (
+                      "Payment collection is enabled for this event type, but no checkout link is attached yet."
+                    )}
                   </div>
                 )}
                 <button className="brand-primary-button rounded-sm px-4 py-3 transition">Schedule Event</button>
@@ -328,7 +344,7 @@ export default async function BookingPage({
       </div>
       <footer className="mx-auto mt-5 flex max-w-6xl flex-wrap items-center justify-between gap-3 text-sm text-[var(--ink-muted)]">
         <Link href="https://bythereeses.com" prefetch={false} aria-label="The Reeses website">
-          <Image src="/brand/at-badge-dark.png" alt="Alex & Tyler" width={44} height={56} className="h-11 w-auto" />
+          <span className="studio-caps inline-flex h-11 items-center text-[0.62rem] text-[var(--ink-muted)]">The Reeses Studio</span>
         </Link>
         <div className="flex flex-wrap gap-3">
           <Link href="mailto:hello@bythereeses.com" prefetch={false} aria-label="Email The Reeses" className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--line)] transition hover:border-[var(--brand-brown)] hover:bg-[#efe7dc] hover:text-[var(--foreground)]">

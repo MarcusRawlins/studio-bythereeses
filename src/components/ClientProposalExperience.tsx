@@ -1,14 +1,14 @@
 "use client";
 
 import { formatDate, formatMoney } from "@/lib/format";
-import { buildProposalInvoicePreview, buildSelectedProposalPackage } from "@/lib/proposal-client-experience";
-import type { ProposalPreviewLineItem } from "@/lib/proposal-client-experience";
+import { buildProposalInvoicePreview, buildSelectedProposalPackage, proposalSignatureConsentText } from "@/lib/proposal-client-experience";
+import type { ProposalClientSection, ProposalPreviewLineItem } from "@/lib/proposal-client-experience";
+import { canSignProposalContract } from "@/lib/proposal-readiness";
 import { ArrowRight, CalendarDays, CheckCircle2, Clock, Mail, MapPin } from "lucide-react";
-import Image from "next/image";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
-type ProposalStep = "welcome" | "proposal" | "invoice" | "contract";
+type ProposalStep = ProposalClientSection;
 
 type ClientProposalExperienceProps = {
   token: string;
@@ -29,8 +29,10 @@ type ClientProposalExperienceProps = {
   clientEmail: string | null;
   acceptedNotice: boolean;
   signatureError: string | null;
+  initialSection?: ProposalClientSection | null;
   contractTitle: string | null;
   contractBody: string | null;
+  contractStatus: string;
   lineItems: {
     id: string;
     name: string;
@@ -47,11 +49,14 @@ type ClientProposalExperienceProps = {
     balanceCents: number;
     acceptedPaymentMethodsJson: string | null;
     paymentNotes: string | null;
+    stripePaymentLink: string | null;
     payments: {
       id: string;
       label: string;
       dueDate: string | null;
       amountCents: number;
+      stripeCheckoutUrl: string | null;
+      stripeCheckoutStatus: string | null;
     }[];
   }[];
 };
@@ -95,14 +100,16 @@ export function ClientProposalExperience({
   clientEmail,
   acceptedNotice,
   signatureError,
+  initialSection,
   contractTitle,
   contractBody,
+  contractStatus,
   lineItems,
   invoices,
 }: ClientProposalExperienceProps) {
   const isAccepted = proposalStatus === "accepted" || Boolean(acceptedAt);
   const isSigned = Boolean(signedAt);
-  const [step, setStep] = useState<ProposalStep>(isAccepted || acceptedNotice ? "contract" : "welcome");
+  const [step, setStep] = useState<ProposalStep>(initialSection ?? (isAccepted || acceptedNotice ? "contract" : "welcome"));
   const [selectedOptionalLineItemIds, setSelectedOptionalLineItemIds] = useState<string[]>([]);
   const selectedPackage = useMemo(
     () => buildSelectedProposalPackage({ lineItems, selectedOptionalLineItemIds }),
@@ -115,6 +122,7 @@ export function ClientProposalExperience({
     [totalCents, scopeSummary, lineItems, selectedOptionalLineItemIds],
   );
   const displayTotalCents = selectedPackage.totalCents || totalCents;
+  const contractCanBeSigned = canSignProposalContract({ contractBody, contractStatus });
 
   function toggleOptionalLineItem(id: string) {
     setSelectedOptionalLineItemIds((current) => current.includes(id) ? current.filter((itemId) => itemId !== id) : [...current, id]);
@@ -124,15 +132,18 @@ export function ClientProposalExperience({
     <main className="min-h-screen bg-[#f4f1ec] px-4 py-8 text-[var(--foreground)] sm:py-12">
       <div className="mx-auto max-w-6xl">
         <header className="mb-8 flex justify-center">
-          <Link href="https://bythereeses.com" aria-label="The Reeses website">
-            <Image src="/brand/alex-tyler-logo.png" alt="Alex & Tyler" width={240} height={80} className="h-14 w-auto" priority />
+          <Link href="https://bythereeses.com" aria-label="The Reeses website" className="text-center">
+            <span className="studio-caps block text-[0.62rem] text-[var(--ink-muted)]">The Reeses</span>
+            <span className="font-serif text-3xl leading-none text-[var(--foreground)]">Studio</span>
           </Link>
         </header>
 
         {step === "welcome" ? (
           <section className="flex min-h-[620px] items-center justify-center rounded-md border border-[var(--line)] bg-[#eef1f1] px-6 py-16 shadow-sm">
             <div className="mx-auto max-w-2xl text-center">
-              <Image src="/brand/at-badge-dark.png" alt="A&T" width={80} height={80} className="mx-auto h-14 w-auto opacity-80" />
+              <div className="studio-caps mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-[var(--line)] text-sm text-[var(--ink-muted)]">
+                TR
+              </div>
               <h1 className="mt-16 text-4xl font-semibold leading-tight md:text-6xl">Hi, {clientName}</h1>
               <p className="mx-auto mt-8 max-w-xl text-2xl leading-snug text-[var(--ink-muted)]">
                 Your documents from The Reeses are ready to view.
@@ -273,6 +284,11 @@ export function ClientProposalExperience({
                                 <span className="font-semibold">{payment.label}</span>
                                 <span className="text-[var(--ink-muted)]">{formatDate(payment.dueDate)}</span>
                                 <span>{formatMoney(payment.amountCents)}</span>
+                                {payment.stripeCheckoutUrl && payment.stripeCheckoutStatus === "link_ready" && (
+                                  <a href={payment.stripeCheckoutUrl} className="font-semibold text-[var(--foreground)] underline underline-offset-4 md:col-span-3">
+                                    Pay this installment
+                                  </a>
+                                )}
                               </div>
                             ))}
                             {!invoice.payments.length && (
@@ -371,7 +387,9 @@ export function ClientProposalExperience({
                           <p className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">
                             {isSigned
                               ? "Thank you. Tyler can see that this proposal has been signed and accepted."
-                              : "Please type your full legal name below to sign the contract and accept this proposal."}
+                              : contractCanBeSigned
+                                ? "Please type your full legal name below to sign the contract and accept this proposal."
+                                : "Tyler is still finalizing the contract language. This proposal cannot be signed until the agreement text is ready."}
                           </p>
                           {signedAt && (
                             <p className="mt-2 text-xs uppercase tracking-[0.16em] text-[var(--ink-muted)]">
@@ -384,7 +402,7 @@ export function ClientProposalExperience({
                       </div>
                     </div>
 
-                    {!isSigned && (
+                    {!isSigned && contractCanBeSigned && (
                       <form action={`/api/proposal/${token}/accept`} method="post" className="mt-8 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
                         {selectedOptionalLineItemIds.map((lineItemId) => (
                           <input key={lineItemId} type="hidden" name="selectedOptionalLineItemId" value={lineItemId} />
@@ -408,7 +426,7 @@ export function ClientProposalExperience({
                           <label className="flex items-start gap-3 text-sm leading-6 text-[var(--ink-muted)]">
                             <input name="signatureConsent" type="checkbox" required className="mt-1" />
                             <span>
-                              I agree that typing my name above signs the contract electronically and accepts this proposal package.
+                              {proposalSignatureConsentText}
                             </span>
                           </label>
                         </div>
@@ -428,8 +446,8 @@ export function ClientProposalExperience({
         )}
 
         <footer className="mx-auto mt-8 flex max-w-6xl items-center justify-between gap-4 pb-6 text-sm text-[var(--ink-muted)]">
-          <Link href="https://bythereeses.com" aria-label="The Reeses website">
-            <Image src="/brand/at-badge-dark.png" alt="A&T" width={64} height={64} className="h-9 w-auto" />
+          <Link href="https://bythereeses.com" aria-label="The Reeses website" className="studio-caps text-[0.62rem] text-[var(--ink-muted)]">
+            The Reeses Studio
           </Link>
           <a href="mailto:hello@bythereeses.com" className="inline-flex items-center gap-2 transition hover:text-[var(--foreground)]">
             <Mail className="h-4 w-4" />
@@ -454,7 +472,11 @@ function PaymentOptions({ invoice }: { invoice: ClientProposalExperienceProps["i
             <div key={method.key} className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-3 text-sm">
               <div className="font-semibold">{method.displayName}</div>
               <p className="mt-1 break-words text-[var(--ink-muted)]">
-                {method.key === "stripe" ? "Secure card payment will be sent once online checkout is connected." : method.instructions || "Tyler will send details for this payment method."}
+                {method.key === "stripe" && invoice.stripePaymentLink
+                  ? <a href={invoice.stripePaymentLink} className="font-semibold text-[var(--foreground)] underline underline-offset-4">Open secure card checkout</a>
+                  : method.key === "stripe"
+                    ? "Secure card payment will be sent once online checkout is connected."
+                    : method.instructions || "Tyler will send details for this payment method."}
               </p>
               {method.passFees && <p className="mt-2 text-xs uppercase tracking-[0.14em] text-[var(--ink-muted)]">Processing fees passed to client</p>}
             </div>

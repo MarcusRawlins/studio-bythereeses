@@ -25,18 +25,38 @@
 }
 
 :root {
-  --background: #f8f6f3;
-  --foreground: #222222;
-  --surface: #fffdfa;
-  --surface-muted: #eee8de;
-  --line: #d5d0c8;
-  --accent: #222222;
-  --accent-strong: #000000;
-  --ink-muted: #6f665b;
-  --danger: #9f352f;
-  --brand-stone: #b8ada2;
-  --brand-brown: #7a665c;
-  --brand-warm: #f3eee7;
+  --bg: #ffffff;
+  --paper: #ffffff;
+  --paper-2: #f5f1ea;
+  --ink: #1c1a17;
+  --ink-2: #4a443c;
+  --ink-3: #8b8278;
+  --line: #d8d2c5;
+  --line-soft: #e6e0d3;
+  --accent: #7a5a3a;
+  --accent-soft: #f5eee5;
+  --danger: #b42318;
+  --positive: #237a3b;
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --surface: var(--paper);
+  --surface-muted: var(--paper-2);
+  --accent-strong: var(--accent);
+  --ink-muted: var(--ink-3);
+  --brand-stone: #c9b69a;
+  --brand-brown: #7a5a3a;
+  --brand-sage: #4d6b3a;
+  --brand-slate: #6a8a92;
+  --brand-warm: #fbf8f2;
+  --radius-control: 8px;
+  --radius-panel: 8px;
+  --shadow-control: 0 1px 2px rgba(31, 27, 24, 0.04), 0 8px 24px rgba(31, 27, 24, 0.03);
+  --serif: "Times Now", "Cormorant Garamond", Georgia, serif;
+  --caps: "Copperplate CC", "Trajan Pro", serif;
+  --sans: "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  --row-y: 18px;
+  --card-p: 22px;
+  --gap: 20px;
 }
 
 @theme inline {
@@ -49,7 +69,12 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 button,
@@ -70,25 +95,188 @@ a {
 }
 
 .brand-page-title {
-  font-family: "Times Now", Georgia, serif;
+  font-family: var(--serif);
   font-weight: 300;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  text-transform: none;
+  letter-spacing: 0;
   line-height: 0.95;
 }
 
-.brand-primary-button {
-  border: 1px solid var(--foreground);
-  background: var(--foreground);
-  color: var(--background);
-  font-family: "Copperplate CC", Arial, Helvetica, sans-serif;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.14em;
+.brand-wordmark {
+  font-family: var(--serif);
+  font-weight: 300;
   text-transform: uppercase;
+  letter-spacing: 0;
+  line-height: 0.9;
+}
+
+.brand-primary-button {
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--caps);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  border-radius: var(--radius-control);
+  box-shadow: 0 10px 24px rgba(31, 27, 24, 0.12);
+  transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, color 160ms ease, transform 160ms ease;
 }
 
 .brand-primary-button:hover {
-  background: transparent;
-  color: var(--foreground);
+  background: #2b2824;
+  color: var(--ink);
+  color: var(--paper);
+  box-shadow: 0 14px 30px rgba(31, 27, 24, 0.16);
+  transform: translateY(-1px);
+}
+
+.studio-caps {
+  font-family: var(--caps);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.studio-serif {
+  font-family: var(--serif);
+  font-weight: 300;
+}
+
+.studio-card {
+  border: 1px solid var(--line);
+  background: var(--paper);
+  padding: var(--card-p);
+  border-radius: var(--radius-panel);
+  box-shadow: none;
+}
+
+.studio-card-muted {
+  border: 1px solid var(--line-soft);
+  background: var(--paper-2);
+  border-radius: var(--radius-panel);
+}
+
+.studio-hairline {
+  border-color: var(--line);
+}
+
+.studio-input {
+  width: 100%;
+  border: 1px solid rgba(216, 210, 197, 0.9);
+  background: #fffdfb;
+  border-radius: var(--radius-control);
+  padding: 0.72rem 0.9rem;
+  font-size: 0.875rem;
+  color: var(--ink);
+  outline: none;
+  box-shadow: var(--shadow-control);
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.studio-input:focus {
+  border-color: var(--brand-brown);
+  background: var(--paper);
+  box-shadow: 0 0 0 3px rgba(122, 90, 58, 0.1), var(--shadow-control);
+}
+
+select.studio-input {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink-2) 50%),
+    linear-gradient(135deg, var(--ink-2) 50%, transparent 50%);
+  background-position:
+    calc(100% - 1.18rem) calc(50% - 0.12rem),
+    calc(100% - 0.84rem) calc(50% - 0.12rem);
+  background-size: 0.34rem 0.34rem, 0.34rem 0.34rem;
+  background-repeat: no-repeat;
+  padding-right: 2.3rem;
+}
+
+.studio-search-input {
+  padding-left: 2.75rem;
+}
+
+.studio-secondary-button {
+  border: 1px solid rgba(216, 210, 197, 0.95);
+  background: #fffdfb;
+  color: var(--ink-2);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-control);
+  transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.studio-secondary-button:hover {
+  border-color: rgba(122, 90, 58, 0.45);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 10px 24px rgba(31, 27, 24, 0.08);
+  transform: translateY(-1px);
+}
+
+.studio-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  color: var(--ink-2);
+  font-family: var(--caps);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.studio-chip::before {
+  content: "";
+  display: inline-block;
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.studio-chip-selected {
+  border: 1px solid var(--brand-stone);
+  background: var(--accent-soft);
+  color: var(--brand-brown);
+  padding: 0.28rem 0.7rem;
+  border-radius: 999px;
+  box-shadow: 0 1px 2px rgba(122, 90, 58, 0.08);
+}
+
+.studio-stage-inquiry::before { background: #d2c2a8; }
+.studio-stage-proposal_sent::before { background: #c39763; }
+.studio-stage-retainer_paid::before { background: var(--accent); }
+.studio-stage-planning::before { background: #6a8a92; }
+.studio-stage-editing::before { background: #7a6489; }
+.studio-stage-delivered::before { background: #6b8a5a; }
+.studio-stage-completed::before { background: #4a443c; }
+
+.studio-stat-number {
+  font-family: var(--serif);
+  font-size: clamp(2.25rem, 5vw, 4rem);
+  font-weight: 300;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.studio-scrollbar {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+@media (max-width: 640px) {
+  .brand-primary-button {
+    letter-spacing: 0.06em;
+  }
+
+  .studio-chip {
+    padding: 0.3rem 0.6rem;
+    letter-spacing: 0.06em;
+  }
 }

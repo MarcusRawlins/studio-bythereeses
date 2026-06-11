@@ -224,6 +224,18 @@ export function ProjectFormDynamicFields() {
                 Phone
                 <input name="additionalClientPhone" placeholder="555-0123" className={inputClass} />
               </label>
+              <label className="space-y-1.5 text-sm font-medium">
+                Instagram
+                <input name="additionalClientInstagramHandle" placeholder="@jordan" className={inputClass} />
+              </label>
+              <label className="space-y-1.5 text-sm font-medium">
+                Source
+                <input name="additionalClientReferralSource" placeholder="Planner, referral, inquiry form" className={inputClass} />
+              </label>
+              <label className="space-y-1.5 text-sm font-medium sm:col-span-2">
+                Communication preference
+                <textarea name="additionalClientCommunicationPreference" rows={3} placeholder="Email for contracts; text for week-of logistics." className={inputClass} />
+              </label>
             </div>
           </div>
         ))}

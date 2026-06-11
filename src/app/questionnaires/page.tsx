@@ -1,5 +1,5 @@
 import { AppShell } from "@/components/AppShell";
-import { listQuestionnaireQuestions, listQuestionnaireResponses, listQuestionnaires } from "@/lib/questionnaires";
+import { createQuestionnaireAction, listQuestionnaireQuestions, listQuestionnaireResponses, listQuestionnaires } from "@/lib/questionnaires";
 import { ClipboardList, Eye, FileQuestion, Pencil, Send } from "lucide-react";
 import Link from "next/link";
 
@@ -24,10 +24,14 @@ export default async function QuestionnairesPage() {
             <h1 className="brand-page-title text-4xl">Questionnaires</h1>
             <p className="mt-2 text-sm text-[var(--ink-muted)]">Create, edit, send, and track client questionnaires that feed timelines, family lists, vendor credits, and writing workflows.</p>
           </div>
-          <button type="button" disabled className="brand-primary-button inline-flex cursor-not-allowed items-center gap-2 rounded-sm px-4 py-2.5 opacity-60 transition">
-            <FileQuestion className="h-4 w-4" />
-            Create questionnaire
-          </button>
+          <form action={createQuestionnaireAction} className="grid gap-2 rounded-md border border-[var(--line)] bg-[var(--surface)] p-3 sm:min-w-80">
+            <input name="title" placeholder="New questionnaire title" className="rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--accent)]" required />
+            <input type="hidden" name="status" value="draft" />
+            <button className="brand-primary-button inline-flex items-center justify-center gap-2 rounded-sm px-4 py-2.5 text-sm transition">
+              <FileQuestion className="h-4 w-4" />
+              Create questionnaire
+            </button>
+          </form>
         </header>
 
         <section className="grid gap-4 md:grid-cols-3">

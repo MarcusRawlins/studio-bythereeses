@@ -34,7 +34,7 @@ function mailtoLink(email: string, questionnaireTitle: string, questionnaireUrl:
     "After you submit it, you will be sent to schedule your timeline and vision call. You can also use this scheduling link:",
     timelineUrl,
     "",
-    "Alex & Tyler",
+    "The Reeses Studio",
   ].join("\n");
 
   return `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
