@@ -1,4 +1,4 @@
-# CRM Source-of-Truth SOP
+# Reese Photography CRM Source-of-Truth SOP
 
 This is the operating procedure for agents working on the Reese Photography CRM / scheduler codebase.
 

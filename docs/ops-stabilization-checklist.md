@@ -5,7 +5,7 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
 ## Source of Truth
 - Durable business/system context + current priorities: Obsidian (`/Users/tyler-macmini/Documents/Obsidian Vault/02 Businesses/The Reeses/Reese Photography CRM - Source of Truth and Backups.md` and `00 System/System Cleanup Command Center - 2026-05-21.md`).
 - Implementation, deployment, and engineering details: this repo only.
-- Agent/source-control SOP: `docs/source-of-truth-sop.md`.
+- CRM source-of-truth SOP: `docs/crm-source-of-truth-sop.md`.
 - Canonical working copy: `/Volumes/reeseai-memory/code/reese-photography-crm`.
 - Archived divergent copies:
   - `/Users/tyler-macmini/code/reese-photography-crm.2026-06-10-drift-archive`
