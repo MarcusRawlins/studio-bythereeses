@@ -1,5 +1,5 @@
 import { db } from "@/db/client";
-import { clients, projectParticipants, projects, schedulerBookings, schedulerMeetingTypes, schedulerSettings } from "@/db/schema";
+import { clients, invoicePayments, projectParticipants, projects, schedulerBookings, schedulerMeetingTypes, schedulerSettings } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { sendBookingCancellationEmail, sendBookingEmails, sendBookingReminderEmail } from "@/lib/email";
 import { createGoogleCalendarEvent, deleteGoogleCalendarEvent, getConnectedGoogleAccounts, getGoogleBusyTimes, getGoogleCalendarList, getGoogleCalendarStatus } from "@/lib/google-calendar";
@@ -28,6 +28,21 @@ type BusyTime = {
   end: Date;
 };
 
+export type SchedulerBookingPaymentInput = {
+  status?: string | null;
+  paymentMethod?: string | null;
+  paidAmountCents?: number | null;
+  paidAt?: string | null;
+  clientFeeCents?: number | null;
+  processingFeeCents?: number | null;
+  grossCollectedCents?: number | null;
+  netDepositCents?: number | null;
+  externalPaymentId?: string | null;
+  notes?: string | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+};
+
 type SlotMeetingType = {
   durationMinutes: number;
   bufferMinutes: number;
@@ -50,6 +65,9 @@ const defaultQuestion: InviteeQuestion = {
   type: "textarea",
   required: false,
 };
+
+const defaultCardFeePercentBps = 290;
+const defaultCardFeeFixedCents = 30;
 
 const reservedInviteeQuestionLabels = new Set(["name", "your name", "email", "email address"]);
 
@@ -217,6 +235,89 @@ function textValue(formData: FormData, key: string) {
 function numberValue(formData: FormData, key: string, fallback: number) {
   const value = Number(textValue(formData, key));
   return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function formCents(formData: FormData, key: string) {
+  const number = Number(String(formData.get(key) ?? "").replace(/[^0-9.]/g, ""));
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return Math.round(number * 100);
+}
+
+function cleanText(value: string | null | undefined) {
+  return value?.trim() || null;
+}
+
+function requireTylerApprovalForAgentSchedulerPayment(message: string): never {
+  throw new Error(message);
+}
+
+function positiveCents(value: number | null | undefined, fallback = 0) {
+  return Number.isFinite(value) && Number(value) > 0 ? Math.round(Number(value)) : fallback;
+}
+
+function calculateCardFeeAmountCents(subtotalCents: number) {
+  if (subtotalCents <= 0) return 0;
+  return Math.round(subtotalCents * (defaultCardFeePercentBps / 10000)) + defaultCardFeeFixedCents;
+}
+
+function schedulerPaymentLedgerAmounts(input: SchedulerBookingPaymentInput) {
+  const status = cleanText(input.status) ?? "paid";
+  const paymentMethod = cleanText(input.paymentMethod);
+  const paidAmountCents = status === "paid" ? positiveCents(input.paidAmountCents) : 0;
+  const isCardPayment = paymentMethod === "stripe" || paymentMethod === "credit_card";
+  const defaultProcessingFeeCents = isCardPayment ? calculateCardFeeAmountCents(paidAmountCents) : 0;
+  const processingFeeCents = status === "paid" ? positiveCents(input.processingFeeCents, defaultProcessingFeeCents) : 0;
+  const clientFeeCents = status === "paid" ? positiveCents(input.clientFeeCents, isCardPayment ? processingFeeCents : 0) : 0;
+  const grossCollectedCents = status === "paid" ? positiveCents(input.grossCollectedCents, paidAmountCents + clientFeeCents) : 0;
+  const netDepositCents = status === "paid" ? positiveCents(input.netDepositCents, Math.max(grossCollectedCents - processingFeeCents, 0)) : 0;
+
+  return {
+    status,
+    paymentMethod,
+    paidAmountCents,
+    clientFeeCents,
+    processingFeeCents,
+    grossCollectedCents,
+    netDepositCents,
+  };
+}
+
+type SchedulerPaymentActivityOptions = {
+  action: string;
+  actorType: "admin" | "client" | "system" | "agent";
+  actorName: string;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  preserveExistingSource?: boolean;
+};
+
+async function assertSchedulerPaymentProjectSource(projectId: string | null, sourceType: string | null, sourceId: string | null) {
+  if (!sourceType && sourceId) {
+    throw new Error("Scheduler booking payment source links require sourceType when sourceId is set.");
+  }
+  if (sourceType !== "project_source") return;
+  if (!projectId) {
+    throw new Error("Project is required for project source links.");
+  }
+  if (!sourceId) {
+    throw new Error("Project source id is required.");
+  }
+
+  const source = await db.query.projectSources.findFirst({
+    where: (row, { and, eq }) => and(eq(row.id, sourceId), eq(row.projectId, projectId)),
+  });
+  if (!source) {
+    throw new Error("Project source not found for this project.");
+  }
+}
+
+function safeRevalidatePath(path: string) {
+  try {
+    revalidatePath(path);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("static generation store missing")) return;
+    throw error;
+  }
 }
 
 function slugify(value: string) {
@@ -407,12 +508,18 @@ async function linkSchedulerClientToProject(projectId: string | null, clientId: 
     ),
   });
   if (!existing) {
+    const existingPrimary = await db.query.projectParticipants.findFirst({
+      where: and(
+        eq(projectParticipants.projectId, projectId),
+        eq(projectParticipants.isPrimaryContact, true),
+      ),
+    });
     await db.insert(projectParticipants).values({
       id: crypto.randomUUID(),
       projectId,
       clientId,
-      role: "scheduler",
-      isPrimaryContact: false,
+      role: existingPrimary ? "scheduler" : "primary",
+      isPrimaryContact: !existingPrimary,
       createdAt: new Date().toISOString(),
     });
   }
@@ -448,6 +555,7 @@ export async function ensureSchedulerDefaults() {
       locationLabel: "Zoom",
       inviteeQuestionsJson: JSON.stringify([defaultQuestion]),
       collectPayment: false,
+      stripePaymentLink: null,
       smsOptInEnabled: false,
       isActive: true,
       createdAt: now,
@@ -463,6 +571,7 @@ export async function ensureSchedulerDefaults() {
           locationLabel: "Zoom",
           inviteeQuestionsJson: JSON.stringify([defaultQuestion]),
           collectPayment: false,
+          stripePaymentLink: null,
           smsOptInEnabled: false,
           isActive: true,
           createdAt: now,
@@ -835,6 +944,168 @@ export async function getSchedulerBookingDetail(id: string) {
   return { booking, meetingType, client, project, allProjects };
 }
 
+export async function recordSchedulerBookingPaymentFromAgent(bookingId: string, input: SchedulerBookingPaymentInput) {
+  return requireTylerApprovalForAgentSchedulerPayment("Payments require Tyler approval before creation or changes. Agents may draft payment reconciliation recommendations as tasks, but cannot record scheduler payments directly.");
+
+  return recordSchedulerBookingPayment(bookingId, input, {
+    action: "scheduler.booking_payment_recorded_by_agent",
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    sourceType: cleanText(input.sourceType),
+    sourceId: cleanText(input.sourceId),
+  });
+}
+
+export async function updateSchedulerBookingPaymentFromAgent(bookingId: string, input: SchedulerBookingPaymentInput) {
+  return requireTylerApprovalForAgentSchedulerPayment("Payments require Tyler approval before creation or changes. Agents may draft payment reconciliation recommendations as tasks, but cannot update scheduler payments directly.");
+
+  return recordSchedulerBookingPayment(bookingId, input, {
+    action: "scheduler.booking_payment_updated_by_agent",
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    sourceType: cleanText(input.sourceType),
+    sourceId: cleanText(input.sourceId),
+    preserveExistingSource: true,
+  });
+}
+
+async function recordSchedulerBookingPayment(
+  bookingId: string,
+  input: SchedulerBookingPaymentInput,
+  activityOptions: SchedulerPaymentActivityOptions,
+) {
+  const booking = await db.query.schedulerBookings.findFirst({
+    where: eq(schedulerBookings.id, bookingId),
+  });
+  if (!booking) throw new Error("Booking not found.");
+
+  const meetingType = await db.query.schedulerMeetingTypes.findFirst({
+    where: eq(schedulerMeetingTypes.id, booking.meetingTypeId),
+  });
+  if (!meetingType) throw new Error("Meeting type not found.");
+
+  const ledgerAmounts = schedulerPaymentLedgerAmounts(input);
+  const paidAt = ledgerAmounts.status === "paid" ? cleanText(input.paidAt) ?? new Date().toISOString() : null;
+  const now = new Date().toISOString();
+  const paymentLink = booking.paymentLink ?? meetingType.stripePaymentLink ?? null;
+  const externalPaymentId = cleanText(input.externalPaymentId);
+  const notes = cleanText(input.notes);
+  const paymentSourceType = cleanText(input.sourceType)
+    ?? cleanText(activityOptions.sourceType)
+    ?? (activityOptions.preserveExistingSource ? booking.paymentSourceType : null);
+  const paymentSourceId = cleanText(input.sourceId)
+    ?? cleanText(activityOptions.sourceId)
+    ?? (activityOptions.preserveExistingSource ? booking.paymentSourceId : null);
+  await assertSchedulerPaymentProjectSource(booking.projectId, paymentSourceType, paymentSourceId);
+  if (externalPaymentId) {
+    const existingExternalPayment = await db.query.schedulerBookings.findFirst({
+      where: eq(schedulerBookings.externalPaymentId, externalPaymentId),
+    });
+    if (existingExternalPayment && existingExternalPayment.id !== booking.id) {
+      throw new Error("External payment is already linked to another scheduler booking.");
+    }
+    const existingInvoicePayment = await db.query.invoicePayments.findFirst({
+      where: eq(invoicePayments.externalPaymentId, externalPaymentId),
+    });
+    if (existingInvoicePayment) {
+      throw new Error("External payment is already linked to an invoice payment.");
+    }
+  }
+
+  await db.update(schedulerBookings).set({
+    paymentStatus: ledgerAmounts.status,
+    paymentMethod: ledgerAmounts.paymentMethod,
+    paidAt,
+    paidAmountCents: ledgerAmounts.paidAmountCents,
+    clientFeeCents: ledgerAmounts.clientFeeCents,
+    processingFeeCents: ledgerAmounts.processingFeeCents,
+    grossCollectedCents: ledgerAmounts.grossCollectedCents,
+    netDepositCents: ledgerAmounts.netDepositCents,
+    externalPaymentId,
+    paymentLink,
+    paymentNotes: notes,
+    paymentSourceType,
+    paymentSourceId,
+    updatedAt: now,
+  }).where(eq(schedulerBookings.id, booking.id));
+
+  await logActivity({
+    action: activityOptions.action,
+    projectId: booking.projectId,
+    clientId: booking.clientId,
+    actorType: activityOptions.actorType,
+    actorName: activityOptions.actorName,
+    metadata: {
+      bookingId: booking.id,
+      meetingTypeId: booking.meetingTypeId,
+      status: ledgerAmounts.status,
+      paymentMethod: ledgerAmounts.paymentMethod,
+      paidAt,
+      paidAmountCents: ledgerAmounts.paidAmountCents,
+      clientFeeCents: ledgerAmounts.clientFeeCents,
+      processingFeeCents: ledgerAmounts.processingFeeCents,
+      grossCollectedCents: ledgerAmounts.grossCollectedCents,
+      netDepositCents: ledgerAmounts.netDepositCents,
+      externalPaymentId,
+      sourceType: paymentSourceType,
+      sourceId: paymentSourceId,
+    },
+  });
+
+  safeRevalidatePath("/scheduler");
+  safeRevalidatePath(`/scheduler/bookings/${booking.id}`);
+  if (booking.projectId) safeRevalidatePath(`/projects/${booking.projectId}`);
+
+  return {
+    bookingId: booking.id,
+    projectId: booking.projectId,
+    clientId: booking.clientId,
+    status: ledgerAmounts.status,
+    paymentMethod: ledgerAmounts.paymentMethod,
+    paidAt,
+    paidAmountCents: ledgerAmounts.paidAmountCents,
+    clientFeeCents: ledgerAmounts.clientFeeCents,
+    processingFeeCents: ledgerAmounts.processingFeeCents,
+    grossCollectedCents: ledgerAmounts.grossCollectedCents,
+    netDepositCents: ledgerAmounts.netDepositCents,
+    externalPaymentId,
+    paymentLink,
+    paymentSourceType,
+    paymentSourceId,
+  };
+}
+
+export async function recordSchedulerBookingPaymentFromForm(formData: FormData) {
+  const bookingId = textValue(formData, "bookingId");
+  if (!bookingId) throw new Error("Booking is required.");
+
+  return recordSchedulerBookingPayment(
+    bookingId,
+    {
+      status: textValue(formData, "status") || "unpaid",
+      paymentMethod: textValue(formData, "paymentMethod") || null,
+      paidAmountCents: formCents(formData, "paidAmount"),
+      paidAt: textValue(formData, "paidAt") || null,
+      externalPaymentId: textValue(formData, "externalPaymentId") || null,
+      notes: textValue(formData, "notes") || null,
+    },
+    {
+      action: "scheduler.booking_payment_recorded",
+      actorType: "admin",
+      actorName: "The Reeses Studio",
+      sourceType: "admin_booking_payment_form",
+      sourceId: bookingId,
+    },
+  );
+}
+
+export async function recordSchedulerBookingPaymentAction(formData: FormData) {
+  "use server";
+
+  const { bookingId } = await recordSchedulerBookingPaymentFromForm(formData);
+  redirect(`/scheduler/bookings/${bookingId}#payment-${encodeURIComponent(bookingId)}`);
+}
+
 export async function linkBookingToProjectAction(formData: FormData) {
   "use server";
 
@@ -842,6 +1113,10 @@ export async function linkBookingToProjectAction(formData: FormData) {
   const projectId = textValue(formData, "projectId");
   const booking = await getBookingById(bookingId);
   if (!booking || !projectId) throw new Error("Booking and project are required.");
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+  });
+  if (!project) throw new Error("Project not found.");
   if (booking.clientId) await linkSchedulerClientToProject(projectId, booking.clientId);
   await db.update(schedulerBookings).set({
     projectId,
@@ -853,9 +1128,9 @@ export async function linkBookingToProjectAction(formData: FormData) {
     clientId: booking.clientId,
     metadata: { bookingId },
   });
-  revalidatePath("/scheduler");
-  revalidatePath(`/scheduler/bookings/${bookingId}`);
-  revalidatePath(`/projects/${projectId}`);
+  safeRevalidatePath("/scheduler");
+  safeRevalidatePath(`/scheduler/bookings/${bookingId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
   redirect(`/scheduler/bookings/${bookingId}`);
 }
 
@@ -989,6 +1264,7 @@ export async function createMeetingTypeAction(formData: FormData) {
     inviteeQuestionsJson: JSON.stringify(questionsFromForm(formData)),
     collectPayment: formData.get("collectPayment") === "on",
     priceCents: formData.get("collectPayment") === "on" ? numberValue(formData, "priceDollars", 0) * 100 : null,
+    stripePaymentLink: formData.get("collectPayment") === "on" ? textValue(formData, "stripePaymentLink") || null : null,
     smsOptInEnabled: false,
     confirmationMessage: textValue(formData, "confirmationMessage") || null,
     isActive: formData.get("isActive") === "on",
@@ -1027,6 +1303,7 @@ export async function updateMeetingTypeAction(formData: FormData) {
     inviteeQuestionsJson: JSON.stringify(questionsFromForm(formData)),
     collectPayment: formData.get("collectPayment") === "on",
     priceCents: formData.get("collectPayment") === "on" ? numberValue(formData, "priceDollars", 0) * 100 : null,
+    stripePaymentLink: formData.get("collectPayment") === "on" ? textValue(formData, "stripePaymentLink") || null : null,
     smsOptInEnabled: false,
     confirmationMessage: textValue(formData, "confirmationMessage") || null,
     isActive: formData.get("isActive") === "on",

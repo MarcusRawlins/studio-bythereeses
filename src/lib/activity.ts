@@ -5,7 +5,7 @@ type ActivityInput = {
   projectId?: string | null;
   clientId?: string | null;
   action: string;
-  actorType?: "admin" | "client" | "system";
+  actorType?: "admin" | "client" | "system" | "agent";
   actorName?: string | null;
   metadata?: Record<string, unknown>;
 };
@@ -18,8 +18,9 @@ export async function logActivity({
   actorName = "Tyler",
   metadata,
 }: ActivityInput) {
+  const id = crypto.randomUUID();
   await db.insert(activityLogs).values({
-    id: crypto.randomUUID(),
+    id,
     projectId,
     clientId,
     action,
@@ -28,4 +29,5 @@ export async function logActivity({
     metadata: metadata ? JSON.stringify(metadata) : null,
     createdAt: new Date().toISOString(),
   });
+  return id;
 }

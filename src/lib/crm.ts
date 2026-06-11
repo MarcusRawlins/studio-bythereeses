@@ -1,7 +1,8 @@
 import { db } from "@/db/client";
-import { activityLogs, clients, invoices, portalAccessTokens, projectEvents, projectLocations, projectParticipants, projects, proposals } from "@/db/schema";
+import { activityLogs, clients, invoicePayments, invoices, portalAccessTokens, projectEvents, projectLocations, projectParticipants, projects, proposals } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { createGoogleCalendarAllDayEvent, deleteGoogleCalendarEvent, updateGoogleCalendarAllDayEvent } from "@/lib/google-calendar";
+import { invoiceClientPayableBalanceCents } from "@/lib/invoice-balances";
 import { generatePortalLink, revokePortalToken } from "@/lib/portal";
 import { projectEventCalendarStatusAfterEdit } from "@/lib/project-event-calendar";
 import { getSchedulerSettings } from "@/lib/scheduler";
@@ -161,6 +162,16 @@ export async function getProject(projectId: string) {
       orderBy: desc(invoices.createdAt),
     }),
   ]);
+  const projectInvoiceIds = projectInvoices.map((invoice) => invoice.id);
+  const projectInvoicePayments = projectInvoiceIds.length
+    ? await db.query.invoicePayments.findMany({
+        where: (payment, { inArray }) => inArray(payment.invoiceId, projectInvoiceIds),
+      })
+    : [];
+  const paymentsByInvoice = new Map<string, Array<typeof invoicePayments.$inferSelect>>();
+  for (const payment of projectInvoicePayments) {
+    paymentsByInvoice.set(payment.invoiceId, [...(paymentsByInvoice.get(payment.invoiceId) ?? []), payment]);
+  }
 
   return {
     project,
@@ -168,7 +179,10 @@ export async function getProject(projectId: string) {
     events,
     locations,
     proposals: projectProposals,
-    invoices: projectInvoices,
+    invoices: projectInvoices.map((invoice) => ({
+      ...invoice,
+      clientPayableBalanceCents: invoiceClientPayableBalanceCents(invoice, paymentsByInvoice.get(invoice.id) ?? []),
+    })),
     tokens,
     activity,
   };
