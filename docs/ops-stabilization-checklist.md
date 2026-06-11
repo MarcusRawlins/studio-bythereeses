@@ -3,11 +3,11 @@
 Minimal mapping for photography CRM/scheduler stabilization work (baseline after `chore: capture current CRM baseline`). No feature changes. Source-of-truth, gates, and drills only. Work in this repo.
 
 ## Source of Truth
+- Authoritative in-repo SOP: [`crm-source-of-truth-sop.md`](crm-source-of-truth-sop.md) (layer hierarchy, canonical working copy, drift guard).
 - Durable business/system context + current priorities: Obsidian (`/Users/tyler-macmini/Documents/Obsidian Vault/02 Businesses/The Reeses/Reese Photography CRM - Source of Truth and Backups.md` and `00 System/System Cleanup Command Center - 2026-05-21.md`).
 - Implementation, deployment, and engineering details: this repo only.
-- Working copies (non-destructive mirror):
-  - Primary: `/Users/tyler-macmini/code/reese-photography-crm`
-  - Mirror (current): `/Volumes/reeseai-memory/code/reese-photography-crm`
+- Canonical active repo: `/Volumes/reeseai-memory/code/reese-photography-crm`
+- Archived (removed): `/Users/tyler-macmini/code/reese-photography-crm`, `/Users/tyler-macmini/Documents/studio-bythereeses`
 - Backup artifacts (code mirror + exports + snaps): `/Volumes/reeseai-memory/backups/reese-photography-crm/{d1,sqlite,manifests,logs,reconciliations}`
 - Before strategic/durable changes: cross-check Obsidian first.
 - Drift guard (run before durable git work or cross-copy sync): `npm run check:source-drift` (`scripts/check-source-drift.mjs`). Reports primary + known local copies for origin URL, upstream tracking, ahead/behind, dirty worktree, branch/HEAD, and cross-copy HEAD/origin alignment. Non-zero exit on critical drift (HEAD/origin mismatch across present copies). Warnings only for dirty worktree, absent copies, and ahead/behind upstream.
@@ -85,12 +85,18 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
 - Smoke also asserts studio redirect behavior, worker origin blocking, and live counts/health.
 - Scope guard: agent paths intentionally bypass browser Google session; browser admin pages remain protected.
 
+## CRM Integration Stack (Slices 01–11)
+- Current slice: `crm-slice-11-agent-access-docs` — agent/MCP operating reference in `docs/studio-agent-access.md`.
+- Prior slices: ops docs, deploy capture/rollback, schema, lib, API, UI shell, proxy security, ops deploy gate.
+- Slice 11 deliverables: MCP tool reference, agent API auth model, finance mutation approval guard, source-of-truth SOP links, deploy/smoke checklist, remaining live integration requirements, `scripts/studio-agent-access-docs.test.mjs`.
+
 ## Next Branch Plan (Stabilization)
-- Current state: branch `stabilization/ops-2026-06` from `main` @ `6199013`. Many uncommitted feature changes present — do not revert/reset/delete unknown work.
+- Baseline: `stabilization/ops-2026-06` from `main` @ `6199013`. CRM stack branches stack on that work without reverting unknown changes.
 - Slice progress:
   - [x] 1. Create stabilization branch + land starter checklist.
   - [x] 2. Cross-link checklist from README, AGENTS.md, `docs/deployment-live-testing.md`, `docs/backups.md`.
   - [x] 3. Add version capture (`scripts/capture-deploy-versions.mjs`, `npm run deploy:capture-versions`) + rollback helper (`scripts/rollback-deploy.mjs`, `scripts/rollback.sh`, `npm run deploy:rollback`).
+  - [x] 11. Agent/MCP access docs (`docs/studio-agent-access.md`) reconciled with finance approval guard + smoke surface.
   - [ ] 4. Expand with Obsidian priorities + `docs/superpowers/plans/2026-05-20-project-reliability-efficiency.md` items in scope.
   - [ ] 5. Add backup freshness + MCP tool surface assertions into deploy gate where cheap.
   - [ ] 6. Document token rotation drill + "who has the token" inventory (keychain + CF secrets + launchd).

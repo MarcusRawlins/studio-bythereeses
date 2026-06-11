@@ -1,6 +1,6 @@
 # Deployment Live Testing
 
-Ops stabilization checklist (gates, rollback, backup/MCP drills): [`ops-stabilization-checklist.md`](ops-stabilization-checklist.md).
+Source-of-truth SOP: [`crm-source-of-truth-sop.md`](crm-source-of-truth-sop.md). Ops stabilization checklist (gates, rollback, backup/MCP drills): [`ops-stabilization-checklist.md`](ops-stabilization-checklist.md). Agent/MCP operating reference: [`studio-agent-access.md`](studio-agent-access.md).
 
 ## Targets
 

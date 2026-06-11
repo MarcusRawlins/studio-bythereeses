@@ -10,7 +10,7 @@
 
 ## Data Ownership
 
-The local repo at `/Users/tyler-macmini/code/reese-photography-crm` is the primary working copy. The backup mirror at `/Volumes/reeseai-memory/code/reese-photography-crm` is generated with `npm run backup`.
+The canonical active repo is `/Volumes/reeseai-memory/code/reese-photography-crm`. Daily backup rsync targets the same path (non-destructive). See [`crm-source-of-truth-sop.md`](crm-source-of-truth-sop.md).
 
 ## Storage Budget
 

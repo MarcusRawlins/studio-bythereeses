@@ -2,7 +2,7 @@
 
 This CRM uses Cloudflare D1/R2 in production, but operational backups live on `reeseai-memory` so the project is not dependent on Cloudflare as the only copy.
 
-Ops stabilization checklist (deploy gate, rollback, MCP scope): [`ops-stabilization-checklist.md`](ops-stabilization-checklist.md).
+Source-of-truth SOP (canonical working copy): [`crm-source-of-truth-sop.md`](crm-source-of-truth-sop.md). Ops stabilization checklist (deploy gate, rollback, MCP scope): [`ops-stabilization-checklist.md`](ops-stabilization-checklist.md).
 
 ## What Gets Backed Up
 
