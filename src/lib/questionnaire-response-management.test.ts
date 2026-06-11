@@ -274,12 +274,12 @@ async function main() {
     const syncedProject = await db.query.projects.findFirst({
       where: eq(projects.id, projectId),
     });
-    assert.equal(syncedProject?.eventDate, null, "questionnaire wedding dates should not change the canonical project date without Tyler approval");
+    assert.equal(syncedProject?.eventDate, "2026-09-19", "questionnaire wedding dates should populate an empty canonical project date");
     assert.equal(syncedProject?.venueName, "The Garden House");
     assert.equal(syncedProject?.venueAddress, "123 Garden Lane");
     assert.equal(syncedProject?.city, "Hudson");
     assert.equal(syncedProject?.state, "NY");
-    assert.equal(syncedProject?.calendarSyncStatus, "not_connected");
+    assert.equal(syncedProject?.calendarSyncStatus, "needs_google_connection");
 
     const detail = await getQuestionnaireResponseDetail(draftId);
     assert.equal(detail?.response.projectId, projectId);
@@ -315,7 +315,7 @@ async function main() {
       where: eq(projectEvents.projectId, projectId),
     });
     assert.equal(syncedEvent?.title, "Wedding day");
-    assert.equal(syncedEvent?.eventDate, null);
+    assert.equal(syncedEvent?.eventDate, "2026-09-19");
     assert.equal(syncedEvent?.venueName, "The Garden House");
     assert.equal(syncedEvent?.sourceType, "questionnaire_response");
     assert.equal(syncedEvent?.sourceId, draftId);

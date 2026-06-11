@@ -16,6 +16,15 @@ function numberValue(formData: FormData, key: string, fallback: number) {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
+function safeRevalidatePath(path: string) {
+  try {
+    revalidatePath(path);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("static generation store missing")) return;
+    throw error;
+  }
+}
+
 function slugify(value: string) {
   return value
     .toLowerCase()
@@ -57,6 +66,7 @@ function meetingTypeValues(formData: FormData) {
     inviteeQuestionsJson: JSON.stringify(questionsFromForm(formData)),
     collectPayment: formData.get("collectPayment") === "on",
     priceCents: formData.get("collectPayment") === "on" ? Math.round(numberValue(formData, "priceDollars", 0) * 100) : null,
+    stripePaymentLink: formData.get("collectPayment") === "on" ? textValue(formData, "stripePaymentLink") || null : null,
     smsOptInEnabled: false,
     confirmationMessage: textValue(formData, "confirmationMessage") || null,
     isActive: formData.get("isActive") === "on",
@@ -76,7 +86,7 @@ export async function POST(request: NextRequest) {
     if (!id) return NextResponse.json({ error: "Meeting type is required." }, { status: 400 });
     await db.delete(schedulerMeetingTypes).where(eq(schedulerMeetingTypes.id, id));
     await logActivity({ action: "scheduler.meeting_type_deleted", metadata: { id } });
-    revalidatePath("/scheduler");
+    safeRevalidatePath("/scheduler");
     return NextResponse.redirect(new URL("/scheduler?saved=meeting-type", request.url), 303);
   }
 
@@ -89,8 +99,8 @@ export async function POST(request: NextRequest) {
     if (!id) return NextResponse.json({ error: "Meeting type is required." }, { status: 400 });
     await db.update(schedulerMeetingTypes).set(values).where(eq(schedulerMeetingTypes.id, id));
     await logActivity({ action: "scheduler.meeting_type_updated", metadata: { id, name: values.name, slug: values.slug } });
-    revalidatePath("/scheduler");
-    revalidatePath(`/book/${values.slug}`);
+    safeRevalidatePath("/scheduler");
+    safeRevalidatePath(`/book/${values.slug}`);
     return NextResponse.redirect(new URL("/scheduler?saved=meeting-type", request.url), 303);
   }
 
@@ -100,6 +110,6 @@ export async function POST(request: NextRequest) {
     createdAt: new Date().toISOString(),
   });
   await logActivity({ action: "scheduler.meeting_type_created", metadata: { name: values.name, slug: values.slug } });
-  revalidatePath("/scheduler");
+  safeRevalidatePath("/scheduler");
   return NextResponse.redirect(new URL("/scheduler?saved=meeting-type", request.url), 303);
 }

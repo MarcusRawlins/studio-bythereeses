@@ -10,9 +10,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     const { id } = await params;
     const formData = await request.formData();
     formData.set("invoiceId", id);
-    const { invoiceId } = await updateInvoicePaymentFromForm(formData);
+    const { invoiceId, paymentId } = await updateInvoicePaymentFromForm(formData);
 
-    return NextResponse.redirect(new URL(`/invoices/${invoiceId}`, request.url), 303);
+    return NextResponse.redirect(new URL(`/invoices/${invoiceId}#payment-${encodeURIComponent(paymentId)}`, request.url), 303);
   } catch (error) {
     console.error("Invoice payment update failed", error);
     return NextResponse.json(

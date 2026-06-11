@@ -1,6 +1,7 @@
 import { db } from "@/db/client";
 import { clients, projectEvents, projectLocations, projectParticipants, projectSources, projects, questionnaireQuestions, questionnaireResponses, questionnaires } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
+import { projectEventCalendarStatusAfterEdit } from "@/lib/project-event-calendar";
 import {
   createQuestionnaireContext,
   getQuestionnairePublicUrl,
@@ -775,6 +776,15 @@ function textAnswerForProject(
   return null;
 }
 
+function dateAnswerForProject(
+  answers: Array<{ title: string; value: QuestionnaireAnswerValue }>,
+  matcher: (title: string) => boolean,
+) {
+  const value = textAnswerForProject(answers, matcher);
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  return value;
+}
+
 function normalizedLocationName(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -1040,6 +1050,12 @@ async function syncQuestionnaireResponseProjectProfile({
   });
   if (!project) return;
 
+  const eventDate = !project.eventDate
+    ? dateAnswerForProject(
+      answers,
+      (title) => title.includes("wedding date") || title.includes("event date") || title === "date",
+    )
+    : null;
   const venueName = textAnswerForProject(
     answers,
     (title) => (title.includes("venue") || title.includes("location")) && !title.includes("address"),
@@ -1058,6 +1074,13 @@ async function syncQuestionnaireResponseProjectProfile({
   );
 
   const updates: Partial<typeof projects.$inferInsert> = {};
+  if (eventDate && eventDate !== project.eventDate) {
+    updates.eventDate = eventDate;
+    updates.calendarSyncStatus = projectEventCalendarStatusAfterEdit({
+      eventDate,
+      googleCalendarEventId: project.googleCalendarEventId,
+    });
+  }
   if (venueName && venueName !== project.venueName) updates.venueName = venueName;
   if (venueAddress && venueAddress !== project.venueAddress) updates.venueAddress = venueAddress;
   if (city && city !== project.city) updates.city = city;

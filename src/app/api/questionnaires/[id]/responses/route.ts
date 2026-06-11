@@ -6,6 +6,11 @@ import {
   verifyQuestionnaireContext,
   weddingTimelineQuestionnaireId,
 } from "@/lib/questionnaire-links";
+import {
+  createProjectQuestionnaireResponseDraft,
+  updateQuestionnaireResponseAnswers,
+  type QuestionnaireAnswerInput,
+} from "@/lib/questionnaires";
 import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { NextRequest, NextResponse } from "next/server";
@@ -49,6 +54,21 @@ function validateAnswerPayload(
   }
 
   return null;
+}
+
+function safeRevalidatePath(path: string) {
+  try {
+    revalidatePath(path);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("static generation store missing")) {
+      return;
+    }
+    throw error;
+  }
+}
+
+function answerInputFromStoredAnswers(answers: Array<{ questionId: string; value: AnswerValue }>) {
+  return Object.fromEntries(answers.map((answer) => [answer.questionId, answer.value])) as QuestionnaireAnswerInput;
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -108,6 +128,37 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const url = new URL(`/questionnaires/${questionnaire.id}/preview`, request.url);
     url.searchParams.set("saved", "device");
     return NextResponse.redirect(url, 303);
+  }
+
+  if (context?.projectId) {
+    const responseId = await createProjectQuestionnaireResponseDraft({
+      questionnaireId: questionnaire.id,
+      projectId: context.projectId,
+      clientId: context.clientId,
+    });
+
+    await updateQuestionnaireResponseAnswers({
+      responseId,
+      answers: answerInputFromStoredAnswers(answers),
+      submit: isSubmit,
+    });
+
+    if (!isSubmit) {
+      const url = new URL(`/questionnaires/${questionnaire.id}/preview`, request.url);
+      if (contextToken) url.searchParams.set("context", contextToken);
+      url.searchParams.set("saved", "server");
+      return NextResponse.redirect(url, 303);
+    }
+
+    safeRevalidatePath("/questionnaires");
+    safeRevalidatePath(`/questionnaires/${questionnaire.id}`);
+    safeRevalidatePath(`/questionnaires/${questionnaire.id}/preview`);
+
+    if (questionnaire.id === weddingTimelineQuestionnaireId) {
+      return NextResponse.redirect(getQuestionnaireConfirmationUrl(questionnaire.id, contextToken), 303);
+    }
+
+    return NextResponse.redirect(new URL(`/questionnaires/${questionnaire.id}/submitted`, request.url), 303);
   }
 
   const draft = context?.projectId && context?.clientId
@@ -180,9 +231,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     },
   });
 
-  revalidatePath("/questionnaires");
-  revalidatePath(`/questionnaires/${questionnaire.id}`);
-  revalidatePath(`/questionnaires/${questionnaire.id}/preview`);
+  safeRevalidatePath("/questionnaires");
+  safeRevalidatePath(`/questionnaires/${questionnaire.id}`);
+  safeRevalidatePath(`/questionnaires/${questionnaire.id}/preview`);
 
   if (questionnaire.id === weddingTimelineQuestionnaireId) {
     return NextResponse.redirect(getQuestionnaireConfirmationUrl(questionnaire.id, contextToken), 303);
