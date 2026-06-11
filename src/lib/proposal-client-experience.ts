@@ -7,6 +7,18 @@ export type ProposalPreviewLineItem = {
   isOptional?: boolean | null;
 };
 
+export const proposalSignatureConsentVersion = "proposal-signature-v1";
+export const proposalSignatureConsentText = "I agree that typing my name above signs the contract electronically and accepts this proposal package.";
+
+export type ProposalClientSection = "welcome" | "proposal" | "invoice" | "contract";
+
+export function normalizeProposalSection(value: string | null | undefined): ProposalClientSection | null {
+  if (value === "welcome" || value === "proposal" || value === "invoice" || value === "contract") {
+    return value;
+  }
+  return null;
+}
+
 function lineItemTotalCents(item: ProposalPreviewLineItem) {
   return Math.max(item.quantity, 1) * Math.max(item.unitPriceCents, 0);
 }

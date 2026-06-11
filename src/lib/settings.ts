@@ -30,8 +30,8 @@ export type AppSettingsView = BusinessSettings & {
 };
 
 export const defaultBusinessSettings: BusinessSettings = {
-  businessName: "Alex & Tyler Reese",
-  publicBrandName: "Alex & Tyler",
+  businessName: "The Reeses Studio",
+  publicBrandName: "The Reeses Studio",
   contactEmail: "hello@bythereeses.com",
   websiteUrl: "https://bythereeses.com",
   instagramUrl: "https://instagram.com/thereeses",
@@ -166,9 +166,18 @@ function paymentFromForm(formData: FormData, key: PaymentMethodKey): PaymentMeth
   };
 }
 
-export async function updateAppSettingsAction(formData: FormData) {
-  "use server";
+function safeRevalidatePath(path: string) {
+  try {
+    revalidatePath(path);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("static generation store missing")) {
+      return;
+    }
+    throw error;
+  }
+}
 
+export async function updateAppSettingsFromForm(formData: FormData) {
   const business = normalizeBusinessSettings({
     businessName: cleanText(formData.get("businessName")),
     publicBrandName: cleanText(formData.get("publicBrandName")),
@@ -210,7 +219,15 @@ export async function updateAppSettingsAction(formData: FormData) {
     },
   });
 
-  revalidatePath("/settings");
-  revalidatePath("/invoices/new");
-  revalidatePath("/invoices");
+  safeRevalidatePath("/settings");
+  safeRevalidatePath("/invoices/new");
+  safeRevalidatePath("/invoices");
+
+  return { settingsId: SETTINGS_ID };
+}
+
+export async function updateAppSettingsAction(formData: FormData) {
+  "use server";
+
+  await updateAppSettingsFromForm(formData);
 }

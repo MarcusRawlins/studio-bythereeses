@@ -8,6 +8,15 @@ const PUBLIC_PAGE_PREFIXES = [
   "/proposal/",
 ] as const;
 
+const PUBLIC_API_PREFIXES = [
+  "/api/google/auth",
+  "/api/google/callback",
+  "/api/cron/scheduler-reminders",
+  "/api/proposal/",
+  "/api/scheduler/bookings",
+  "/api/stripe/webhook",
+] as const;
+
 function isWorkersDevHost(hostname: string) {
   return hostname === "workers.dev" || hostname.endsWith(".workers.dev");
 }
@@ -18,6 +27,14 @@ export function isPublicOriginBypassPath(pathname: string) {
   }
 
   return /^\/questionnaires\/[^/]+\/(preview|confirmed)$/.test(pathname);
+}
+
+export function isPublicOriginBypassApiPath(pathname: string) {
+  if (PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix))) {
+    return true;
+  }
+
+  return /^\/api\/questionnaires\/[^/]+\/responses$/.test(pathname);
 }
 
 export function shouldBlockDirectWorkerOrigin({
@@ -38,7 +55,7 @@ export function shouldBlockDirectWorkerOrigin({
 
 export function guardDirectWorkerPageRequest(request: Request) {
   const url = new URL(request.url);
-  if (isPublicOriginBypassPath(url.pathname)) {
+  if (isPublicOriginBypassPath(url.pathname) || isPublicOriginBypassApiPath(url.pathname)) {
     return null;
   }
 

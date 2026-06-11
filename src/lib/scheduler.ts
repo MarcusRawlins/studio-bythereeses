@@ -53,6 +53,12 @@ type SlotSettings = {
   minimumNoticeMinutes: number;
 };
 
+type StudioSchedulerMeetingTypeOptions = {
+  projectId?: string | null;
+  clientId?: string | null;
+  includeInactive?: boolean;
+};
+
 const defaultAvailability: AvailabilityWindow[] = [
   { day: 2, start: "10:00", end: "16:00" },
   { day: 3, start: "10:00", end: "16:00" },
@@ -624,6 +630,55 @@ export async function listProjectBookingLinks(projectId: string, clientId?: stri
   return meetingTypes.map((meetingType) => ({
     meetingType,
     url: getProjectBookingUrl(meetingType.slug, projectId, clientId),
+  }));
+}
+
+export async function listStudioSchedulerMeetingTypes({
+  projectId,
+  clientId,
+  includeInactive = false,
+}: StudioSchedulerMeetingTypeOptions = {}) {
+  await ensureSchedulerDefaults();
+  const normalizedProjectId = projectId?.trim() || null;
+  const normalizedClientId = clientId?.trim() || null;
+
+  if (normalizedProjectId) {
+    const project = await db.query.projects.findFirst({ where: eq(projects.id, normalizedProjectId) });
+    if (!project) throw new Error("Project not found.");
+  }
+  if (normalizedClientId) {
+    const client = await db.query.clients.findFirst({ where: eq(clients.id, normalizedClientId) });
+    if (!client) throw new Error("Client not found.");
+    if (!normalizedProjectId) throw new Error("Scheduler client links require a project.");
+    const participant = await db.query.projectParticipants.findFirst({
+      where: and(eq(projectParticipants.projectId, normalizedProjectId), eq(projectParticipants.clientId, normalizedClientId)),
+    });
+    if (!participant) throw new Error("Scheduler client is not linked to this project.");
+  }
+
+  const meetingTypes = await db.query.schedulerMeetingTypes.findMany({
+    where: includeInactive ? undefined : eq(schedulerMeetingTypes.isActive, true),
+    orderBy: asc(schedulerMeetingTypes.createdAt),
+  });
+
+  return meetingTypes.map((meetingType) => ({
+    id: meetingType.id,
+    slug: meetingType.slug,
+    name: meetingType.name,
+    description: meetingType.description,
+    durationMinutes: meetingType.durationMinutes,
+    bufferMinutes: meetingType.bufferMinutes,
+    locationType: meetingType.locationType,
+    locationLabel: meetingType.locationLabel,
+    collectPayment: meetingType.collectPayment,
+    priceCents: meetingType.priceCents,
+    stripePaymentLink: meetingType.stripePaymentLink,
+    isActive: meetingType.isActive,
+    confirmationMessage: meetingType.confirmationMessage,
+    inviteeQuestions: parseInviteeQuestions(meetingType.inviteeQuestionsJson),
+    bookingUrl: getBookingUrl(meetingType.slug),
+    projectBookingUrl: normalizedProjectId ? getProjectBookingUrl(meetingType.slug, normalizedProjectId, normalizedClientId) : null,
+    updatedAt: meetingType.updatedAt,
   }));
 }
 

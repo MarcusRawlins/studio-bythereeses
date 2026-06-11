@@ -1,20 +1,30 @@
 import { db } from "@/db/client";
 import { activityLogs, clients, invoicePayments, invoices, projectParticipants, projects, proposalAccessTokens, proposalLineItems, proposals, schedulerBookings, schedulerMeetingTypes, templates } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
+import { ensureEngagementPlaceholder } from "@/lib/crm";
 import { formatMoney } from "@/lib/format";
 import { invoiceClientPayableBalanceCents as calculateInvoiceClientPayableBalanceCents, invoiceClientPayableCents as calculateInvoiceClientPayableCents } from "@/lib/invoice-balances";
 import { canSignProposalContract, nextProposalStatus } from "@/lib/proposal-readiness";
 import { enabledPaymentMethods, getAppSettings, type PaymentMethodKey } from "@/lib/settings";
 import { createHash, randomBytes } from "node:crypto";
-import { and, asc, desc, eq, inArray, like, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, like, or } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 const DEFAULT_CARD_FEE_PERCENT_BPS = 290;
 const DEFAULT_CARD_FEE_FIXED_CENTS = 30;
-const invoicePaymentCheckoutStatuses = new Set(["not_created", "link_ready", "paid", "expired", "void"]);
 
 export { invoiceClientPayableBalanceCents, invoiceClientPayableCents } from "@/lib/invoice-balances";
+
+function textValue(formData: FormData, key: string) {
+  return String(formData.get(key) ?? "").trim();
+}
+
+function nullableTextValue(formData: FormData, key: string) {
+  return textValue(formData, key) || null;
+}
+
+const invoicePaymentCheckoutStatuses = new Set(["not_created", "link_ready", "paid", "expired", "void"]);
 
 function invoicePaymentCheckoutStatus(value: string | null, checkoutUrl: string | null) {
   const status = value?.trim() || (checkoutUrl ? "link_ready" : "not_created");
@@ -24,29 +34,8 @@ function invoicePaymentCheckoutStatus(value: string | null, checkoutUrl: string 
   return status;
 }
 
-function parseAcceptedPaymentMethodKeys(value: string | null): PaymentMethodKey[] {
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((item) => {
-        if (typeof item === "string") return item;
-        if (item && typeof item === "object" && "key" in item && typeof item.key === "string") return item.key;
-        return null;
-      })
-      .filter((key): key is PaymentMethodKey => Boolean(key) && isPaymentMethodKey(key));
-  } catch {
-    return [];
-  }
-}
-
-function textValue(formData: FormData, key: string) {
-  return String(formData.get(key) ?? "").trim();
-}
-
-function nullableTextValue(formData: FormData, key: string) {
-  return textValue(formData, key) || null;
+function packageIncludesEngagementSession(items: Array<{ name: string; description?: string | null }>) {
+  return items.some((item) => /\bengagement\b/i.test([item.name, item.description].filter(Boolean).join(" ")));
 }
 
 function toCents(value: FormDataEntryValue | null) {
@@ -90,25 +79,6 @@ function hashProposalToken(token: string) {
 
 function proposalBaseUrl() {
   return process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_SCHEDULE_URL || "http://localhost:3000";
-}
-
-function invoiceBalance(invoice: { totalCents: number; amountPaidCents: number }) {
-  return Math.max(invoice.totalCents - invoice.amountPaidCents, 0);
-}
-
-function isPaymentMethodKey(value: string): value is PaymentMethodKey {
-  return ["stripe", "zelle", "venmo", "cashCheck"].includes(value);
-}
-
-function defaultPaymentNotes(methods: ReturnType<typeof enabledPaymentMethods>) {
-  if (!methods.length) return null;
-  return methods
-    .map((method) => {
-      if (method.key === "stripe") return `${method.displayName}: secure payment link will be provided when card payments are connected.`;
-      if (method.instructions) return `${method.displayName}: ${method.instructions}`;
-      return method.displayName;
-    })
-    .join("\n");
 }
 
 export function reconciledInvoicePaymentStatus(invoice: { totalCents: number; status: string }, paidTotalCents: number) {
@@ -256,6 +226,243 @@ function invoicePaymentLedgerAmounts({
   };
 }
 
+async function syncUnpaidProposalInvoicesToAcceptedTotal({
+  proposalId,
+  projectId,
+  totalCents,
+  now,
+}: {
+  proposalId: string;
+  projectId: string;
+  totalCents: number;
+  now: string;
+}) {
+  const linkedInvoices = await db.query.invoices.findMany({
+    where: eq(invoices.proposalId, proposalId),
+  });
+
+  for (const invoice of linkedInvoices) {
+    if (invoice.totalCents === totalCents || invoice.amountPaidCents > 0 || invoice.status === "paid" || invoice.status === "void") {
+      continue;
+    }
+
+    const payments = await db.query.invoicePayments.findMany({
+      where: eq(invoicePayments.invoiceId, invoice.id),
+      orderBy: [asc(invoicePayments.createdAt), asc(invoicePayments.label)],
+    });
+    if (payments.some((payment) => payment.status === "paid" || payment.paidAmountCents > 0)) {
+      continue;
+    }
+
+    const deltaCents = totalCents - invoice.totalCents;
+    const unpaidPayments = payments.filter((payment) => payment.status !== "paid");
+    const adjustablePayment = unpaidPayments.find((payment) => /final|balance/i.test(payment.label))
+      ?? [...unpaidPayments].reverse()[0]
+      ?? null;
+    const cardFeeAmountCents = calculateCardFeeAmountCents({
+      subtotalCents: totalCents,
+      percentBps: invoice.cardFeePolicy === "client_pays" ? invoice.cardFeePercentBps ?? DEFAULT_CARD_FEE_PERCENT_BPS : 0,
+      fixedCents: invoice.cardFeePolicy === "client_pays" ? invoice.cardFeeFixedCents ?? DEFAULT_CARD_FEE_FIXED_CENTS : 0,
+    });
+
+    await db.update(invoices).set({
+      totalCents,
+      cardFeeAmountCents,
+      updatedAt: now,
+    }).where(eq(invoices.id, invoice.id));
+
+    if (adjustablePayment) {
+      await db.update(invoicePayments).set({
+        amountCents: Math.max(adjustablePayment.amountCents + deltaCents, 0),
+        updatedAt: now,
+      }).where(eq(invoicePayments.id, adjustablePayment.id));
+    }
+
+    await logActivity({
+      projectId,
+      action: "invoice.synced_to_accepted_proposal",
+      metadata: {
+        invoiceId: invoice.id,
+        proposalId,
+        previousTotalCents: invoice.totalCents,
+        totalCents,
+        adjustedPaymentId: adjustablePayment?.id ?? null,
+        deltaCents,
+      },
+    });
+  }
+}
+
+function isPaymentMethodKey(value: string): value is PaymentMethodKey {
+  return ["stripe", "zelle", "venmo", "cashCheck"].includes(value);
+}
+
+function defaultPaymentNotes(methods: ReturnType<typeof enabledPaymentMethods>) {
+  if (!methods.length) return null;
+  return methods
+    .map((method) => {
+      if (method.key === "stripe") return `${method.displayName}: secure payment link will be provided when card payments are connected.`;
+      if (method.instructions) return `${method.displayName}: ${method.instructions}`;
+      return method.displayName;
+    })
+    .join("\n");
+}
+
+function parseAcceptedPaymentMethodKeys(value: string | null): PaymentMethodKey[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "key" in item && typeof item.key === "string") return item.key;
+        return null;
+      })
+      .filter((key): key is PaymentMethodKey => Boolean(key) && isPaymentMethodKey(key));
+  } catch {
+    return [];
+  }
+}
+
+export const proposalStatusOptions = [
+  { value: "draft", label: "Draft" },
+  { value: "ready", label: "Ready" },
+  { value: "sent", label: "Sent" },
+  { value: "viewed", label: "Viewed" },
+  { value: "accepted", label: "Accepted" },
+  { value: "declined", label: "Declined" },
+  { value: "expired", label: "Expired" },
+];
+
+function proposalStatusFromWorkflow({
+  currentStatus,
+  contractStatus,
+  invoiceStatus,
+  validUntil,
+  packageComplete = true,
+}: {
+  currentStatus?: string | null;
+  contractStatus: string;
+  invoiceStatus: string;
+  validUntil?: string | null;
+  packageComplete?: boolean;
+}) {
+  return nextProposalStatus({ currentStatus, contractStatus, invoiceStatus, validUntil, packageComplete });
+}
+
+function packageLineItemsFromForm(formData: FormData) {
+  const names = formValues(formData, "lineItemName");
+  const descriptions = formValues(formData, "lineItemDescription");
+  const quantities = formValues(formData, "lineItemQuantity");
+  const prices = formValues(formData, "lineItemUnitPrice");
+
+  return names.map((name, index) => ({
+    name,
+    description: at(descriptions, index) || null,
+    quantity: Math.max(Number(at(quantities, index)) || 1, 1),
+    unitPriceCents: toCents(at(prices, index)),
+    isOptional: formData.get(`lineItemOptional_${index}`) === "on",
+    sortOrder: index,
+  })).filter((item) => item.name || item.unitPriceCents > 0);
+}
+
+function includedPackageTotalCents(items: ReturnType<typeof packageLineItemsFromForm>) {
+  return items.reduce((sum, item) => item.isOptional ? sum : sum + item.quantity * item.unitPriceCents, 0);
+}
+
+function packageHasIncludedPricedItem(items: ReturnType<typeof packageLineItemsFromForm>) {
+  return items.some((item) => !item.isOptional && item.quantity > 0 && item.unitPriceCents > 0);
+}
+
+function inferredContractStatus({
+  existingStatus,
+  contractBody,
+  contractTemplateId,
+}: {
+  existingStatus?: string | null;
+  contractBody?: string | null;
+  contractTemplateId?: string | null;
+}) {
+  if (existingStatus === "signed") return "signed";
+  if (contractBody?.trim() || contractTemplateId) return "ready";
+  return "not_started";
+}
+
+async function proposalContractMergeData({
+  projectId,
+  proposalTitle,
+  packageName,
+  totalCents,
+  scopeSummary,
+}: {
+  projectId: string;
+  proposalTitle: string;
+  packageName?: string | null;
+  totalCents?: number | null;
+  scopeSummary?: string | null;
+}) {
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  const primaryRows = await db
+    .select({ client: clients })
+    .from(projectParticipants)
+    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(eq(projectParticipants.projectId, projectId))
+    .orderBy(desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt));
+  const primaryClient = primaryRows[0]?.client ?? null;
+  const clientName = primaryClient
+    ? [primaryClient.firstName, primaryClient.lastName].filter(Boolean).join(" ")
+    : "";
+
+  return {
+    "project.name": project?.name ?? "",
+    "project.type": project?.type ?? "",
+    "project.event_date": project?.eventDate ?? "",
+    "project.venue_name": project?.venueName ?? "",
+    "project.venue_address": project?.venueAddress ?? "",
+    "project.city": project?.city ?? "",
+    "project.state": project?.state ?? "",
+    "client.name": clientName,
+    "client.first_name": primaryClient?.firstName ?? "",
+    "client.last_name": primaryClient?.lastName ?? "",
+    "client.preferred_name": primaryClient?.preferredName ?? primaryClient?.firstName ?? "",
+    "client.email": primaryClient?.email ?? "",
+    "client.phone": primaryClient?.phone ?? "",
+    "proposal.title": proposalTitle,
+    "proposal.package_name": packageName ?? "",
+    "proposal.total": typeof totalCents === "number" && totalCents > 0 ? formatMoney(totalCents) : "",
+    "proposal.scope_summary": scopeSummary ?? "",
+  };
+}
+
+async function renderContractTemplateBody({
+  templateBody,
+  projectId,
+  proposalTitle,
+  packageName,
+  totalCents,
+  scopeSummary,
+}: {
+  templateBody: string;
+  projectId: string;
+  proposalTitle: string;
+  packageName?: string | null;
+  totalCents?: number | null;
+  scopeSummary?: string | null;
+}) {
+  const mergeData = await proposalContractMergeData({
+    projectId,
+    proposalTitle,
+    packageName,
+    totalCents,
+    scopeSummary,
+  });
+
+  return templateBody.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (match, key: string) => (
+    Object.prototype.hasOwnProperty.call(mergeData, key) ? mergeData[key as keyof typeof mergeData] : match
+  ));
+}
+
 function mergeTemplateBody(body: string, data: Record<string, string>) {
   return body.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (match, key: string) => (
     Object.prototype.hasOwnProperty.call(data, key) ? data[key] : match
@@ -302,72 +509,50 @@ async function renderInvoiceReminderTemplate({
   });
 }
 
-export const proposalStatusOptions = [
-  { value: "draft", label: "Draft" },
-  { value: "ready", label: "Ready" },
-  { value: "sent", label: "Sent" },
-  { value: "viewed", label: "Viewed" },
-  { value: "accepted", label: "Accepted" },
-  { value: "declined", label: "Declined" },
-  { value: "expired", label: "Expired" },
-];
-
-function proposalStatusFromWorkflow({
-  currentStatus,
-  contractStatus,
-  invoiceStatus,
-  validUntil,
-  packageComplete = true,
+async function renderProposalPackageTemplateBody({
+  templateBody,
+  projectId,
+  proposalTitle,
+  packageName,
+  totalCents,
 }: {
-  currentStatus?: string | null;
-  contractStatus: string;
-  invoiceStatus: string;
-  validUntil?: string | null;
-  packageComplete?: boolean;
+  templateBody: string;
+  projectId: string;
+  proposalTitle: string;
+  packageName?: string | null;
+  totalCents?: number | null;
 }) {
-  return nextProposalStatus({ currentStatus, contractStatus, invoiceStatus, validUntil, packageComplete });
+  const mergeData = await proposalContractMergeData({
+    projectId,
+    proposalTitle,
+    packageName,
+    totalCents,
+    scopeSummary: null,
+  });
+
+  return mergeTemplateBody(templateBody, mergeData);
+}
+
+async function activeProposalPackageTemplate(templateId: string | null) {
+  if (!templateId) return null;
+  const template = await db.query.templates.findFirst({
+    where: and(eq(templates.id, templateId), eq(templates.type, "proposal_package"), eq(templates.status, "active")),
+  });
+  if (!template) throw new Error("Proposal package template not found.");
+  return template;
+}
+
+async function activeContractTemplate(templateId: string | null) {
+  if (!templateId) return null;
+  const template = await db.query.templates.findFirst({
+    where: and(eq(templates.id, templateId), eq(templates.type, "contract"), eq(templates.status, "active")),
+  });
+  if (!template) throw new Error("Contract template not found.");
+  return template;
 }
 
 function proposalIsAcceptedOrSigned(proposal: Pick<typeof proposals.$inferSelect, "acceptedAt" | "signedAt" | "status" | "contractStatus">) {
   return Boolean(proposal.acceptedAt || proposal.signedAt || proposal.status === "accepted" || proposal.contractStatus === "signed");
-}
-
-function packageLineItemsFromForm(formData: FormData) {
-  const names = formValues(formData, "lineItemName");
-  const descriptions = formValues(formData, "lineItemDescription");
-  const quantities = formValues(formData, "lineItemQuantity");
-  const prices = formValues(formData, "lineItemUnitPrice");
-
-  return names.map((name, index) => ({
-    name,
-    description: at(descriptions, index) || null,
-    quantity: Math.max(Number(at(quantities, index)) || 1, 1),
-    unitPriceCents: toCents(at(prices, index)),
-    isOptional: formData.get(`lineItemOptional_${index}`) === "on",
-    sortOrder: index,
-  })).filter((item) => item.name || item.unitPriceCents > 0);
-}
-
-function includedPackageTotalCents(items: ReturnType<typeof packageLineItemsFromForm>) {
-  return items.reduce((sum, item) => item.isOptional ? sum : sum + item.quantity * item.unitPriceCents, 0);
-}
-
-function packageHasIncludedPricedItem(items: ReturnType<typeof packageLineItemsFromForm>) {
-  return items.some((item) => !item.isOptional && item.quantity > 0 && item.unitPriceCents > 0);
-}
-
-function inferredContractStatus({
-  existingStatus,
-  contractBody,
-  contractTemplateId,
-}: {
-  existingStatus?: string | null;
-  contractBody?: string | null;
-  contractTemplateId?: string | null;
-}) {
-  if (existingStatus === "signed") return "signed";
-  if (contractBody?.trim() || contractTemplateId) return "ready";
-  return "not_started";
 }
 
 async function replaceProposalLineItems(proposalId: string, formData: FormData) {
@@ -392,369 +577,6 @@ async function replaceProposalLineItems(proposalId: string, formData: FormData) 
   }
 
   return includedPackageTotalCents(items);
-}
-
-type ProjectOptionRow = {
-  project: typeof projects.$inferSelect;
-  client: typeof clients.$inferSelect;
-};
-
-type ProposalOptionRow = {
-  proposal: typeof proposals.$inferSelect;
-  project: typeof projects.$inferSelect;
-};
-
-type ProposalRow = {
-  proposal: typeof proposals.$inferSelect;
-  project: typeof projects.$inferSelect;
-  client: typeof clients.$inferSelect;
-};
-
-export async function listProjectOptions() {
-  const rows = await db
-    .select({
-      project: projects,
-      client: clients,
-    })
-    .from(projectParticipants)
-    .innerJoin(projects, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
-    .orderBy(desc(projects.createdAt)) as unknown as ProjectOptionRow[];
-
-  const seen = new Set<string>();
-  return rows.filter((row) => {
-    if (seen.has(row.project.id)) return false;
-    seen.add(row.project.id);
-    return true;
-  });
-}
-
-export async function listClientOptions() {
-  return db.query.clients.findMany({
-    orderBy: desc(clients.createdAt),
-  });
-}
-
-export async function listContractTemplateOptions() {
-  return db.query.templates.findMany({
-    where: and(eq(templates.type, "contract"), eq(templates.status, "active")),
-    orderBy: desc(templates.createdAt),
-  });
-}
-
-export async function listProposalOptions(projectId?: string) {
-  const rows = await db
-    .select({
-      proposal: proposals,
-      project: projects,
-    })
-    .from(proposals)
-    .innerJoin(projects, eq(proposals.projectId, projects.id))
-    .where(projectId ? eq(proposals.projectId, projectId) : undefined)
-    .orderBy(desc(proposals.createdAt)) as unknown as ProposalOptionRow[];
-
-  return rows;
-}
-
-export async function listProposals(search = "", status = "all") {
-  const filters = [
-    status !== "all" ? eq(proposals.status, status) : undefined,
-    search
-      ? or(
-          like(proposals.title, `%${search}%`),
-          like(proposals.packageName, `%${search}%`),
-          like(projects.name, `%${search}%`),
-          like(clients.firstName, `%${search}%`),
-          like(clients.lastName, `%${search}%`),
-        )
-      : undefined,
-  ].filter(Boolean);
-
-  return db
-    .select({
-      proposal: proposals,
-      project: projects,
-      client: clients,
-    })
-    .from(proposals)
-    .innerJoin(projects, eq(proposals.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
-    .where(filters.length ? and(...filters) : undefined)
-    .orderBy(desc(proposals.createdAt)) as unknown as Promise<ProposalRow[]>;
-}
-
-export async function getProposal(proposalId: string) {
-  const rows = await db
-    .select({
-      proposal: proposals,
-      project: projects,
-      client: clients,
-    })
-    .from(proposals)
-    .innerJoin(projects, eq(proposals.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
-    .where(eq(proposals.id, proposalId)) as unknown as ProposalRow[];
-
-  const row = rows[0];
-  if (!row) return null;
-
-  const linkedInvoices = await db.query.invoices.findMany({
-    where: eq(invoices.proposalId, proposalId),
-    orderBy: desc(invoices.createdAt),
-  });
-  const lineItems = await db.query.proposalLineItems.findMany({
-    where: eq(proposalLineItems.proposalId, proposalId),
-    orderBy: proposalLineItems.sortOrder,
-  });
-  const accessTokens = await db.query.proposalAccessTokens.findMany({
-    where: eq(proposalAccessTokens.proposalId, proposalId),
-    orderBy: desc(proposalAccessTokens.createdAt),
-  });
-
-  return { ...row, invoices: linkedInvoices, lineItems, accessTokens };
-}
-
-export async function createProposalLinkFromForm(formData: FormData) {
-  const proposalId = textValue(formData, "proposalId");
-  const projectId = textValue(formData, "projectId");
-  const clientId = nullableTextValue(formData, "clientId");
-  if (!proposalId || !projectId) throw new Error("Proposal and project are required.");
-
-  const proposal = await db.query.proposals.findFirst({ where: eq(proposals.id, proposalId) });
-  if (!proposal) throw new Error("Proposal not found.");
-  await assertProposalCanBeShared(proposal);
-
-  const now = new Date().toISOString();
-  const token = randomBytes(32).toString("base64url");
-  const url = `${proposalBaseUrl()}/proposal/${token}`;
-
-  await db.insert(proposalAccessTokens).values({
-    id: crypto.randomUUID(),
-    proposalId,
-    projectId,
-    clientId,
-    tokenHash: hashProposalToken(token),
-    label: textValue(formData, "label") || "Client proposal package",
-    expiresAt: addTokenDays(45),
-    sentAt: now,
-    viewedAt: null,
-    revokedAt: null,
-    lastUsedAt: null,
-    lastUsedIp: null,
-    createdAt: now,
-  });
-
-  await db.update(proposals).set({
-    status: "sent",
-    sentAt: proposal.sentAt ?? now,
-    updatedAt: now,
-  }).where(eq(proposals.id, proposalId));
-
-  await logActivity({
-    projectId,
-    clientId,
-    action: "proposal.link_created",
-    metadata: { proposalId, expiresAt: addTokenDays(45) },
-  });
-
-  revalidatePath("/proposals");
-  revalidatePath(`/proposals/${proposalId}`);
-  revalidatePath(`/projects/${projectId}`);
-
-  return { proposalId, projectId, url };
-}
-
-export async function createProposalLinkAction(formData: FormData) {
-  "use server";
-
-  const result = await createProposalLinkFromForm(formData);
-  redirect(`/proposals/${result.proposalId}?share=${encodeURIComponent(result.url)}`);
-}
-
-export async function getProposalPackageByToken(token: string, lastUsedIp?: string | null) {
-  const tokenRow = await db.query.proposalAccessTokens.findFirst({
-    where: eq(proposalAccessTokens.tokenHash, hashProposalToken(token)),
-  });
-
-  if (!tokenRow || tokenRow.revokedAt || tokenRow.expiresAt < new Date().toISOString()) return null;
-
-  const rows = await db
-    .select({
-      proposal: proposals,
-      project: projects,
-      client: clients,
-    })
-    .from(proposals)
-    .innerJoin(projects, eq(proposals.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
-    .where(eq(proposals.id, tokenRow.proposalId)) as unknown as ProposalRow[];
-
-  const row = rows.find((candidate) => candidate.client.id === tokenRow.clientId) ?? rows[0];
-  if (!row) return null;
-
-  const [lineItems, linkedInvoices] = await Promise.all([
-    db.query.proposalLineItems.findMany({
-      where: eq(proposalLineItems.proposalId, tokenRow.proposalId),
-      orderBy: proposalLineItems.sortOrder,
-    }),
-    db.query.invoices.findMany({
-      where: eq(invoices.proposalId, tokenRow.proposalId),
-      orderBy: desc(invoices.createdAt),
-    }),
-  ]);
-
-  const invoiceIds = linkedInvoices.map((invoice) => invoice.id);
-  const paymentRows = invoiceIds.length
-    ? await db.query.invoicePayments.findMany({
-        where: inArray(invoicePayments.invoiceId, invoiceIds),
-        orderBy: invoicePayments.dueDate,
-      })
-    : [];
-  const paymentsByInvoiceId = new Map<string, typeof paymentRows>();
-  for (const payment of paymentRows) {
-    if (!linkedInvoices.some((invoice) => invoice.id === payment.invoiceId)) continue;
-    paymentsByInvoiceId.set(payment.invoiceId, [...(paymentsByInvoiceId.get(payment.invoiceId) ?? []), payment]);
-  }
-
-  const now = new Date().toISOString();
-  const firstView = !tokenRow.viewedAt;
-  await db.update(proposalAccessTokens).set({
-    viewedAt: tokenRow.viewedAt ?? now,
-    lastUsedAt: now,
-    lastUsedIp: lastUsedIp ?? null,
-  }).where(eq(proposalAccessTokens.id, tokenRow.id));
-
-  if (["draft", "ready", "sent"].includes(row.proposal.status)) {
-    await db.update(proposals).set({ status: "viewed", updatedAt: now }).where(eq(proposals.id, row.proposal.id));
-    row.proposal.status = "viewed";
-  }
-
-  if (firstView) {
-    await logActivity({
-      projectId: tokenRow.projectId,
-      clientId: tokenRow.clientId,
-      action: "proposal.viewed",
-      actorType: "client",
-      actorName: `${row.client.firstName} ${row.client.lastName ?? ""}`.trim(),
-      metadata: { proposalId: row.proposal.id },
-    });
-  }
-
-  return {
-    ...row,
-    accessToken: { ...tokenRow, viewedAt: tokenRow.viewedAt ?? now, lastUsedAt: now },
-    lineItems,
-    invoices: linkedInvoices.map((invoice) => ({
-      ...invoice,
-      payments: paymentsByInvoiceId.get(invoice.id) ?? [],
-      balanceCents: invoiceBalance(invoice),
-    })),
-  };
-}
-
-export async function acceptProposalByToken(
-  token: string,
-  lastUsedIp?: string | null,
-  signature?: { signerName: string; signerEmail: string | null; selectedOptionalLineItemIds?: string[] },
-) {
-  if (!signature?.signerName) return null;
-
-  const tokenRow = await db.query.proposalAccessTokens.findFirst({
-    where: eq(proposalAccessTokens.tokenHash, hashProposalToken(token)),
-  });
-
-  if (!tokenRow || tokenRow.revokedAt || tokenRow.expiresAt < new Date().toISOString()) return null;
-
-  const rows = await db
-    .select({
-      proposal: proposals,
-      project: projects,
-      client: clients,
-    })
-    .from(proposals)
-    .innerJoin(projects, eq(proposals.projectId, projects.id))
-    .innerJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
-    .where(eq(proposals.id, tokenRow.proposalId)) as unknown as ProposalRow[];
-
-  const row = rows.find((candidate) => candidate.client.id === tokenRow.clientId) ?? rows[0];
-  if (!row || ["declined", "expired"].includes(row.proposal.status)) return null;
-
-  const now = new Date().toISOString();
-  const firstAcceptance = !row.proposal.acceptedAt;
-  const firstSignature = !row.proposal.signedAt;
-  const selectedOptionalLineItemIds = Array.from(new Set(signature.selectedOptionalLineItemIds ?? []));
-  let validSelectedOptionalLineItemIds: string[] = [];
-
-  if (selectedOptionalLineItemIds.length) {
-    const selectedLineItems = await db.query.proposalLineItems.findMany({
-      where: and(eq(proposalLineItems.proposalId, row.proposal.id), inArray(proposalLineItems.id, selectedOptionalLineItemIds)),
-    });
-    validSelectedOptionalLineItemIds = selectedLineItems
-      .filter((item) => item.isOptional)
-      .map((item) => item.id);
-
-    if (validSelectedOptionalLineItemIds.length) {
-      await db.update(proposalLineItems).set({
-        isOptional: false,
-        updatedAt: now,
-      }).where(and(eq(proposalLineItems.proposalId, row.proposal.id), inArray(proposalLineItems.id, validSelectedOptionalLineItemIds)));
-    }
-  }
-
-  const acceptedLineItems = validSelectedOptionalLineItemIds.length
-    ? await db.query.proposalLineItems.findMany({ where: eq(proposalLineItems.proposalId, row.proposal.id) })
-    : [];
-  const acceptedTotalCents = validSelectedOptionalLineItemIds.length ? dbIncludedPackageTotalCents(acceptedLineItems) : row.proposal.totalCents;
-
-  await db.update(proposalAccessTokens).set({
-    viewedAt: tokenRow.viewedAt ?? now,
-    lastUsedAt: now,
-    lastUsedIp: lastUsedIp ?? null,
-  }).where(eq(proposalAccessTokens.id, tokenRow.id));
-
-  await db.update(proposals).set({
-    status: "accepted",
-    acceptedAt: row.proposal.acceptedAt ?? now,
-    signedAt: row.proposal.signedAt ?? now,
-    signerName: row.proposal.signerName ?? signature.signerName,
-    signerEmail: row.proposal.signerEmail ?? signature.signerEmail,
-    contractStatus: "signed",
-    totalCents: acceptedTotalCents,
-    updatedAt: now,
-  }).where(eq(proposals.id, row.proposal.id));
-
-  if (firstAcceptance) {
-    await logActivity({
-      projectId: tokenRow.projectId,
-      clientId: tokenRow.clientId,
-      action: "proposal.accepted",
-      actorType: "client",
-      actorName: `${row.client.firstName} ${row.client.lastName ?? ""}`.trim(),
-      metadata: { proposalId: row.proposal.id, selectedOptionalLineItemIds: validSelectedOptionalLineItemIds },
-    });
-  }
-
-  if (firstSignature) {
-    await logActivity({
-      projectId: tokenRow.projectId,
-      clientId: tokenRow.clientId,
-      action: "proposal.signed",
-      actorType: "client",
-      actorName: signature.signerName,
-      metadata: { proposalId: row.proposal.id, signerEmail: signature.signerEmail },
-    });
-  }
-
-  revalidatePath("/proposals");
-  revalidatePath(`/proposals/${row.proposal.id}`);
-  revalidatePath(`/projects/${tokenRow.projectId}`);
-  revalidatePath(`/proposal/${token}`);
-
-  return { proposalId: row.proposal.id, projectId: tokenRow.projectId };
 }
 
 export const invoiceStatusOptions = [
@@ -790,6 +612,47 @@ async function assertProposalCanBeShared(proposal: typeof proposals.$inferSelect
     throw new Error("Proposal contract must be ready before creating a client link.");
   }
 }
+
+type AgentProposalLineItemInput = {
+  name: string;
+  description?: string | null;
+  quantity?: number | null;
+  unitPriceCents?: number | null;
+  isOptional?: boolean | null;
+};
+
+export type AgentProposalInput = {
+  title: string;
+  packageName?: string | null;
+  proposalPackageTemplateId?: string | null;
+  validUntil?: string | null;
+  scopeSummary?: string | null;
+  contractTemplateId?: string | null;
+  contractTitle?: string | null;
+  contractBody?: string | null;
+  lineItems: AgentProposalLineItemInput[];
+  sourceType?: string | null;
+  sourceId?: string | null;
+};
+
+export type AgentProposalUpdateInput = {
+  title?: string | null;
+  packageName?: string | null;
+  proposalPackageTemplateId?: string | null;
+  validUntil?: string | null;
+  scopeSummary?: string | null;
+  contractTemplateId?: string | null;
+  contractTitle?: string | null;
+  contractBody?: string | null;
+  lineItems?: AgentProposalLineItemInput[] | null;
+  sourceType?: string | null;
+  sourceId?: string | null;
+};
+
+export type AgentProposalLinkInput = {
+  clientId?: string | null;
+  label?: string | null;
+};
 
 export type AgentInvoiceInput = {
   proposalId?: string | null;
@@ -882,6 +745,25 @@ function safeRevalidatePath(path: string) {
     }
     throw error;
   }
+}
+
+function normalizedAgentLineItems(items: AgentProposalLineItemInput[]) {
+  return items.map((item, index) => ({
+    name: cleanAgentText(item.name) ?? "Package item",
+    description: cleanAgentText(item.description),
+    quantity: Math.max(Math.round(Number(item.quantity ?? 1)) || 1, 1),
+    unitPriceCents: Math.max(Math.round(Number(item.unitPriceCents ?? 0)) || 0, 0),
+    isOptional: Boolean(item.isOptional),
+    sortOrder: index,
+  })).filter((item) => item.name || item.unitPriceCents > 0);
+}
+
+function agentIncludedPackageTotalCents(items: ReturnType<typeof normalizedAgentLineItems>) {
+  return items.reduce((sum, item) => item.isOptional ? sum : sum + item.quantity * item.unitPriceCents, 0);
+}
+
+function agentPackageHasIncludedPricedItem(items: ReturnType<typeof normalizedAgentLineItems>) {
+  return items.some((item) => !item.isOptional && item.quantity > 0 && item.unitPriceCents > 0);
 }
 
 async function agentInvoicePaymentSettings(acceptedPaymentMethods?: PaymentMethodKey[] | null) {
@@ -984,22 +866,65 @@ async function replacePendingInvoiceSchedule(args: Parameters<typeof normalizedI
   }
 }
 
-function missingPrimaryClient(): typeof clients.$inferSelect {
-  return {
-    id: "missing-primary-client",
-    firstName: "Needs",
-    lastName: "primary client",
-    email: "missing@local",
-    phone: null,
-    preferredName: null,
-    instagramHandle: null,
-    communicationPreference: null,
-    referralSource: null,
-    notes: null,
-    createdAt: "",
-    updatedAt: "",
-  };
+async function replaceAgentProposalLineItems(proposalId: string, lineItems: ReturnType<typeof normalizedAgentLineItems>, now: string) {
+  await db.delete(proposalLineItems).where(eq(proposalLineItems.proposalId, proposalId));
+
+  if (lineItems.length) {
+    await db.insert(proposalLineItems).values(lineItems.map((item) => ({
+      id: crypto.randomUUID(),
+      proposalId,
+      name: item.name,
+      description: item.description,
+      quantity: item.quantity,
+      unitPriceCents: item.unitPriceCents,
+      isOptional: item.isOptional,
+      sortOrder: item.sortOrder,
+      createdAt: now,
+      updatedAt: now,
+    })));
+  }
 }
+
+function proposalMissingFields({
+  packageComplete,
+  contractStatus,
+  invoiceStatus,
+}: {
+  packageComplete: boolean;
+  contractStatus: string;
+  invoiceStatus: string;
+}) {
+  const missing: string[] = [];
+  if (!packageComplete) missing.push("package");
+  if (!["ready", "signed"].includes(contractStatus)) missing.push("contract");
+  if (invoiceStatus !== "created") missing.push("invoice");
+  return missing;
+}
+
+type ProjectOptionRow = {
+  project: typeof projects.$inferSelect;
+  client: typeof clients.$inferSelect;
+  participant: typeof projectParticipants.$inferSelect | null;
+};
+
+type ProposalOptionRow = {
+  proposal: typeof proposals.$inferSelect;
+  project: typeof projects.$inferSelect;
+};
+
+type ProposalRow = {
+  proposal: typeof proposals.$inferSelect;
+  project: typeof projects.$inferSelect;
+  client: typeof clients.$inferSelect;
+};
+
+type InvoiceRow = {
+  invoice: typeof invoices.$inferSelect;
+  project: typeof projects.$inferSelect;
+  client: typeof clients.$inferSelect;
+  proposal: typeof proposals.$inferSelect | null;
+  clientPayableBalanceCents?: number;
+};
 
 export type PaymentLedgerRow = {
   sourceType: "invoice" | "scheduler_booking";
@@ -1066,29 +991,480 @@ export type PaymentLedgerReportInput = {
   asOfDate?: string | null;
 };
 
-type InvoiceQueryRow = {
-  invoice: typeof invoices.$inferSelect;
-  project: typeof projects.$inferSelect;
-  client: typeof clients.$inferSelect | null;
-  proposal: typeof proposals.$inferSelect | null;
-};
+export async function listProjectOptions() {
+  const rows = await db
+    .select({
+      project: projects,
+      client: clients,
+      participant: projectParticipants,
+    })
+    .from(projects)
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .orderBy(desc(projects.createdAt), desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as ProjectOptionRow[];
 
-type InvoiceRow = {
-  invoice: typeof invoices.$inferSelect;
-  project: typeof projects.$inferSelect;
-  client: typeof clients.$inferSelect;
-  proposal: typeof proposals.$inferSelect | null;
-  clientPayableBalanceCents?: number;
-};
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    if (seen.has(row.project.id)) return false;
+    seen.add(row.project.id);
+    return true;
+  });
+}
 
-type InvoiceDetailRow = {
-  invoice: typeof invoices.$inferSelect;
-  project: typeof projects.$inferSelect;
-  client: typeof clients.$inferSelect;
-  proposal: typeof proposals.$inferSelect | null;
-};
+export async function listClientOptions() {
+  return db.query.clients.findMany({
+    orderBy: desc(clients.createdAt),
+  });
+}
 
-export async function listInvoices(search = "", status = "all"): Promise<InvoiceRow[]> {
+export async function listContractTemplateOptions() {
+  return db.query.templates.findMany({
+    where: and(eq(templates.type, "contract"), eq(templates.status, "active")),
+    orderBy: desc(templates.createdAt),
+  });
+}
+
+export async function listProposalPackageTemplateOptions() {
+  return db.query.templates.findMany({
+    where: and(eq(templates.type, "proposal_package"), eq(templates.status, "active")),
+    orderBy: desc(templates.createdAt),
+  });
+}
+
+export async function listProposalOptions(projectId?: string) {
+  const rows = await db
+    .select({
+      proposal: proposals,
+      project: projects,
+    })
+    .from(proposals)
+    .innerJoin(projects, eq(proposals.projectId, projects.id))
+    .where(projectId ? eq(proposals.projectId, projectId) : undefined)
+    .orderBy(desc(proposals.createdAt)) as unknown as ProposalOptionRow[];
+
+  return rows;
+}
+
+export async function listProposals(search = "", status = "all") {
+  const filters = [
+    status !== "all" ? eq(proposals.status, status) : undefined,
+    search
+      ? or(
+          like(proposals.title, `%${search}%`),
+          like(proposals.packageName, `%${search}%`),
+          like(projects.name, `%${search}%`),
+          like(clients.firstName, `%${search}%`),
+          like(clients.lastName, `%${search}%`),
+        )
+      : undefined,
+  ].filter(Boolean);
+
+  const rows = await db
+    .select({
+      proposal: proposals,
+      project: projects,
+      client: clients,
+    })
+    .from(proposals)
+    .innerJoin(projects, eq(proposals.projectId, projects.id))
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(filters.length ? and(...filters) : undefined)
+    .orderBy(desc(proposals.createdAt), desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as ProposalRow[];
+
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    if (seen.has(row.proposal.id)) return false;
+    seen.add(row.proposal.id);
+    return true;
+  });
+}
+
+export async function getProposal(proposalId: string) {
+  const rows = await db
+    .select({
+      proposal: proposals,
+      project: projects,
+      client: clients,
+    })
+    .from(proposals)
+    .innerJoin(projects, eq(proposals.projectId, projects.id))
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(eq(proposals.id, proposalId))
+    .orderBy(desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as ProposalRow[];
+
+  const row = rows[0];
+  if (!row) return null;
+
+  const linkedInvoices = await db.query.invoices.findMany({
+    where: eq(invoices.proposalId, proposalId),
+    orderBy: desc(invoices.createdAt),
+  });
+  const lineItems = await db.query.proposalLineItems.findMany({
+    where: eq(proposalLineItems.proposalId, proposalId),
+    orderBy: proposalLineItems.sortOrder,
+  });
+  const accessTokens = await db.query.proposalAccessTokens.findMany({
+    where: eq(proposalAccessTokens.proposalId, proposalId),
+    orderBy: desc(proposalAccessTokens.createdAt),
+  });
+
+  return { ...row, invoices: linkedInvoices, lineItems, accessTokens };
+}
+
+export async function createProposalLinkFromForm(formData: FormData) {
+  const proposalId = textValue(formData, "proposalId");
+  const projectId = textValue(formData, "projectId");
+  const clientId = nullableTextValue(formData, "clientId");
+  if (!proposalId || !projectId) throw new Error("Proposal and project are required.");
+
+  const proposal = await db.query.proposals.findFirst({ where: eq(proposals.id, proposalId) });
+  if (!proposal) throw new Error("Proposal not found.");
+  if (proposal.projectId !== projectId) throw new Error("Proposal does not belong to this project.");
+  await assertProposalCanBeShared(proposal);
+  if (clientId) {
+    const participant = await db.query.projectParticipants.findFirst({
+      where: and(eq(projectParticipants.projectId, projectId), eq(projectParticipants.clientId, clientId)),
+    });
+    if (!participant) throw new Error("Proposal client is not linked to this project.");
+  }
+
+  const now = new Date().toISOString();
+  const token = randomBytes(32).toString("base64url");
+  const url = `${proposalBaseUrl()}/proposal/${token}`;
+  const expiresAt = addTokenDays(45);
+  const label = textValue(formData, "label") || "Client proposal package";
+  const activeMatchingTokens = await db.query.proposalAccessTokens.findMany({
+    where: clientId
+      ? and(
+        eq(proposalAccessTokens.proposalId, proposalId),
+        eq(proposalAccessTokens.projectId, projectId),
+        eq(proposalAccessTokens.clientId, clientId),
+        isNull(proposalAccessTokens.revokedAt),
+      )
+      : and(
+        eq(proposalAccessTokens.proposalId, proposalId),
+        eq(proposalAccessTokens.projectId, projectId),
+        isNull(proposalAccessTokens.clientId),
+        isNull(proposalAccessTokens.revokedAt),
+      ),
+  });
+  if (activeMatchingTokens.length) {
+    await db.update(proposalAccessTokens).set({
+      revokedAt: now,
+    }).where(inArray(proposalAccessTokens.id, activeMatchingTokens.map((row) => row.id)));
+    await logActivity({
+      projectId,
+      clientId,
+      action: "proposal.link_replaced",
+      metadata: { proposalId, revokedTokenIds: activeMatchingTokens.map((row) => row.id) },
+    });
+  }
+
+  await db.insert(proposalAccessTokens).values({
+    id: crypto.randomUUID(),
+    proposalId,
+    projectId,
+    clientId,
+    tokenHash: hashProposalToken(token),
+    label,
+    expiresAt,
+    sentAt: now,
+    viewedAt: null,
+    revokedAt: null,
+    lastUsedAt: null,
+    lastUsedIp: null,
+    createdAt: now,
+  });
+
+  await db.update(proposals).set({
+    status: "sent",
+    sentAt: proposal.sentAt ?? now,
+    updatedAt: now,
+  }).where(eq(proposals.id, proposalId));
+
+  await logActivity({
+    projectId,
+    clientId,
+    action: "proposal.link_created",
+    metadata: { proposalId, expiresAt },
+  });
+
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${proposalId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
+
+  return { proposalId, projectId, clientId, label, expiresAt, url };
+}
+
+export async function createProposalLinkFromAgent(projectId: string, proposalId: string, input: AgentProposalLinkInput = {}) {
+  const formData = new FormData();
+  formData.set("projectId", projectId);
+  formData.set("proposalId", proposalId);
+  if (input.clientId) formData.set("clientId", input.clientId);
+  if (input.label) formData.set("label", input.label);
+  return createProposalLinkFromForm(formData);
+}
+
+export async function createProposalLinkAction(formData: FormData) {
+  "use server";
+
+  const result = await createProposalLinkFromForm(formData);
+  redirect(`/proposals/${result.proposalId}?share=${encodeURIComponent(result.url)}`);
+}
+
+export async function getProposalPackageByToken(token: string, lastUsedIp?: string | null) {
+  const tokenRow = await db.query.proposalAccessTokens.findFirst({
+    where: eq(proposalAccessTokens.tokenHash, hashProposalToken(token)),
+  });
+
+  if (!tokenRow || tokenRow.revokedAt || tokenRow.expiresAt < new Date().toISOString()) return null;
+
+  const rows = await db
+    .select({
+      proposal: proposals,
+      project: projects,
+      client: clients,
+    })
+    .from(proposals)
+    .innerJoin(projects, eq(proposals.projectId, projects.id))
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(eq(proposals.id, tokenRow.proposalId)) as unknown as ProposalRow[];
+
+  const row = rows.find((candidate) => candidate.client?.id === tokenRow.clientId) ?? rows[0];
+  if (!row) return null;
+
+  const [lineItems, linkedInvoices] = await Promise.all([
+    db.query.proposalLineItems.findMany({
+      where: eq(proposalLineItems.proposalId, tokenRow.proposalId),
+      orderBy: proposalLineItems.sortOrder,
+    }),
+    db.query.invoices.findMany({
+      where: eq(invoices.proposalId, tokenRow.proposalId),
+      orderBy: desc(invoices.createdAt),
+    }),
+  ]);
+
+  const invoiceIds = linkedInvoices.map((invoice) => invoice.id);
+  const paymentRows = invoiceIds.length
+    ? await db.query.invoicePayments.findMany({
+        where: inArray(invoicePayments.invoiceId, invoiceIds),
+        orderBy: invoicePayments.dueDate,
+      })
+    : [];
+  const paymentsByInvoiceId = new Map<string, typeof paymentRows>();
+  for (const payment of paymentRows) {
+    if (!linkedInvoices.some((invoice) => invoice.id === payment.invoiceId)) continue;
+    paymentsByInvoiceId.set(payment.invoiceId, [...(paymentsByInvoiceId.get(payment.invoiceId) ?? []), payment]);
+  }
+
+  const now = new Date().toISOString();
+  const firstView = !tokenRow.viewedAt;
+  await db.update(proposalAccessTokens).set({
+    viewedAt: tokenRow.viewedAt ?? now,
+    lastUsedAt: now,
+    lastUsedIp: lastUsedIp ?? null,
+  }).where(eq(proposalAccessTokens.id, tokenRow.id));
+
+  if (["draft", "ready", "sent"].includes(row.proposal.status)) {
+    await db.update(proposals).set({ status: "viewed", updatedAt: now }).where(eq(proposals.id, row.proposal.id));
+    row.proposal.status = "viewed";
+  }
+
+  if (firstView) {
+    await logActivity({
+      projectId: tokenRow.projectId,
+      clientId: tokenRow.clientId,
+      action: "proposal.viewed",
+      actorType: "client",
+      actorName: row.client ? `${row.client.firstName} ${row.client.lastName ?? ""}`.trim() : "Client proposal viewer",
+      metadata: { proposalId: row.proposal.id },
+    });
+  }
+
+  return {
+    ...row,
+    accessToken: { ...tokenRow, viewedAt: tokenRow.viewedAt ?? now, lastUsedAt: now },
+    lineItems,
+    invoices: linkedInvoices.map((invoice) => ({
+      ...invoice,
+      payments: paymentsByInvoiceId.get(invoice.id) ?? [],
+      balanceCents: calculateInvoiceClientPayableBalanceCents(invoice, paymentsByInvoiceId.get(invoice.id) ?? []),
+    })),
+  };
+}
+
+export async function acceptProposalByToken(
+  token: string,
+  lastUsedIp?: string | null,
+  signature?: {
+    signerName: string;
+    signerEmail: string | null;
+    selectedOptionalLineItemIds?: string[];
+    userAgent?: string | null;
+    consentText?: string | null;
+    consentVersion?: string | null;
+  },
+) {
+  if (!signature?.signerName) return null;
+
+  const tokenRow = await db.query.proposalAccessTokens.findFirst({
+    where: eq(proposalAccessTokens.tokenHash, hashProposalToken(token)),
+  });
+
+  if (!tokenRow || tokenRow.revokedAt || tokenRow.expiresAt < new Date().toISOString()) return null;
+
+  const rows = await db
+    .select({
+      proposal: proposals,
+      project: projects,
+      client: clients,
+    })
+    .from(proposals)
+    .innerJoin(projects, eq(proposals.projectId, projects.id))
+    .leftJoin(projectParticipants, eq(projectParticipants.projectId, projects.id))
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .where(eq(proposals.id, tokenRow.proposalId)) as unknown as ProposalRow[];
+
+  const row = rows.find((candidate) => candidate.client?.id === tokenRow.clientId) ?? rows[0];
+  if (!row || ["declined", "expired"].includes(row.proposal.status)) return null;
+
+  const now = new Date().toISOString();
+  const firstAcceptance = !row.proposal.acceptedAt;
+  const firstSignature = !row.proposal.signedAt;
+  if (proposalIsAcceptedOrSigned(row.proposal)) {
+    await db.update(proposalAccessTokens).set({
+      viewedAt: tokenRow.viewedAt ?? now,
+      lastUsedAt: now,
+      lastUsedIp: lastUsedIp ?? null,
+    }).where(eq(proposalAccessTokens.id, tokenRow.id));
+
+    safeRevalidatePath(`/proposal/${token}`);
+    return { proposalId: row.proposal.id, projectId: tokenRow.projectId };
+  }
+  if (!canSignProposalContract({
+    contractBody: row.proposal.contractBody,
+    contractStatus: row.proposal.contractStatus,
+  })) {
+    await db.update(proposalAccessTokens).set({
+      viewedAt: tokenRow.viewedAt ?? now,
+      lastUsedAt: now,
+      lastUsedIp: lastUsedIp ?? null,
+    }).where(eq(proposalAccessTokens.id, tokenRow.id));
+
+    safeRevalidatePath(`/proposal/${token}`);
+    return null;
+  }
+
+  const signerName = signature.signerName.trim().replace(/\s+/g, " ");
+  const signerEmail = signature.signerEmail?.trim().toLowerCase() || null;
+  const selectedOptionalLineItemIds = Array.from(new Set(signature.selectedOptionalLineItemIds ?? []));
+  let validSelectedOptionalLineItemIds: string[] = [];
+
+  if (selectedOptionalLineItemIds.length) {
+    const selectedLineItems = await db.query.proposalLineItems.findMany({
+      where: and(eq(proposalLineItems.proposalId, row.proposal.id), inArray(proposalLineItems.id, selectedOptionalLineItemIds)),
+    });
+    validSelectedOptionalLineItemIds = selectedLineItems
+      .filter((item) => item.isOptional)
+      .map((item) => item.id);
+
+    if (validSelectedOptionalLineItemIds.length) {
+      await db.update(proposalLineItems).set({
+        isOptional: false,
+        updatedAt: now,
+      }).where(and(eq(proposalLineItems.proposalId, row.proposal.id), inArray(proposalLineItems.id, validSelectedOptionalLineItemIds)));
+    }
+  }
+
+  const acceptedLineItems = validSelectedOptionalLineItemIds.length
+    ? await db.query.proposalLineItems.findMany({ where: eq(proposalLineItems.proposalId, row.proposal.id) })
+    : [];
+  const acceptedTotalCents = validSelectedOptionalLineItemIds.length ? dbIncludedPackageTotalCents(acceptedLineItems) : row.proposal.totalCents;
+  const acceptedPackageLineItems = acceptedLineItems.length
+    ? acceptedLineItems
+    : await db.query.proposalLineItems.findMany({ where: eq(proposalLineItems.proposalId, row.proposal.id) });
+
+  await db.update(proposalAccessTokens).set({
+    viewedAt: tokenRow.viewedAt ?? now,
+    lastUsedAt: now,
+    lastUsedIp: lastUsedIp ?? null,
+  }).where(eq(proposalAccessTokens.id, tokenRow.id));
+
+  await db.update(proposals).set({
+    status: "accepted",
+    acceptedAt: row.proposal.acceptedAt ?? now,
+    signedAt: row.proposal.signedAt ?? now,
+    signerName: row.proposal.signerName ?? signerName,
+    signerEmail: row.proposal.signerEmail ?? signerEmail,
+    signatureIp: row.proposal.signatureIp ?? lastUsedIp ?? null,
+    signatureUserAgent: row.proposal.signatureUserAgent ?? signature.userAgent?.trim() ?? null,
+    signatureConsentText: row.proposal.signatureConsentText ?? signature.consentText?.trim() ?? null,
+    signatureConsentVersion: row.proposal.signatureConsentVersion ?? signature.consentVersion?.trim() ?? null,
+    selectedOptionalLineItemIdsJson: row.proposal.selectedOptionalLineItemIdsJson ?? JSON.stringify(validSelectedOptionalLineItemIds),
+    contractStatus: "signed",
+    totalCents: acceptedTotalCents,
+    updatedAt: now,
+  }).where(eq(proposals.id, row.proposal.id));
+
+  await syncUnpaidProposalInvoicesToAcceptedTotal({
+    proposalId: row.proposal.id,
+    projectId: tokenRow.projectId,
+    totalCents: acceptedTotalCents ?? 0,
+    now,
+  });
+
+  if (firstAcceptance) {
+    await logActivity({
+      projectId: tokenRow.projectId,
+      clientId: tokenRow.clientId,
+      action: "proposal.accepted",
+      actorType: "client",
+      actorName: row.client ? `${row.client.firstName} ${row.client.lastName ?? ""}`.trim() : signerName,
+      metadata: { proposalId: row.proposal.id, selectedOptionalLineItemIds: validSelectedOptionalLineItemIds },
+    });
+  }
+
+  if (firstSignature) {
+    await logActivity({
+      projectId: tokenRow.projectId,
+      clientId: tokenRow.clientId,
+      action: "proposal.signed",
+      actorType: "client",
+      actorName: signerName,
+      metadata: {
+        proposalId: row.proposal.id,
+        signerEmail,
+        signatureIp: lastUsedIp ?? null,
+        signatureUserAgent: signature.userAgent?.trim() ?? null,
+        signatureConsentVersion: signature.consentVersion?.trim() ?? null,
+        selectedOptionalLineItemIds: validSelectedOptionalLineItemIds,
+      },
+    });
+  }
+
+  if (firstAcceptance && packageIncludesEngagementSession(acceptedPackageLineItems.filter((item) => !item.isOptional))) {
+    const eventId = await ensureEngagementPlaceholder(tokenRow.projectId);
+    await logActivity({
+      projectId: tokenRow.projectId,
+      clientId: tokenRow.clientId,
+      action: "engagement.pending_added",
+      actorType: "system",
+      metadata: { proposalId: row.proposal.id, eventId },
+    });
+  }
+
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${row.proposal.id}`);
+  safeRevalidatePath(`/projects/${tokenRow.projectId}`);
+  safeRevalidatePath(`/proposal/${token}`);
+
+  return { proposalId: row.proposal.id, projectId: tokenRow.projectId };
+}
+
+export async function listInvoices(search = "", status = "all") {
   const primaryParticipantJoin = and(
     eq(projectParticipants.projectId, projects.id),
     eq(projectParticipants.isPrimaryContact, true),
@@ -1118,7 +1494,7 @@ export async function listInvoices(search = "", status = "all"): Promise<Invoice
     .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
     .leftJoin(proposals, eq(invoices.proposalId, proposals.id))
     .where(filters.length ? and(...filters) : undefined)
-    .orderBy(desc(invoices.createdAt), desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as InvoiceQueryRow[];
+    .orderBy(desc(invoices.createdAt), desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as InvoiceRow[];
 
   const seen = new Set<string>();
   const uniqueRows = rows.filter((row) => {
@@ -1138,10 +1514,7 @@ export async function listInvoices(search = "", status = "all"): Promise<Invoice
   }
 
   return uniqueRows.map((row) => ({
-    invoice: row.invoice,
-    project: row.project,
-    client: row.client ?? missingPrimaryClient(),
-    proposal: row.proposal,
+    ...row,
     clientPayableBalanceCents: calculateInvoiceClientPayableBalanceCents(row.invoice, paymentsByInvoice.get(row.invoice.id) ?? []),
   }));
 }
@@ -1160,10 +1533,11 @@ export async function getInvoice(invoiceId: string) {
     })
     .from(invoices)
     .innerJoin(projects, eq(invoices.projectId, projects.id))
-    .innerJoin(projectParticipants, primaryParticipantJoin)
-    .innerJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .leftJoin(projectParticipants, primaryParticipantJoin)
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
     .leftJoin(proposals, eq(invoices.proposalId, proposals.id))
-    .where(eq(invoices.id, invoiceId)) as unknown as InvoiceDetailRow[];
+    .where(eq(invoices.id, invoiceId))
+    .orderBy(desc(projectParticipants.isPrimaryContact), asc(projectParticipants.createdAt)) as unknown as InvoiceRow[];
 
   const row = rows[0];
   if (!row) return null;
@@ -1617,14 +1991,19 @@ export async function createProposalFromForm(formData: FormData) {
   const now = new Date().toISOString();
   const invoiceStatus = "not_created";
   const validUntil = nullableTextValue(formData, "validUntil");
+  const proposalPackageTemplateId = nullableTextValue(formData, "proposalPackageTemplateId");
+  const proposalPackageTemplate = proposalPackageTemplateId
+    ? await db.query.templates.findFirst({ where: and(eq(templates.id, proposalPackageTemplateId), eq(templates.type, "proposal_package"), eq(templates.status, "active")) })
+    : null;
+  if (proposalPackageTemplateId && !proposalPackageTemplate) throw new Error("Proposal package template not found.");
   const contractTemplateId = nullableTextValue(formData, "contractTemplateId");
   const contractTemplate = contractTemplateId
     ? await db.query.templates.findFirst({ where: and(eq(templates.id, contractTemplateId), eq(templates.type, "contract")) })
     : null;
-  const contractBody = nullableTextValue(formData, "contractBody") ?? contractTemplate?.body ?? null;
-  const contractTitle = nullableTextValue(formData, "contractTitle") ?? contractTemplate?.name ?? null;
   const formLineItems = packageLineItemsFromForm(formData);
-  const contractStatus = inferredContractStatus({ contractBody, contractTemplateId });
+  let packageName = nullableTextValue(formData, "packageName");
+  let scopeSummary = nullableTextValue(formData, "scopeSummary");
+  const formTotalCents = includedPackageTotalCents(formLineItems);
 
   if (!projectId && clientId) {
     const client = await db.query.clients.findFirst({ where: eq(clients.id, clientId) });
@@ -1661,15 +2040,43 @@ export async function createProposalFromForm(formData: FormData) {
 
   if (!projectId) throw new Error("Choose a project or client for this proposal.");
 
+  packageName = packageName ?? proposalPackageTemplate?.subject ?? proposalPackageTemplate?.name ?? null;
+  scopeSummary = scopeSummary ?? (
+    proposalPackageTemplate?.body
+      ? await renderProposalPackageTemplateBody({
+          templateBody: proposalPackageTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents: formTotalCents,
+        })
+      : null
+  );
+  const contractBodyInput = nullableTextValue(formData, "contractBody");
+  const contractBody = contractBodyInput ?? (
+    contractTemplate?.body
+      ? await renderContractTemplateBody({
+          templateBody: contractTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents: formTotalCents,
+          scopeSummary,
+        })
+      : null
+  );
+  const contractTitle = nullableTextValue(formData, "contractTitle") ?? contractTemplate?.name ?? null;
+  const contractStatus = inferredContractStatus({ contractBody, contractTemplateId });
+
   await db.insert(proposals).values({
     id,
     projectId,
     title,
     status: proposalStatusFromWorkflow({ contractStatus, invoiceStatus, validUntil, packageComplete: packageHasIncludedPricedItem(formLineItems) }),
-    packageName: nullableTextValue(formData, "packageName"),
+    packageName,
     totalCents: null,
     validUntil,
-    scopeSummary: nullableTextValue(formData, "scopeSummary"),
+    scopeSummary,
     contractStatus,
     contractTemplateId,
     contractTitle,
@@ -1687,11 +2094,242 @@ export async function createProposalFromForm(formData: FormData) {
     updatedAt: new Date().toISOString(),
   }).where(eq(proposals.id, id));
 
-  await logActivity({ projectId, action: "proposal.created", metadata: { title, totalCents } });
-  revalidatePath("/proposals");
-  revalidatePath(`/projects/${projectId}`);
+  await logActivity({ projectId, action: "proposal.created", metadata: { title, totalCents, proposalPackageTemplateId: proposalPackageTemplate?.id } });
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/projects/${projectId}`);
 
   return { proposalId: id, projectId };
+}
+
+export async function createProposalFromAgent(projectId: string, input: AgentProposalInput) {
+  const title = cleanAgentText(input.title);
+  if (!title) throw new Error("Proposal title is required.");
+
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project) throw new Error("Project not found.");
+  const sourceType = cleanAgentText(input.sourceType);
+  const sourceId = cleanAgentText(input.sourceId);
+  await assertAgentProjectSource(projectId, sourceType, sourceId);
+
+  const now = new Date().toISOString();
+  const proposalId = crypto.randomUUID();
+  const lineItems = normalizedAgentLineItems(input.lineItems ?? []);
+  const totalCents = agentIncludedPackageTotalCents(lineItems);
+  const validUntil = cleanAgentText(input.validUntil);
+  const proposalPackageTemplateId = cleanAgentText(input.proposalPackageTemplateId);
+  const proposalPackageTemplate = await activeProposalPackageTemplate(proposalPackageTemplateId);
+  const packageName = cleanAgentText(input.packageName) ?? proposalPackageTemplate?.subject ?? proposalPackageTemplate?.name ?? null;
+  const scopeSummary = cleanAgentText(input.scopeSummary) ?? (
+    proposalPackageTemplate?.body
+      ? await renderProposalPackageTemplateBody({
+          templateBody: proposalPackageTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+        })
+      : null
+  );
+  const contractTemplateId = cleanAgentText(input.contractTemplateId);
+  const contractTemplate = await activeContractTemplate(contractTemplateId);
+  const contractTitle = cleanAgentText(input.contractTitle) ?? contractTemplate?.name ?? null;
+  const contractBody = cleanAgentText(input.contractBody) ?? (
+    contractTemplate?.body
+      ? await renderContractTemplateBody({
+          templateBody: contractTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+          scopeSummary,
+        })
+      : null
+  );
+  const contractStatus = inferredContractStatus({ contractBody, contractTemplateId });
+  const invoiceStatus = "not_created";
+  const packageComplete = agentPackageHasIncludedPricedItem(lineItems);
+  const status = proposalStatusFromWorkflow({
+    contractStatus,
+    invoiceStatus,
+    validUntil,
+    packageComplete,
+  });
+  const missingFields = proposalMissingFields({ packageComplete, contractStatus, invoiceStatus });
+
+  await db.insert(proposals).values({
+    id: proposalId,
+    projectId,
+    title,
+    status,
+    packageName,
+    totalCents: totalCents || null,
+    validUntil,
+    scopeSummary,
+    contractStatus,
+    contractTemplateId,
+    contractTitle,
+    contractBody,
+    invoiceStatus,
+    sentAt: null,
+    acceptedAt: null,
+    sourceType,
+    sourceId,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  await replaceAgentProposalLineItems(proposalId, lineItems, now);
+
+  await logActivity({
+    projectId,
+    action: "proposal.created_by_agent",
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    metadata: {
+      proposalId,
+      title,
+      status,
+      totalCents,
+      missingFields,
+      sourceType,
+      sourceId,
+      proposalPackageTemplateId: proposalPackageTemplate?.id,
+      contractTemplateId: contractTemplate?.id,
+    },
+  });
+
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${proposalId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
+
+  return { proposalId, projectId, status, totalCents, missingFields };
+}
+
+export async function updateProposalFromAgent(projectId: string, proposalId: string, input: AgentProposalUpdateInput) {
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project) throw new Error("Project not found.");
+
+  const existingProposal = await db.query.proposals.findFirst({
+    where: and(eq(proposals.id, proposalId), eq(proposals.projectId, projectId)),
+  });
+  if (!existingProposal) throw new Error("Proposal not found for this project.");
+  if (proposalIsAcceptedOrSigned(existingProposal)) {
+    throw new Error("Accepted or signed proposals cannot be updated by agent.");
+  }
+
+  const sourceType = cleanAgentText(input.sourceType) ?? existingProposal.sourceType;
+  const sourceId = cleanAgentText(input.sourceId) ?? existingProposal.sourceId;
+  await assertAgentProjectSource(projectId, sourceType, sourceId);
+
+  const now = new Date().toISOString();
+  const lineItems = Array.isArray(input.lineItems)
+    ? normalizedAgentLineItems(input.lineItems)
+    : await db.query.proposalLineItems.findMany({
+      where: eq(proposalLineItems.proposalId, proposalId),
+      orderBy: proposalLineItems.sortOrder,
+    });
+  const totalCents = agentIncludedPackageTotalCents(lineItems);
+  const packageComplete = agentPackageHasIncludedPricedItem(lineItems);
+  const validUntil = Object.prototype.hasOwnProperty.call(input, "validUntil")
+    ? cleanAgentText(input.validUntil)
+    : existingProposal.validUntil;
+  const title = Object.prototype.hasOwnProperty.call(input, "title")
+    ? cleanAgentText(input.title)
+    : existingProposal.title;
+  if (!title) throw new Error("Proposal title is required.");
+  const proposalPackageTemplateId = cleanAgentText(input.proposalPackageTemplateId);
+  const proposalPackageTemplate = await activeProposalPackageTemplate(proposalPackageTemplateId);
+  const packageName = proposalPackageTemplate
+    ? (cleanAgentText(input.packageName) ?? proposalPackageTemplate.subject ?? proposalPackageTemplate.name)
+    : Object.prototype.hasOwnProperty.call(input, "packageName") ? cleanAgentText(input.packageName) : existingProposal.packageName;
+  const scopeSummary = proposalPackageTemplate
+    ? (cleanAgentText(input.scopeSummary) ?? await renderProposalPackageTemplateBody({
+        templateBody: proposalPackageTemplate.body,
+        projectId,
+        proposalTitle: title,
+        packageName,
+        totalCents,
+      }))
+    : Object.prototype.hasOwnProperty.call(input, "scopeSummary") ? cleanAgentText(input.scopeSummary) : existingProposal.scopeSummary;
+  const hasContractTemplateInput = Object.prototype.hasOwnProperty.call(input, "contractTemplateId");
+  const contractTemplateId = hasContractTemplateInput ? cleanAgentText(input.contractTemplateId) : existingProposal.contractTemplateId;
+  const contractTemplate = await activeContractTemplate(contractTemplateId);
+  const contractTitle = Object.prototype.hasOwnProperty.call(input, "contractTitle")
+    ? cleanAgentText(input.contractTitle) ?? contractTemplate?.name ?? null
+    : contractTemplate?.name ?? existingProposal.contractTitle;
+  const contractBodyInput = Object.prototype.hasOwnProperty.call(input, "contractBody")
+    ? cleanAgentText(input.contractBody)
+    : undefined;
+  const contractBody = contractBodyInput ?? (
+    contractTemplate?.body
+      ? await renderContractTemplateBody({
+          templateBody: contractTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+          scopeSummary,
+        })
+      : Object.prototype.hasOwnProperty.call(input, "contractBody") ? null : existingProposal.contractBody
+  );
+  const contractStatus = inferredContractStatus({
+    existingStatus: existingProposal.contractStatus,
+    contractBody,
+    contractTemplateId,
+  });
+  const status = proposalStatusFromWorkflow({
+    currentStatus: existingProposal.status,
+    contractStatus,
+    invoiceStatus: existingProposal.invoiceStatus,
+    validUntil,
+    packageComplete,
+  });
+
+  await db.update(proposals).set({
+    title,
+    status,
+    packageName,
+    totalCents: totalCents || null,
+    validUntil,
+    scopeSummary,
+    contractStatus,
+    contractTemplateId,
+    contractTitle,
+    contractBody,
+    sourceType,
+    sourceId,
+    updatedAt: now,
+  }).where(eq(proposals.id, proposalId));
+
+  if (Array.isArray(input.lineItems)) {
+    await replaceAgentProposalLineItems(proposalId, lineItems, now);
+  }
+
+  const missingFields = proposalMissingFields({ packageComplete, contractStatus, invoiceStatus: existingProposal.invoiceStatus });
+
+  await logActivity({
+    projectId,
+    action: "proposal.updated_by_agent",
+    actorType: "agent",
+    actorName: "The Reeses Studio Agent",
+    metadata: {
+      proposalId,
+      title,
+      status,
+      totalCents,
+      missingFields,
+      sourceType,
+      sourceId,
+      proposalPackageTemplateId: proposalPackageTemplate?.id,
+      contractTemplateId: contractTemplate?.id,
+    },
+  });
+
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${proposalId}`);
+  safeRevalidatePath(`/projects/${projectId}`);
+
+  return { proposalId, projectId, status, totalCents, missingFields };
 }
 
 export async function createProposalAction(formData: FormData) {
@@ -1709,20 +2347,51 @@ export async function updateProposalFromForm(formData: FormData) {
 
   const existing = await db.query.proposals.findFirst({ where: eq(proposals.id, id) });
   if (!existing) throw new Error("Proposal not found.");
+  if (existing.projectId !== projectId) throw new Error("Proposal does not belong to this project.");
+  if (proposalIsAcceptedOrSigned(existing)) throw new Error("Accepted or signed proposals cannot be edited.");
 
   const validUntil = nullableTextValue(formData, "validUntil");
+  const proposalPackageTemplateId = nullableTextValue(formData, "proposalPackageTemplateId");
+  const proposalPackageTemplate = proposalPackageTemplateId
+    ? await db.query.templates.findFirst({ where: and(eq(templates.id, proposalPackageTemplateId), eq(templates.type, "proposal_package"), eq(templates.status, "active")) })
+    : null;
+  if (proposalPackageTemplateId && !proposalPackageTemplate) throw new Error("Proposal package template not found.");
   const contractTemplateId = nullableTextValue(formData, "contractTemplateId");
   const contractTemplate = contractTemplateId
     ? await db.query.templates.findFirst({ where: and(eq(templates.id, contractTemplateId), eq(templates.type, "contract")) })
     : null;
-  const contractBody = nullableTextValue(formData, "contractBody") ?? contractTemplate?.body ?? null;
+  const totalCents = await replaceProposalLineItems(id, formData);
+  const packageName = nullableTextValue(formData, "packageName") ?? proposalPackageTemplate?.subject ?? proposalPackageTemplate?.name ?? null;
+  const scopeSummary = nullableTextValue(formData, "scopeSummary") ?? (
+    proposalPackageTemplate?.body
+      ? await renderProposalPackageTemplateBody({
+          templateBody: proposalPackageTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+        })
+      : null
+  );
+  const contractBodyInput = nullableTextValue(formData, "contractBody");
+  const contractBody = contractBodyInput ?? (
+    contractTemplate?.body
+      ? await renderContractTemplateBody({
+          templateBody: contractTemplate.body,
+          projectId,
+          proposalTitle: title,
+          packageName,
+          totalCents,
+          scopeSummary,
+        })
+      : null
+  );
   const contractTitle = nullableTextValue(formData, "contractTitle") ?? contractTemplate?.name ?? null;
   const contractStatus = inferredContractStatus({
     existingStatus: existing.contractStatus,
     contractBody,
     contractTemplateId,
   });
-  const totalCents = await replaceProposalLineItems(id, formData);
   const status = proposalStatusFromWorkflow({
     currentStatus: existing.status,
     contractStatus,
@@ -1734,10 +2403,10 @@ export async function updateProposalFromForm(formData: FormData) {
   await db.update(proposals).set({
     title,
     status,
-    packageName: nullableTextValue(formData, "packageName"),
+    packageName,
     totalCents: totalCents || null,
     validUntil,
-    scopeSummary: nullableTextValue(formData, "scopeSummary"),
+    scopeSummary,
     contractStatus,
     contractTemplateId,
     contractTitle,
@@ -1745,10 +2414,10 @@ export async function updateProposalFromForm(formData: FormData) {
     updatedAt: new Date().toISOString(),
   }).where(eq(proposals.id, id));
 
-  await logActivity({ projectId, action: "proposal.updated", metadata: { id, status } });
-  revalidatePath("/proposals");
-  revalidatePath(`/proposals/${id}`);
-  revalidatePath(`/projects/${projectId}`);
+  await logActivity({ projectId, action: "proposal.updated", metadata: { id, status, proposalPackageTemplateId: proposalPackageTemplate?.id } });
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${id}`);
+  safeRevalidatePath(`/projects/${projectId}`);
 
   return { proposalId: id, projectId };
 }
@@ -1765,6 +2434,24 @@ export async function updateProposalWorkflowFromForm(formData: FormData) {
   const projectId = textValue(formData, "projectId");
   const workflowAction = textValue(formData, "workflowAction");
   if (!id || !projectId || !workflowAction) throw new Error("Proposal workflow action is required.");
+
+  const existing = await db.query.proposals.findFirst({ where: eq(proposals.id, id) });
+  if (!existing) throw new Error("Proposal not found.");
+  if (existing.projectId !== projectId) throw new Error("Proposal does not belong to this project.");
+  if (proposalIsAcceptedOrSigned(existing) && workflowAction === "reset_draft") {
+    throw new Error("Accepted or signed proposals cannot be moved back to draft.");
+  }
+
+  if (workflowAction === "create_invoice") {
+    const invoiceFormData = new FormData();
+    invoiceFormData.set("proposalId", id);
+    invoiceFormData.set("projectId", projectId);
+    invoiceFormData.set("status", "draft");
+    invoiceFormData.set("retainerPercent", "30");
+    invoiceFormData.set("installmentCount", "1");
+    const result = await createInvoiceFromForm(invoiceFormData);
+    return { proposalId: id, projectId, invoiceId: result.invoiceId };
+  }
 
   const now = new Date().toISOString();
   const patch: Partial<typeof proposals.$inferInsert> = { updatedAt: now };
@@ -1790,9 +2477,9 @@ export async function updateProposalWorkflowFromForm(formData: FormData) {
   await db.update(proposals).set(patch).where(eq(proposals.id, id));
   await logActivity({ projectId, action: "proposal.workflow_updated", metadata: { id, workflowAction } });
 
-  revalidatePath("/proposals");
-  revalidatePath(`/proposals/${id}`);
-  revalidatePath(`/projects/${projectId}`);
+  safeRevalidatePath("/proposals");
+  safeRevalidatePath(`/proposals/${id}`);
+  safeRevalidatePath(`/projects/${projectId}`);
 
   return { proposalId: id, projectId };
 }

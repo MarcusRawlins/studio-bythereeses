@@ -8,7 +8,7 @@ import {
 } from "./settings";
 
 const business = normalizeBusinessSettings({
-  businessName: "  Alex & Tyler Reese  ",
+  businessName: "  The Reeses Studio  ",
   publicBrandName: "",
   contactEmail: " HELLO@BYTHEREESES.COM ",
   websiteUrl: "bythereeses.com",
@@ -16,7 +16,7 @@ const business = normalizeBusinessSettings({
   timezone: "",
 });
 
-assert.equal(business.businessName, "Alex & Tyler Reese");
+assert.equal(business.businessName, "The Reeses Studio");
 assert.equal(business.publicBrandName, defaultBusinessSettings.publicBrandName);
 assert.equal(business.contactEmail, "hello@bythereeses.com");
 assert.equal(business.websiteUrl, "https://bythereeses.com");

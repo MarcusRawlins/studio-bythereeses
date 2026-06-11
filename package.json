@@ -17,6 +17,8 @@
     "cf:typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
+    "import:honeybook:projects": "tsx scripts/import-honeybook-projects.ts",
+    "import:six-figure-workflows": "tsx scripts/import-six-figure-workflows.ts",
     "backup": "npm run backup:daily",
     "backup:daily": "node scripts/backup.mjs",
     "backup:data": "scripts/backup-data.sh",

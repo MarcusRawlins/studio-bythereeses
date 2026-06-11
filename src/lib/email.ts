@@ -63,7 +63,7 @@ export async function sendBookingEmails({ booking, meetingType, manageUrl, resch
     manageUrl ? `Cancel or manage: ${manageUrl}` : null,
     "",
     "See you soon,",
-    "Alex & Tyler",
+    "The Reeses Studio",
   ].filter(Boolean).join("\n");
 
   const adminText = [
@@ -109,7 +109,7 @@ export async function sendBookingReminderEmail({ booking, meetingType, manageUrl
       rescheduleUrl ? `Reschedule: ${rescheduleUrl}` : null,
       manageUrl ? `Cancel or manage: ${manageUrl}` : null,
       "",
-      "Alex & Tyler",
+      "The Reeses Studio",
     ].filter(Boolean).join("\n"),
   });
 }
@@ -124,7 +124,7 @@ export async function sendBookingCancellationEmail({ booking, meetingType }: Boo
         "",
         `Your ${meetingType.name.toLowerCase()} has been cancelled.`,
         "",
-        "Alex & Tyler",
+        "The Reeses Studio",
       ].join("\n"),
     }),
     sendResendEmail({

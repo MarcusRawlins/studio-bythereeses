@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   guardDirectWorkerApiRequest,
   guardDirectWorkerPageRequest,
+  isPublicOriginBypassApiPath,
   isPublicOriginBypassPath,
   shouldBlockDirectWorkerOrigin,
 } from "./origin-guard";
@@ -76,6 +77,36 @@ assert.equal(
   isPublicOriginBypassPath("/projects/project-123"),
   false,
   "admin project pages should not bypass the page origin guard",
+);
+
+assert.equal(
+  isPublicOriginBypassApiPath("/api/proposal/token-123/accept"),
+  true,
+  "public proposal acceptance API should bypass the proxy-level origin guard",
+);
+
+assert.equal(
+  isPublicOriginBypassApiPath("/api/questionnaires/questionnaire-123/responses"),
+  true,
+  "public questionnaire response API should bypass the proxy-level origin guard",
+);
+
+assert.equal(
+  isPublicOriginBypassApiPath("/api/scheduler/bookings"),
+  true,
+  "public scheduler booking API should bypass the proxy-level origin guard",
+);
+
+assert.equal(
+  isPublicOriginBypassApiPath("/api/stripe/webhook"),
+  true,
+  "Stripe webhook API should bypass the proxy-level origin guard and rely on Stripe signatures",
+);
+
+assert.equal(
+  isPublicOriginBypassApiPath("/api/scheduler/meeting-types"),
+  false,
+  "private scheduler admin API should not bypass the proxy-level origin guard",
 );
 
 assert.equal(
