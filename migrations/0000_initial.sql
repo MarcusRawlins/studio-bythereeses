@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS clients (
   email TEXT NOT NULL UNIQUE,
   phone TEXT,
   preferred_name TEXT,
+  instagram_handle TEXT,
+  communication_preference TEXT,
+  referral_source TEXT,
   notes TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -55,6 +58,8 @@ CREATE TABLE IF NOT EXISTS project_locations (
   city TEXT,
   state TEXT,
   notes TEXT,
+  source_type TEXT,
+  source_id TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
