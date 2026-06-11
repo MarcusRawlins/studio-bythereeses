@@ -10,6 +10,7 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
   - Mirror (current): `/Volumes/reeseai-memory/code/reese-photography-crm`
 - Backup artifacts (code mirror + exports + snaps): `/Volumes/reeseai-memory/backups/reese-photography-crm/{d1,sqlite,manifests,logs,reconciliations}`
 - Before strategic/durable changes: cross-check Obsidian first.
+- Drift guard (run before durable git work or cross-copy sync): `npm run check:source-drift` (`scripts/check-source-drift.mjs`). Reports primary + known local copies for origin URL, upstream tracking, ahead/behind, dirty worktree, branch/HEAD, and cross-copy HEAD/origin alignment. Non-zero exit on critical drift (HEAD/origin mismatch across present copies). Warnings only for dirty worktree, absent copies, and ahead/behind upstream.
 
 ## Deploy Gate
 - Required before any `npm run deploy` or `opennextjs-cloudflare deploy`:
@@ -17,11 +18,12 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
   - `npm run build`
   - `npm run backup:data` (valid CF token)
   - `npm run deploy:capture-versions` (snapshot Worker/Pages IDs + git HEAD)
+  - `npm run check:source-drift` (enforced in `npm run deploy:preflight`)
   - `npm run deploy:preflight` (enforced in `npm run deploy`)
 - Preflight (see `scripts/deploy-preflight.mjs` + `docs/deployment-live-testing.md`):
   - Requires `CLOUDFLARE_API_TOKEN`
-  - Requires `src/middleware.ts`, `wrangler.jsonc`, `pages-proxy/_worker.js`
-  - Rejects if `src/proxy.ts` present (legacy)
+  - Requires `src/proxy.ts`, `wrangler.jsonc`, `pages-proxy/_worker.js`
+  - Rejects if `src/middleware.ts` present (conflicts with Next.js 16 proxy)
   - Warns on stale Alex/Tyler branding at studio/schedule domains
 - Full flow (from package.json + deployment doc):
   ```
@@ -106,5 +108,6 @@ See package.json scripts, `docs/backups.md`, `docs/deployment-live-testing.md`, 
 - Backup drill: `npm run backup:reconcile`
 - Restore drill: `npm run db:restore-local:d1 -- --dry-run`
 - Dev gate: `npm run dev:studio -- --check`
+- Drift guard: `npm run check:source-drift`
 
 This is the minimal starter patch. Expand only in the branch above. Update this file in place for refinements.

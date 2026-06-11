@@ -42,11 +42,12 @@ Google Calendar setup details live in `docs/google-calendar-setup.md`.
 3. Run `npm run build`.
 4. Run `npm run backup:data` with a valid Cloudflare API token in the shell.
 5. Run `npm run deploy:capture-versions` to snapshot current Worker/Pages deployment IDs + git HEAD into `/Volumes/reeseai-memory/backups/reese-photography-crm/manifests/latest-deploy-versions.json`.
-6. Run `npm run deploy:preflight`.
-7. Confirm the remote D1 schema is current.
-8. Confirm custom domains are attached to the Cloudflare Worker, then confirm DNS points to that accepted Cloudflare target.
+6. Run `npm run check:source-drift` to confirm known local copies agree on origin URL and HEAD (warnings only for dirty worktree, absent copies, or ahead/behind upstream).
+7. Run `npm run deploy:preflight` (includes source-drift check).
+8. Confirm the remote D1 schema is current.
+9. Confirm custom domains are attached to the Cloudflare Worker, then confirm DNS points to that accepted Cloudflare target.
 
-`npm run deploy:preflight` checks the local deployment shape before upload. It fails when `CLOUDFLARE_API_TOKEN` is missing, when `src/middleware.ts` is missing, when legacy `src/proxy.ts` exists, or when core Cloudflare config files are missing. It also warns when `studio.bythereeses.com` or `schedule.bythereeses.com` still appear to serve stale Alex/Tyler branding.
+`npm run deploy:preflight` checks the local deployment shape before upload. It fails when `CLOUDFLARE_API_TOKEN` is missing, when `src/proxy.ts` is missing, when legacy `src/middleware.ts` exists, or when core Cloudflare config files are missing. It also warns when `studio.bythereeses.com` or `schedule.bythereeses.com` still appear to serve stale Alex/Tyler branding.
 
 ## Current Domain Status
 
