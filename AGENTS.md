@@ -6,4 +6,6 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 > Source-of-truth note: Obsidian holds durable business/system context and current priorities. This repo holds implementation, deployment, and engineering details. Before making strategic or durable changes, check `/Users/tyler-macmini/Documents/Obsidian Vault/02 Businesses/The Reeses/Reese Photography CRM - Source of Truth and Backups.md` and `/Users/tyler-macmini/Documents/Obsidian Vault/00 System/System Cleanup Command Center - 2026-05-21.md`.
 >
+> Agent code SOP: `docs/source-of-truth-sop.md`. Use `/Volumes/reeseai-memory/code/reese-photography-crm` as the canonical working copy and run `npm run check:source-drift` before durable code, branch, or deploy work.
+>
 > Ops stabilization (deploy gate, rollback, backup/MCP drills): `docs/ops-stabilization-checklist.md`.

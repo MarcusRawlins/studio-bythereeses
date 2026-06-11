@@ -5,9 +5,11 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
 ## Source of Truth
 - Durable business/system context + current priorities: Obsidian (`/Users/tyler-macmini/Documents/Obsidian Vault/02 Businesses/The Reeses/Reese Photography CRM - Source of Truth and Backups.md` and `00 System/System Cleanup Command Center - 2026-05-21.md`).
 - Implementation, deployment, and engineering details: this repo only.
-- Working copies (non-destructive mirror):
-  - Primary: `/Users/tyler-macmini/code/reese-photography-crm`
-  - Mirror (current): `/Volumes/reeseai-memory/code/reese-photography-crm`
+- Agent/source-control SOP: `docs/source-of-truth-sop.md`.
+- Canonical working copy: `/Volumes/reeseai-memory/code/reese-photography-crm`.
+- Archived divergent copies:
+  - `/Users/tyler-macmini/code/reese-photography-crm.2026-06-10-drift-archive`
+  - `/Users/tyler-macmini/Documents/studio-bythereeses.2026-06-10-drift-archive`
 - Backup artifacts (code mirror + exports + snaps): `/Volumes/reeseai-memory/backups/reese-photography-crm/{d1,sqlite,manifests,logs,reconciliations}`
 - Before strategic/durable changes: cross-check Obsidian first.
 - Drift guard (run before durable git work or cross-copy sync): `npm run check:source-drift` (`scripts/check-source-drift.mjs`). Reports primary + known local copies for origin URL, upstream tracking, ahead/behind, dirty worktree, branch/HEAD, and cross-copy HEAD/origin alignment. Non-zero exit on critical drift (HEAD/origin mismatch across present copies).
