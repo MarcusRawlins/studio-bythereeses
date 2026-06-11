@@ -105,12 +105,17 @@ function isPortalPublicPath(pathname) {
   return pathname === "/portal" || pathname.startsWith("/p/");
 }
 
+function isStudioTrustedAgentApiPath(pathname) {
+  return pathname === "/api/mcp" || pathname.startsWith("/api/agent/");
+}
+
 function isStudioPublicPath(pathname) {
   return (
     pathname === "/admin/login" ||
     pathname === "/admin/logout" ||
     pathname === "/admin/auth/google" ||
     pathname === "/api/google/callback" ||
+    isStudioTrustedAgentApiPath(pathname) ||
     isPortalPublicPath(pathname) ||
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/api/proposal/") ||
@@ -225,9 +230,18 @@ async function adminGoogleCallback(request, env) {
   }
 
   const tokens = await tokenResponse.json();
-  const idTokenPayload = String(tokens.id_token || "").split(".")[1];
-  if (!idTokenPayload) return new Response("Google sign-in did not return identity.", { status: 401 });
-  const identity = JSON.parse(new TextDecoder().decode(base64UrlDecode(idTokenPayload)));
+  if (!tokens.access_token) {
+    return new Response("Google sign-in did not return identity.", { status: 401 });
+  }
+  const identityResponse = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+    headers: {
+      authorization: `Bearer ${tokens.access_token}`,
+    },
+  });
+  if (!identityResponse.ok) {
+    return new Response("Google sign-in identity verification failed.", { status: 401 });
+  }
+  const identity = await identityResponse.json();
   const email = String(identity.email || "").toLowerCase();
   const allowedEmail = env.ADMIN_ALLOWED_EMAIL || ADMIN_EMAIL;
   if (email !== allowedEmail) {
@@ -369,7 +383,6 @@ const pagesProxyWorker = {
 
     responseHeaders.delete("content-security-policy");
     responseHeaders.delete("x-reese-origin-secret");
-    responseHeaders.set("x-reese-proxy-target", WORKER_ORIGIN);
     responseHeaders.set("x-reese-cache", shouldCachePublicBookingPage ? "MISS" : "BYPASS");
     if (location?.startsWith(WORKER_ORIGIN)) {
       responseHeaders.set("location", location.replace(WORKER_ORIGIN, incomingUrl.origin));
