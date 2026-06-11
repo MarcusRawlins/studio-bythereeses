@@ -20,6 +20,22 @@ type LocalDatabase = {
 
 let sqlite: BetterSqliteDatabase.Database | undefined;
 
+function addColumnIfMissing(database: LocalDatabase, tableName: string, columnName: string, definition: string) {
+  const columns = new Set(
+    database.prepare(`PRAGMA table_info(${tableName})`).all().map((column) => (column as { name: string }).name),
+  );
+  if (columns.has(columnName)) return;
+
+  try {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes(`duplicate column name: ${columnName}`)) {
+      throw error;
+    }
+  }
+}
+
 function migrate(database: LocalDatabase) {
   database.pragma("foreign_keys = ON");
   database.pragma("journal_mode = WAL");
@@ -243,6 +259,307 @@ function migrate(database: LocalDatabase) {
   const projectCommunicationsMigrationPath = path.join(process.cwd(), "migrations", "0025_project_communications.sql");
   if (fs.existsSync(projectCommunicationsMigrationPath)) {
     database.exec(fs.readFileSync(projectCommunicationsMigrationPath, "utf8"));
+  }
+
+  const expenseReconciliationIndexesMigrationPath = path.join(process.cwd(), "migrations", "0026_expense_reconciliation_indexes.sql");
+  if (fs.existsSync(expenseReconciliationIndexesMigrationPath)) {
+    database.exec(fs.readFileSync(expenseReconciliationIndexesMigrationPath, "utf8"));
+  }
+
+  const projectScopedSourceIndexesMigrationPath = path.join(process.cwd(), "migrations", "0027_project_scoped_source_indexes.sql");
+  if (fs.existsSync(projectScopedSourceIndexesMigrationPath)) {
+    database.exec(fs.readFileSync(projectScopedSourceIndexesMigrationPath, "utf8"));
+  }
+
+  const agentTaskActiveDedupeIndexMigrationPath = path.join(process.cwd(), "migrations", "0028_agent_task_active_dedupe_index.sql");
+  if (fs.existsSync(agentTaskActiveDedupeIndexMigrationPath)) {
+    database.exec(fs.readFileSync(agentTaskActiveDedupeIndexMigrationPath, "utf8"));
+  }
+
+  const uniqueExternalPaymentIdsMigrationPath = path.join(process.cwd(), "migrations", "0029_unique_external_payment_ids.sql");
+  if (fs.existsSync(uniqueExternalPaymentIdsMigrationPath)) {
+    database.exec(fs.readFileSync(uniqueExternalPaymentIdsMigrationPath, "utf8"));
+  }
+
+  const uniqueProjectSourcesMigrationPath = path.join(process.cwd(), "migrations", "0030_unique_project_sources.sql");
+  if (fs.existsSync(uniqueProjectSourcesMigrationPath)) {
+    database.exec(fs.readFileSync(uniqueProjectSourcesMigrationPath, "utf8"));
+  }
+
+  const uniqueActiveAgentTasksMigrationPath = path.join(process.cwd(), "migrations", "0031_unique_active_agent_tasks.sql");
+  if (fs.existsSync(uniqueActiveAgentTasksMigrationPath)) {
+    database.exec(fs.readFileSync(uniqueActiveAgentTasksMigrationPath, "utf8"));
+  }
+
+  const projectEventSourceLinksMigrationPath = path.join(process.cwd(), "migrations", "0032_project_event_source_links.sql");
+  if (fs.existsSync(projectEventSourceLinksMigrationPath)) {
+    addColumnIfMissing(database, "project_events", "source_type", "TEXT");
+    addColumnIfMissing(database, "project_events", "source_id", "TEXT");
+    database.exec(`
+      CREATE INDEX IF NOT EXISTS idx_project_events_project_source
+        ON project_events(project_id, source_type, source_id);
+    `);
+  }
+
+  const uniqueNormalizedClientEmailsMigrationPath = path.join(process.cwd(), "migrations", "0033_unique_normalized_client_emails.sql");
+  if (fs.existsSync(uniqueNormalizedClientEmailsMigrationPath)) {
+    database.exec(fs.readFileSync(uniqueNormalizedClientEmailsMigrationPath, "utf8"));
+  }
+
+  const uniqueProjectPrimaryContactMigrationPath = path.join(process.cwd(), "migrations", "0034_unique_project_primary_contact.sql");
+  if (fs.existsSync(uniqueProjectPrimaryContactMigrationPath)) {
+    database.exec(fs.readFileSync(uniqueProjectPrimaryContactMigrationPath, "utf8"));
+  }
+
+  const schedulerBookingOverlapGuardMigrationPath = path.join(process.cwd(), "migrations", "0035_scheduler_booking_overlap_guard.sql");
+  if (fs.existsSync(schedulerBookingOverlapGuardMigrationPath)) {
+    database.exec(fs.readFileSync(schedulerBookingOverlapGuardMigrationPath, "utf8"));
+  }
+
+  const uniqueProjectQuestionnaireResponsesMigrationPath = path.join(process.cwd(), "migrations", "0036_unique_project_questionnaire_responses.sql");
+  if (fs.existsSync(uniqueProjectQuestionnaireResponsesMigrationPath)) {
+    database.exec(fs.readFileSync(uniqueProjectQuestionnaireResponsesMigrationPath, "utf8"));
+  }
+
+  const invoicePaymentScheduleTotalGuardMigrationPath = path.join(process.cwd(), "migrations", "0037_invoice_payment_schedule_total_guard.sql");
+  if (fs.existsSync(invoicePaymentScheduleTotalGuardMigrationPath)) {
+    database.exec(fs.readFileSync(invoicePaymentScheduleTotalGuardMigrationPath, "utf8"));
+  }
+
+  const invoicePaidAmountGuardsMigrationPath = path.join(process.cwd(), "migrations", "0038_invoice_paid_amount_guards.sql");
+  if (fs.existsSync(invoicePaidAmountGuardsMigrationPath)) {
+    database.exec(fs.readFileSync(invoicePaidAmountGuardsMigrationPath, "utf8"));
+  }
+
+  const signedProposalImmutabilityMigrationPath = path.join(process.cwd(), "migrations", "0039_signed_proposal_immutability.sql");
+  if (fs.existsSync(signedProposalImmutabilityMigrationPath)) {
+    database.exec(fs.readFileSync(signedProposalImmutabilityMigrationPath, "utf8"));
+  }
+
+  const projectParticipantRoleGuardMigrationPath = path.join(process.cwd(), "migrations", "0040_project_participant_role_guard.sql");
+  if (fs.existsSync(projectParticipantRoleGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectParticipantRoleGuardMigrationPath, "utf8"));
+  }
+
+  const agentTaskSourceLinkGuardMigrationPath = path.join(process.cwd(), "migrations", "0041_agent_task_source_link_guard.sql");
+  if (fs.existsSync(agentTaskSourceLinkGuardMigrationPath)) {
+    database.exec(fs.readFileSync(agentTaskSourceLinkGuardMigrationPath, "utf8"));
+  }
+
+  const agentTaskProjectSourceGuardMigrationPath = path.join(process.cwd(), "migrations", "0042_agent_task_project_source_guard.sql");
+  if (fs.existsSync(agentTaskProjectSourceGuardMigrationPath)) {
+    database.exec(fs.readFileSync(agentTaskProjectSourceGuardMigrationPath, "utf8"));
+  }
+
+  const projectEventSourceLinkGuardMigrationPath = path.join(process.cwd(), "migrations", "0043_project_event_source_link_guard.sql");
+  if (fs.existsSync(projectEventSourceLinkGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectEventSourceLinkGuardMigrationPath, "utf8"));
+  }
+
+  const projectTimelineSourceLinkGuardMigrationPath = path.join(process.cwd(), "migrations", "0044_project_timeline_source_link_guard.sql");
+  if (fs.existsSync(projectTimelineSourceLinkGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectTimelineSourceLinkGuardMigrationPath, "utf8"));
+  }
+
+  const projectCommunicationSourceLinkGuardMigrationPath = path.join(process.cwd(), "migrations", "0045_project_communication_source_link_guard.sql");
+  if (fs.existsSync(projectCommunicationSourceLinkGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectCommunicationSourceLinkGuardMigrationPath, "utf8"));
+  }
+
+  const proposalSourceLinkGuardMigrationPath = path.join(process.cwd(), "migrations", "0046_proposal_source_link_guard.sql");
+  if (fs.existsSync(proposalSourceLinkGuardMigrationPath)) {
+    database.exec(fs.readFileSync(proposalSourceLinkGuardMigrationPath, "utf8"));
+  }
+
+  const invoiceSourceLinkGuardMigrationPath = path.join(process.cwd(), "migrations", "0047_invoice_source_link_guard.sql");
+  if (fs.existsSync(invoiceSourceLinkGuardMigrationPath)) {
+    database.exec(fs.readFileSync(invoiceSourceLinkGuardMigrationPath, "utf8"));
+  }
+
+  const invoicePaymentSourceLinkGuardMigrationPath = path.join(process.cwd(), "migrations", "0048_invoice_payment_source_link_guard.sql");
+  if (fs.existsSync(invoicePaymentSourceLinkGuardMigrationPath)) {
+    database.exec(fs.readFileSync(invoicePaymentSourceLinkGuardMigrationPath, "utf8"));
+  }
+
+  const schedulerBookingPaymentSourceLinkGuardMigrationPath = path.join(process.cwd(), "migrations", "0049_scheduler_booking_payment_source_link_guard.sql");
+  if (fs.existsSync(schedulerBookingPaymentSourceLinkGuardMigrationPath)) {
+    database.exec(fs.readFileSync(schedulerBookingPaymentSourceLinkGuardMigrationPath, "utf8"));
+  }
+
+  const expenseSourceLinkGuardMigrationPath = path.join(process.cwd(), "migrations", "0050_expense_source_link_guard.sql");
+  if (fs.existsSync(expenseSourceLinkGuardMigrationPath)) {
+    database.exec(fs.readFileSync(expenseSourceLinkGuardMigrationPath, "utf8"));
+  }
+
+  const projectSourceIdentityGuardMigrationPath = path.join(process.cwd(), "migrations", "0051_project_source_identity_guard.sql");
+  if (fs.existsSync(projectSourceIdentityGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectSourceIdentityGuardMigrationPath, "utf8"));
+  }
+
+  const clientEmailCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0052_client_email_canon_guard.sql");
+  if (fs.existsSync(clientEmailCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(clientEmailCanonGuardMigrationPath, "utf8"));
+  }
+
+  const clientPhoneCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0053_client_phone_canon_guard.sql");
+  if (fs.existsSync(clientPhoneCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(clientPhoneCanonGuardMigrationPath, "utf8"));
+  }
+
+  const clientNameCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0054_client_name_canon_guard.sql");
+  if (fs.existsSync(clientNameCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(clientNameCanonGuardMigrationPath, "utf8"));
+  }
+
+  const projectIdentityCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0055_project_identity_canon_guard.sql");
+  if (fs.existsSync(projectIdentityCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectIdentityCanonGuardMigrationPath, "utf8"));
+  }
+
+  const projectDetailTextCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0056_project_detail_text_canon_guard.sql");
+  if (fs.existsSync(projectDetailTextCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectDetailTextCanonGuardMigrationPath, "utf8"));
+  }
+
+  const projectEventCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0057_project_event_canon_guard.sql");
+  if (fs.existsSync(projectEventCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectEventCanonGuardMigrationPath, "utf8"));
+  }
+
+  const projectSourceCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0058_project_source_canon_guard.sql");
+  if (fs.existsSync(projectSourceCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectSourceCanonGuardMigrationPath, "utf8"));
+  }
+
+  const projectParticipantCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0059_project_participant_canon_guard.sql");
+  if (fs.existsSync(projectParticipantCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectParticipantCanonGuardMigrationPath, "utf8"));
+  }
+
+  const projectCommunicationCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0060_project_communication_canon_guard.sql");
+  if (fs.existsSync(projectCommunicationCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectCommunicationCanonGuardMigrationPath, "utf8"));
+  }
+
+  const questionnaireResponseCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0061_questionnaire_response_canon_guard.sql");
+  if (fs.existsSync(questionnaireResponseCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(questionnaireResponseCanonGuardMigrationPath, "utf8"));
+  }
+
+  const questionnaireTemplateCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0062_questionnaire_template_canon_guard.sql");
+  if (fs.existsSync(questionnaireTemplateCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(questionnaireTemplateCanonGuardMigrationPath, "utf8"));
+  }
+
+  const proposalPackageCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0063_proposal_package_canon_guard.sql");
+  if (fs.existsSync(proposalPackageCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(proposalPackageCanonGuardMigrationPath, "utf8"));
+  }
+
+  const invoiceLedgerCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0064_invoice_ledger_canon_guard.sql");
+  if (fs.existsSync(invoiceLedgerCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(invoiceLedgerCanonGuardMigrationPath, "utf8"));
+  }
+
+  const schedulerBookingCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0065_scheduler_booking_canon_guard.sql");
+  if (fs.existsSync(schedulerBookingCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(schedulerBookingCanonGuardMigrationPath, "utf8"));
+  }
+
+  const expenseBookkeepingCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0066_expense_bookkeeping_canon_guard.sql");
+  if (fs.existsSync(expenseBookkeepingCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(expenseBookkeepingCanonGuardMigrationPath, "utf8"));
+  }
+
+  const studioConfigurationCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0067_studio_configuration_canon_guard.sql");
+  if (fs.existsSync(studioConfigurationCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(studioConfigurationCanonGuardMigrationPath, "utf8"));
+  }
+
+  const agentTaskCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0068_agent_task_canon_guard.sql");
+  if (fs.existsSync(agentTaskCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(agentTaskCanonGuardMigrationPath, "utf8"));
+  }
+
+  const accessTokenCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0069_access_token_canon_guard.sql");
+  if (fs.existsSync(accessTokenCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(accessTokenCanonGuardMigrationPath, "utf8"));
+  }
+
+  const activityLogCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0070_activity_log_canon_guard.sql");
+  if (fs.existsSync(activityLogCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(activityLogCanonGuardMigrationPath, "utf8"));
+  }
+
+  const templateCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0071_template_canon_guard.sql");
+  if (fs.existsSync(templateCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(templateCanonGuardMigrationPath, "utf8"));
+  }
+
+  const googleCalendarConnectionCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0072_google_calendar_connection_canon_guard.sql");
+  if (fs.existsSync(googleCalendarConnectionCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(googleCalendarConnectionCanonGuardMigrationPath, "utf8"));
+  }
+
+  const projectLocationCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0073_project_location_canon_guard.sql");
+  if (fs.existsSync(projectLocationCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(projectLocationCanonGuardMigrationPath, "utf8"));
+  }
+
+  const agentTaskLifecycleCanonGuardMigrationPath = path.join(process.cwd(), "migrations", "0074_agent_task_lifecycle_canon_guard.sql");
+  if (fs.existsSync(agentTaskLifecycleCanonGuardMigrationPath)) {
+    database.exec(fs.readFileSync(agentTaskLifecycleCanonGuardMigrationPath, "utf8"));
+  }
+
+  const projectLocationSourceLinksMigrationPath = path.join(process.cwd(), "migrations", "0075_project_location_source_links.sql");
+  if (fs.existsSync(projectLocationSourceLinksMigrationPath)) {
+    addColumnIfMissing(database, "project_locations", "source_type", "TEXT");
+    addColumnIfMissing(database, "project_locations", "source_id", "TEXT");
+    database.exec(fs.readFileSync(projectLocationSourceLinksMigrationPath, "utf8")
+      .replace(/ALTER TABLE project_locations ADD COLUMN source_type TEXT;\s*/g, "")
+      .replace(/ALTER TABLE project_locations ADD COLUMN source_id TEXT;\s*/g, ""));
+  }
+
+  const agentTaskSpecialistQueueIndexMigrationPath = path.join(process.cwd(), "migrations", "0076_agent_task_specialist_queue_index.sql");
+  if (fs.existsSync(agentTaskSpecialistQueueIndexMigrationPath)) {
+    database.exec(fs.readFileSync(agentTaskSpecialistQueueIndexMigrationPath, "utf8"));
+  }
+
+  const bookkeepingSettlementIndexesMigrationPath = path.join(process.cwd(), "migrations", "0077_bookkeeping_settlement_indexes.sql");
+  if (fs.existsSync(bookkeepingSettlementIndexesMigrationPath)) {
+    database.exec(fs.readFileSync(bookkeepingSettlementIndexesMigrationPath, "utf8"));
+  }
+
+  const clientProfileFieldsMigrationPath = path.join(process.cwd(), "migrations", "0078_client_profile_fields.sql");
+  if (fs.existsSync(clientProfileFieldsMigrationPath)) {
+    addColumnIfMissing(database, "clients", "instagram_handle", "TEXT");
+    addColumnIfMissing(database, "clients", "communication_preference", "TEXT");
+    addColumnIfMissing(database, "clients", "referral_source", "TEXT");
+    database.exec(fs.readFileSync(clientProfileFieldsMigrationPath, "utf8")
+      .replace(/ALTER TABLE clients ADD COLUMN instagram_handle TEXT;\s*/g, "")
+      .replace(/ALTER TABLE clients ADD COLUMN communication_preference TEXT;\s*/g, "")
+      .replace(/ALTER TABLE clients ADD COLUMN referral_source TEXT;\s*/g, ""));
+  }
+
+  const templateExpandedTypesMigrationPath = path.join(process.cwd(), "migrations", "0079_template_expanded_types.sql");
+  if (fs.existsSync(templateExpandedTypesMigrationPath)) {
+    database.exec(fs.readFileSync(templateExpandedTypesMigrationPath, "utf8"));
+  }
+
+  const invoicePaymentCheckoutLinksMigrationPath = path.join(process.cwd(), "migrations", "0080_invoice_payment_checkout_links.sql");
+  if (fs.existsSync(invoicePaymentCheckoutLinksMigrationPath)) {
+    addColumnIfMissing(database, "invoice_payments", "stripe_checkout_url", "TEXT");
+    addColumnIfMissing(database, "invoice_payments", "stripe_checkout_session_id", "TEXT");
+    addColumnIfMissing(database, "invoice_payments", "stripe_checkout_status", "TEXT NOT NULL DEFAULT 'not_created'");
+    database.exec(fs.readFileSync(invoicePaymentCheckoutLinksMigrationPath, "utf8")
+      .replace(/ALTER TABLE invoice_payments ADD COLUMN stripe_checkout_url TEXT;\s*/g, "")
+      .replace(/ALTER TABLE invoice_payments ADD COLUMN stripe_checkout_session_id TEXT;\s*/g, "")
+      .replace(/ALTER TABLE invoice_payments ADD COLUMN stripe_checkout_status TEXT NOT NULL DEFAULT 'not_created';\s*/g, ""));
+  }
+
+  const projectWorkflowAutomationsMigrationPath = path.join(process.cwd(), "migrations", "0081_project_workflow_automations.sql");
+  if (fs.existsSync(projectWorkflowAutomationsMigrationPath)) {
+    database.exec(fs.readFileSync(projectWorkflowAutomationsMigrationPath, "utf8"));
   }
 
   const projectColumns = new Set(

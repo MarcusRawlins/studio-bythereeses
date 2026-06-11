@@ -12,6 +12,9 @@ export const clients = sqliteTable("clients", {
   email: text("email").notNull().unique(),
   phone: text("phone"),
   preferredName: text("preferred_name"),
+  instagramHandle: text("instagram_handle"),
+  communicationPreference: text("communication_preference"),
+  referralSource: text("referral_source"),
   notes: text("notes"),
   ...timestamps,
 });
@@ -47,6 +50,8 @@ export const projectEvents = sqliteTable("project_events", {
   googleCalendarEventId: text("google_calendar_event_id"),
   calendarSyncStatus: text("calendar_sync_status").notNull().default("not_connected"),
   notes: text("notes"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -60,6 +65,8 @@ export const projectLocations = sqliteTable("project_locations", {
   city: text("city"),
   state: text("state"),
   notes: text("notes"),
+  sourceType: text("source_type"),
+  sourceId: text("source_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -276,6 +283,36 @@ export const agentTasks = sqliteTable("agent_tasks", {
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
 
+export const projectWorkflowRuns = sqliteTable("project_workflow_runs", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  workflowKey: text("workflow_key").notNull(),
+  workflowName: text("workflow_name").notNull(),
+  status: text("status").notNull().default("active"),
+  selectedStepKeysJson: text("selected_step_keys_json").notNull(),
+  createdBy: text("created_by").notNull().default("Tyler"),
+  startedAt: text("started_at"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+export const projectWorkflowSteps = sqliteTable("project_workflow_steps", {
+  id: text("id").primaryKey(),
+  workflowRunId: text("workflow_run_id").notNull().references(() => projectWorkflowRuns.id, { onDelete: "cascade" }),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  stepKey: text("step_key").notNull(),
+  title: text("title").notNull(),
+  instructions: text("instructions").notNull(),
+  assignedAgent: text("assigned_agent").notNull(),
+  triggerLabel: text("trigger_label"),
+  status: text("status").notNull().default("configured"),
+  automationEnabled: integer("automation_enabled", { mode: "boolean" }).notNull().default(true),
+  agentTaskId: text("agent_task_id").references(() => agentTasks.id, { onDelete: "set null" }),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
 export const projectCommunications = sqliteTable("project_communications", {
   id: text("id").primaryKey(),
   projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
@@ -427,6 +464,9 @@ export const invoicePayments = sqliteTable("invoice_payments", {
   grossCollectedCents: integer("gross_collected_cents").notNull().default(0),
   netDepositCents: integer("net_deposit_cents").notNull().default(0),
   externalPaymentId: text("external_payment_id"),
+  stripeCheckoutUrl: text("stripe_checkout_url"),
+  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
+  stripeCheckoutStatus: text("stripe_checkout_status").notNull().default("not_created"),
   notes: text("notes"),
   sourceType: text("source_type"),
   sourceId: text("source_id"),
@@ -472,6 +512,8 @@ export type Questionnaire = typeof questionnaires.$inferSelect;
 export type QuestionnaireQuestion = typeof questionnaireQuestions.$inferSelect;
 export type QuestionnaireResponse = typeof questionnaireResponses.$inferSelect;
 export type ProjectTimelineItem = typeof projectTimelineItems.$inferSelect;
+export type ProjectWorkflowRun = typeof projectWorkflowRuns.$inferSelect;
+export type ProjectWorkflowStep = typeof projectWorkflowSteps.$inferSelect;
 export type ProjectCommunication = typeof projectCommunications.$inferSelect;
 export type Vendor = typeof vendors.$inferSelect;
 export type Expense = typeof expenses.$inferSelect;
