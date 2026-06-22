@@ -95,7 +95,7 @@ export async function sendBookingReminderEmail({ booking, meetingType, manageUrl
   const when = formatDateTime(booking.startAt);
   const location = meetingType.locationLabel || "Zoom";
 
-  await sendResendEmail({
+  return sendResendEmail({
     to: booking.attendeeEmail,
     subject: `Reminder: ${meetingType.name}`,
     text: [

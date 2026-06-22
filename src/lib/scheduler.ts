@@ -1223,9 +1223,8 @@ export async function createProjectFromBookingAction(formData: FormData) {
   redirect(`/projects/${projectId}`);
 }
 
-export async function sendDueSchedulerReminders() {
+export async function sendDueSchedulerReminders(now = new Date()) {
   await ensureSchedulerDefaults();
-  const now = new Date();
   const windowEnd = addMinutes(now, 24 * 60);
   const bookings = await db.query.schedulerBookings.findMany({
     where: and(
@@ -1243,10 +1242,11 @@ export async function sendDueSchedulerReminders() {
       where: eq(schedulerMeetingTypes.id, booking.meetingTypeId),
     });
     if (!meetingType) continue;
-    await sendBookingReminderEmail({ booking, meetingType, ...getBookingManageUrls(meetingType.slug, booking) });
+    const emailed = await sendBookingReminderEmail({ booking, meetingType, ...getBookingManageUrls(meetingType.slug, booking) });
+    if (!emailed) continue;
     await db.update(schedulerBookings).set({
-      reminderSentAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      reminderSentAt: now.toISOString(),
+      updatedAt: now.toISOString(),
     }).where(eq(schedulerBookings.id, booking.id));
     sent += 1;
   }
