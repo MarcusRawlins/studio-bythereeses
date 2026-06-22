@@ -3,8 +3,10 @@ import type { QuestionnaireAnswerMap } from "@/components/QuestionnaireQuestionL
 import { db } from "@/db/client";
 import { questionnaireResponses } from "@/db/schema";
 import { verifyQuestionnaireContext } from "@/lib/questionnaire-links";
+import { getQuestionnairePublicHeaderName } from "@/lib/questionnaire-public-header";
 import { getQuestionnaire, listQuestionnaireQuestions } from "@/lib/questionnaires";
 import { and, desc, eq, isNull } from "drizzle-orm";
+import Image from "next/image";
 import { notFound } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +24,7 @@ export default async function QuestionnairePreviewPage({
   if (!questionnaire) notFound();
   const questions = await listQuestionnaireQuestions(questionnaire.id);
   const verifiedContext = verifyQuestionnaireContext(context, questionnaire.id);
+  const headerName = await getQuestionnairePublicHeaderName(verifiedContext);
   let defaultAnswers: QuestionnaireAnswerMap = {};
 
   if (verifiedContext?.projectId && verifiedContext?.clientId) {
@@ -49,8 +52,10 @@ export default async function QuestionnairePreviewPage({
     <main className="min-h-screen bg-[var(--background)] px-4 py-8 text-[var(--foreground)]">
       <div className="mx-auto max-w-3xl">
         <div className="mb-8 text-center">
-          <span className="studio-caps block text-[0.62rem] text-[var(--ink-muted)]">The Reeses</span>
-          <span className="font-serif text-3xl leading-none text-[var(--foreground)]">Studio</span>
+          <Image src="/brand/alex-tyler-logo.png" alt="Alex & Tyler" width={1400} height={467} className="mx-auto h-auto w-40 max-w-[72vw]" priority />
+          <span className="mt-4 block font-['Times_Now',Georgia,serif] text-3xl leading-tight text-[var(--foreground)]">
+            {headerName}
+          </span>
         </div>
 
         <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] shadow-sm">

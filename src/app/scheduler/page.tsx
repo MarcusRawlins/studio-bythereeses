@@ -1,4 +1,5 @@
 import { AppShell } from "@/components/AppShell";
+import { LinkActions } from "@/components/LinkActions";
 import { SchedulerQuestionsBuilder } from "@/components/SchedulerQuestionsBuilder";
 import {
   getBookingUrl,
@@ -7,7 +8,6 @@ import {
 } from "@/lib/scheduler";
 import {
   CalendarCheck,
-  Copy,
   DollarSign,
   ExternalLink,
   Link as LinkIcon,
@@ -241,14 +241,10 @@ export default async function SchedulerPage() {
                         <p className="mt-1 text-sm text-[var(--ink-muted)]">
                           {meetingType.durationMinutes} min · {meetingType.locationLabel || "Zoom"} · {meetingType.collectPayment ? `$${(meetingType.priceCents ?? 0) / 100}${meetingType.stripePaymentLink ? " · Checkout linked" : " · Checkout needed"}` : "No payment"}
                         </p>
-                        <p className="mt-1 break-all text-xs text-[var(--ink-muted)]">{bookingUrl}</p>
                       </div>
                       <div className="text-sm text-[var(--ink-muted)]">Email confirmations</div>
-                      <div className="flex gap-2">
-                        <Link href={`/book/${meetingType.slug}`} prefetch={false} className="inline-flex flex-1 items-center justify-center gap-2 rounded-sm border border-[var(--line)] px-3 py-2 text-sm font-semibold transition hover:border-[var(--foreground)]">
-                          <Copy className="h-4 w-4" />
-                          Open link
-                        </Link>
+                      <div className="flex flex-wrap gap-2">
+                        <LinkActions url={bookingUrl} copyLabel="Copy link" openLabel="Open" />
                         <span className="inline-flex items-center justify-center rounded-sm border border-[var(--line)] px-3 py-2 text-sm font-semibold">
                           <Pencil className="h-4 w-4" />
                         </span>

@@ -1,9 +1,10 @@
 import { AppShell } from "@/components/AppShell";
+import { LinkActions } from "@/components/LinkActions";
 import { ProposalPackageBuilder } from "@/components/ProposalPackageBuilder";
 import { formatDate, formatMoney } from "@/lib/format";
 import { getProposalReadiness } from "@/lib/proposal-readiness";
 import { getProposal, listContractTemplateOptions, listProposalPackageTemplateOptions } from "@/lib/sales";
-import { Check, ExternalLink, Eye, FileText, FileSignature, Link2, ReceiptText, RotateCcw, Send, Signature } from "lucide-react";
+import { Check, Eye, FileText, FileSignature, Link2, ReceiptText, RotateCcw, Send, Signature } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
@@ -399,11 +400,7 @@ export default async function ProposalDetailPage({
                   Client proposal link created
                 </div>
                 <p className="mt-2 text-sm text-[var(--ink-muted)]">Copy this now. For security, the full token is only shown immediately after creation.</p>
-                <input readOnly value={shareUrl} className="mt-3 w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs outline-none" />
-                <a href={shareUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-2 text-sm font-semibold transition hover:text-[var(--accent)]">
-                  Open client view
-                  <ExternalLink className="h-4 w-4" />
-                </a>
+                <LinkActions url={shareUrl} copyLabel="Copy proposal link" openLabel="Open client view" className="mt-3" />
               </div>
             )}
             <div className="mt-4 grid gap-2">

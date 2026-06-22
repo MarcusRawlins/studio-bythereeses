@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CalendarDays, CalendarRange, ClipboardList, FileSignature, FolderKanban, HeartPulse, History, Inbox, Landmark, LayoutDashboard, ReceiptText, Settings, SwatchBook, UsersRound } from "lucide-react";
+import { CalendarDays, CalendarRange, ClipboardList, FileSignature, FolderKanban, HeartPulse, History, Inbox, Landmark, LayoutDashboard, MapPin, ReceiptText, Settings, SwatchBook, UsersRound } from "lucide-react";
 import { QuickFind } from "./QuickFind";
 
 const navItems = [
@@ -8,6 +8,7 @@ const navItems = [
   { href: "/agenda", label: "Agenda", icon: CalendarRange },
   { href: "/projects", label: "Projects", icon: FolderKanban },
   { href: "/clients", label: "Clients", icon: UsersRound },
+  { href: "/shooting-locations", label: "Locations", icon: MapPin },
   { href: "/scheduler", label: "Scheduler", icon: CalendarDays },
 ];
 
@@ -27,7 +28,7 @@ const mobileItems = [
   navItems[1],
   navItems[2],
   navItems[3],
-  navItems[5],
+  navItems[6],
   studioItems[2],
 ];
 
