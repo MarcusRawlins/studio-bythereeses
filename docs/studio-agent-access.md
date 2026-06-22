@@ -1946,6 +1946,22 @@ Content-Type: application/json
 
 Use this when Tyler says to turn on a workflow for a specific project or to queue only specific steps. These workflow routes never send emails or texts directly; they create approval-oriented Studio Inbox work for the appropriate specialist agent.
 
+Post-wedding delivery foundation step keys (drafts only; Tyler approves and sends):
+
+- `day-after-touchpoint`
+- `sneak-peek-delivery`
+- `gallery-delivery`
+- `review-request`
+- `referral-follow-up`
+
+Example post-delivery setup:
+
+```json
+{
+  "stepKeys": ["day-after-touchpoint", "sneak-peek-delivery", "gallery-delivery", "review-request", "referral-follow-up"]
+}
+```
+
 Submit the result of a workflow-created task after the agent drafts the work:
 
 Start or resume a task run and receive the execution packet:

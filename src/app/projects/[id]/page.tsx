@@ -1,4 +1,5 @@
 import { AppShell } from "@/components/AppShell";
+import { LinkActions } from "@/components/LinkActions";
 import { listAgentTasks } from "@/lib/agent-tasks";
 import { getProject } from "@/lib/crm";
 import { formatActivityAction, formatDate, formatMoney } from "@/lib/format";
@@ -172,14 +173,8 @@ export default async function ProjectDetailPage({
                   Copy this now. For security, the full token is only shown immediately after creation.
                 </p>
               </div>
-              <a href={portalLink} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[var(--accent)] px-3 py-2 text-sm font-semibold text-[var(--accent-strong)] transition hover:bg-white" target="_blank">
-                <ExternalLink className="h-4 w-4" />
-                Open portal
-              </a>
             </div>
-            <a href={portalLink} className="mt-3 block break-all rounded-md bg-white/70 px-3 py-2 text-xs underline" target="_blank">
-              {portalLink}
-            </a>
+            <LinkActions url={portalLink} copyLabel="Copy portal link" openLabel="Open portal" className="mt-3" />
           </div>
         )}
 
@@ -697,10 +692,7 @@ export default async function ProjectDetailPage({
                     <div>
                       <div className="text-sm font-semibold">{meetingType.name}</div>
                     </div>
-                    <a href={url} target="_blank" className="inline-flex items-center justify-center gap-2 rounded-sm border border-[var(--line)] px-3 py-2 text-sm font-semibold transition hover:border-[var(--foreground)]">
-                      <ExternalLink className="h-4 w-4" />
-                      Open link
-                    </a>
+                    <LinkActions url={url} copyLabel="Copy link" openLabel="Open" />
                   </div>
                 </div>
               ))}
@@ -788,7 +780,7 @@ export default async function ProjectDetailPage({
                   <ClipboardList className="h-4 w-4 text-[var(--ink-3)]" />
                   <h2 className="studio-serif text-2xl">Studio workflow</h2>
                 </div>
-                <p className="mt-1 text-sm text-[var(--ink-3)]">Choose the Studio steps this project needs, then queue agent drafts when you are ready.</p>
+                <p className="mt-1 text-sm text-[var(--ink-3)]">Choose the Studio steps this project needs — including post-wedding delivery, review, and referral follow-up — then queue agent drafts when you are ready.</p>
               </div>
               <span className="studio-chip">{sixFigureRun ? "Enabled" : "Not set up"}</span>
             </div>

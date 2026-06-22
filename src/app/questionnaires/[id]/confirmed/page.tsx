@@ -3,8 +3,10 @@ import {
   verifyQuestionnaireContext,
   weddingTimelineQuestionnaireId,
 } from "@/lib/questionnaire-links";
+import { getQuestionnairePublicHeaderName } from "@/lib/questionnaire-public-header";
 import { getQuestionnaire } from "@/lib/questionnaires";
 import { ArrowRight, CheckCircle2 } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -23,6 +25,7 @@ export default async function QuestionnaireConfirmedPage({
   if (!questionnaire) notFound();
 
   const verifiedContext = verifyQuestionnaireContext(context, questionnaire.id);
+  const headerName = await getQuestionnairePublicHeaderName(verifiedContext);
   const scheduleUrl = questionnaire.id === weddingTimelineQuestionnaireId
     ? getTimelineQuestionnaireCallUrl(verifiedContext?.projectId, verifiedContext?.clientId)
     : getTimelineQuestionnaireCallUrl();
@@ -31,8 +34,10 @@ export default async function QuestionnaireConfirmedPage({
     <main className="min-h-screen bg-[var(--background)] px-4 py-10 text-[var(--foreground)]">
       <div className="mx-auto max-w-2xl text-center">
         <div>
-          <span className="studio-caps block text-[0.62rem] text-[var(--ink-muted)]">The Reeses</span>
-          <span className="font-serif text-3xl leading-none text-[var(--foreground)]">Studio</span>
+          <Image src="/brand/alex-tyler-logo.png" alt="Alex & Tyler" width={1400} height={467} className="mx-auto h-auto w-40 max-w-[72vw]" priority />
+          <span className="mt-4 block font-['Times_Now',Georgia,serif] text-3xl leading-tight text-[var(--foreground)]">
+            {headerName}
+          </span>
         </div>
         <section className="mt-10 rounded-md border border-[var(--line)] bg-[var(--surface)] px-7 py-10 shadow-sm">
           <CheckCircle2 className="mx-auto h-9 w-9 text-[var(--brand-brown)]" />

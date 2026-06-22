@@ -16,6 +16,16 @@ export type WorkflowStepDefinition = {
   sortOrder: number;
 };
 
+export const postWeddingDeliveryStepKeys = [
+  "day-after-touchpoint",
+  "sneak-peek-delivery",
+  "gallery-delivery",
+  "review-request",
+  "referral-follow-up",
+] as const;
+
+export type PostWeddingDeliveryStepKey = (typeof postWeddingDeliveryStepKeys)[number];
+
 export const sixFigureAutomationSteps: WorkflowStepDefinition[] = [
   {
     key: "lead-introduction-text",
@@ -98,12 +108,44 @@ export const sixFigureAutomationSteps: WorkflowStepDefinition[] = [
     sortOrder: 100,
   },
   {
+    key: "day-after-touchpoint",
+    title: "Prepare day-after touchpoint",
+    triggerLabel: "Day after wedding or session",
+    assignedAgent: "Communications Agent",
+    instructions: "Draft a day-after message celebrating the event and setting expectations for sneak peek and gallery timing. Keep it personal and brief. Do not send automatically.",
+    sortOrder: 105,
+  },
+  {
+    key: "sneak-peek-delivery",
+    title: "Prepare sneak peek delivery",
+    triggerLabel: "Sneak peek ready to share",
+    assignedAgent: "Communications Agent",
+    instructions: "Draft the sneak peek delivery message with gallery link context, what the client should expect next, and any album or print upsell notes for Tyler to review. Do not send automatically.",
+    sortOrder: 106,
+  },
+  {
+    key: "gallery-delivery",
+    title: "Prepare full gallery delivery",
+    triggerLabel: "Full gallery ready to deliver",
+    assignedAgent: "Communications Agent",
+    instructions: "Draft the full gallery delivery message with access instructions, download or print guidance, and a warm close to the project experience. Do not send automatically.",
+    sortOrder: 107,
+  },
+  {
     key: "review-request",
-    title: "Draft review and referral request",
+    title: "Draft review request",
     triggerLabel: "After positive delivery experience",
     assignedAgent: "Communications Agent",
-    instructions: "Draft a review/referral request after delivery. Keep it specific, warm, and low-pressure. Do not send automatically.",
+    instructions: "Draft a review request after delivery. Thank the client personally, name what you enjoyed serving, include the review link, and keep it warm and low-pressure. Do not send automatically.",
     sortOrder: 110,
+  },
+  {
+    key: "referral-follow-up",
+    title: "Draft referral follow-up",
+    triggerLabel: "After review or strong positive delivery moment",
+    assignedAgent: "Communications Agent",
+    instructions: "Draft a referral follow-up for clients who loved the experience. Mention how referrals help future couples find the right photographer and keep the ask personal and low-pressure. Do not send automatically.",
+    sortOrder: 115,
   },
   {
     key: "anniversary-touchpoint",

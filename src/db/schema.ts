@@ -71,6 +71,28 @@ export const projectLocations = sqliteTable("project_locations", {
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
 
+export const shootingLocations = sqliteTable("shooting_locations", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  region: text("region"),
+  city: text("city"),
+  state: text("state"),
+  country: text("country").notNull().default("USA"),
+  address: text("address"),
+  googleMapsUrl: text("google_maps_url"),
+  locationType: text("location_type").notNull().default("other"),
+  bestFor: text("best_for"),
+  permitNotes: text("permit_notes"),
+  accessNotes: text("access_notes"),
+  lightNotes: text("light_notes"),
+  droneNotes: text("drone_notes"),
+  generalNotes: text("general_notes"),
+  tagsJson: text("tags_json"),
+  status: text("status").notNull().default("active"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
 export const projectParticipants = sqliteTable("project_participants", {
   id: text("id").primaryKey(),
   projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
@@ -502,6 +524,7 @@ export type Client = typeof clients.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type ProjectEvent = typeof projectEvents.$inferSelect;
 export type ProjectLocation = typeof projectLocations.$inferSelect;
+export type ShootingLocation = typeof shootingLocations.$inferSelect;
 export type SchedulerMeetingType = typeof schedulerMeetingTypes.$inferSelect;
 export type SchedulerBooking = typeof schedulerBookings.$inferSelect;
 export type SchedulerSettings = typeof schedulerSettings.$inferSelect;

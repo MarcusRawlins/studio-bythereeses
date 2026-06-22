@@ -11,6 +11,7 @@ async function main() {
   const {
     enableSixFigureWorkflowForProject,
     listProjectWorkflowRuns,
+    postWeddingDeliveryStepKeys,
     queueProjectWorkflowSteps,
     sixFigureAutomationSteps,
   } = await import("./project-workflow-automation");
@@ -23,6 +24,16 @@ async function main() {
   `).run(now, now);
 
   assert.equal(sixFigureAutomationSteps.length > 5, true);
+  assert.deepEqual(
+    postWeddingDeliveryStepKeys,
+    ["day-after-touchpoint", "sneak-peek-delivery", "gallery-delivery", "review-request", "referral-follow-up"],
+  );
+  assert.deepEqual(
+    sixFigureAutomationSteps
+      .filter((step) => postWeddingDeliveryStepKeys.includes(step.key as typeof postWeddingDeliveryStepKeys[number]))
+      .map((step) => step.key),
+    [...postWeddingDeliveryStepKeys],
+  );
 
   const setup = await enableSixFigureWorkflowForProject({
     projectId: "project-1",
@@ -86,6 +97,28 @@ async function main() {
 
   await queueProjectWorkflowSteps(setup.run.id, { stepKeys: ["day-1-call"] });
   assert.deepEqual(database.prepare("SELECT COUNT(*) AS count FROM agent_tasks").get(), { count: 1 });
+
+  const deliverySetup = await enableSixFigureWorkflowForProject({
+    projectId: "project-1",
+    stepKeys: [...postWeddingDeliveryStepKeys],
+  });
+  assert.deepEqual(deliverySetup.steps.map((step) => step.stepKey), [...postWeddingDeliveryStepKeys]);
+  assert.deepEqual(deliverySetup.steps.map((step) => step.assignedAgent), [
+    "Communications Agent",
+    "Communications Agent",
+    "Communications Agent",
+    "Communications Agent",
+    "Communications Agent",
+  ]);
+
+  const deliveryQueued = await queueProjectWorkflowSteps(deliverySetup.run.id, {
+    stepKeys: ["gallery-delivery", "review-request"],
+  });
+  assert.equal(deliveryQueued.queuedTasks.length, 2);
+  assert.deepEqual(deliveryQueued.queuedTasks.map((task) => task.title), [
+    "Prepare full gallery delivery",
+    "Draft review request",
+  ]);
 
   const replacement = await enableSixFigureWorkflowForProject({
     projectId: "project-1",

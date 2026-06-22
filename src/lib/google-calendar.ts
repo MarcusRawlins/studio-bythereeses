@@ -121,6 +121,15 @@ function decryptRefreshToken(value: string) {
   ]).toString("utf8");
 }
 
+function maybeDecryptRefreshToken(value: string | null | undefined) {
+  if (!value) return undefined;
+  try {
+    return decryptRefreshToken(value);
+  } catch {
+    return undefined;
+  }
+}
+
 async function getAccessToken(refreshToken = process.env.GOOGLE_REFRESH_TOKEN) {
   if (!hasGoogleOAuthApp() || !refreshToken) return null;
   const cacheKey = createHash("sha256").update(refreshToken).digest("hex");
@@ -209,7 +218,7 @@ export async function getConnectedGoogleAccounts(): Promise<ConnectedGoogleCalen
   });
 
   const accounts = await Promise.all(connections.map(async (connection) => {
-    const accessToken = await getAccessToken(decryptRefreshToken(connection.refreshToken));
+    const accessToken = await getAccessToken(maybeDecryptRefreshToken(connection.refreshToken));
     const calendars = accessToken
       ? await listCalendars(accessToken, connection.id, connection.googleAccountEmail)
       : [];
@@ -308,7 +317,7 @@ export async function getGoogleBusyTimes(startAt: Date, endAt: Date, calendarIds
   for (const connection of connections) {
     const selectedCalendarIds = selectedByConnection.get(connection.id) ?? [];
     if (!selectedCalendarIds.length) continue;
-    const accessToken = await getAccessToken(connection?.refreshToken ? decryptRefreshToken(connection.refreshToken) : undefined);
+    const accessToken = await getAccessToken(maybeDecryptRefreshToken(connection?.refreshToken));
     if (!accessToken) continue;
     busyTimes.push(...await fetchBusyTimes(accessToken, startAt, endAt, selectedCalendarIds));
   }
@@ -361,7 +370,7 @@ export async function createGoogleCalendarEvent(input: CalendarEventInput) {
     ? await db.query.googleCalendarConnections.findFirst({ where: eq(googleCalendarConnections.id, connectionId) })
     : null;
   if (connectionId && connectionId !== "env-primary" && !connection) return null;
-  const accessToken = await getAccessToken(connection?.refreshToken ? decryptRefreshToken(connection.refreshToken) : undefined);
+  const accessToken = await getAccessToken(maybeDecryptRefreshToken(connection?.refreshToken));
   if (!accessToken) return null;
 
   const targetCalendarId = calendarId || "primary";
@@ -412,7 +421,7 @@ export async function createGoogleCalendarAllDayEvent(input: AllDayCalendarEvent
     ? await db.query.googleCalendarConnections.findFirst({ where: eq(googleCalendarConnections.id, connectionId) })
     : null;
   if (connectionId && connectionId !== "env-primary" && !connection) return null;
-  const accessToken = await getAccessToken(connection?.refreshToken ? decryptRefreshToken(connection.refreshToken) : undefined);
+  const accessToken = await getAccessToken(maybeDecryptRefreshToken(connection?.refreshToken));
   if (!accessToken) return null;
 
   const targetCalendarId = calendarId || "primary";
@@ -449,7 +458,7 @@ export async function updateGoogleCalendarAllDayEvent(input: AllDayCalendarEvent
     ? await db.query.googleCalendarConnections.findFirst({ where: eq(googleCalendarConnections.id, connectionId) })
     : null;
   if (connectionId && connectionId !== "env-primary" && !connection) return null;
-  const accessToken = await getAccessToken(connection?.refreshToken ? decryptRefreshToken(connection.refreshToken) : undefined);
+  const accessToken = await getAccessToken(maybeDecryptRefreshToken(connection?.refreshToken));
   if (!accessToken) return null;
 
   const targetCalendarId = calendarId || "primary";
@@ -490,7 +499,7 @@ export async function deleteGoogleCalendarEvent(input: {
     ? await db.query.googleCalendarConnections.findFirst({ where: eq(googleCalendarConnections.id, connectionId) })
     : null;
   if (connectionId && connectionId !== "env-primary" && !connection) return false;
-  const accessToken = await getAccessToken(connection?.refreshToken ? decryptRefreshToken(connection.refreshToken) : undefined);
+  const accessToken = await getAccessToken(maybeDecryptRefreshToken(connection?.refreshToken));
   if (!accessToken) return false;
 
   const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId || "primary")}/events/${encodeURIComponent(input.eventId)}?sendUpdates=all`, {
