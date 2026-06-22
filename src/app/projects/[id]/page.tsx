@@ -780,7 +780,7 @@ export default async function ProjectDetailPage({
                   <ClipboardList className="h-4 w-4 text-[var(--ink-3)]" />
                   <h2 className="studio-serif text-2xl">Studio workflow</h2>
                 </div>
-                <p className="mt-1 text-sm text-[var(--ink-3)]">Choose the Studio steps this project needs, then queue agent drafts when you are ready.</p>
+                <p className="mt-1 text-sm text-[var(--ink-3)]">Choose the Studio steps this project needs — including post-wedding delivery, review, and referral follow-up — then queue agent drafts when you are ready.</p>
               </div>
               <span className="studio-chip">{sixFigureRun ? "Enabled" : "Not set up"}</span>
             </div>

@@ -39,6 +39,8 @@ async function main() {
   assert.equal(rows.some((row) => row.id === "six-figure-workflow-lead-contact-cadence"), true);
   assert.equal(rows.some((row) => row.id === "six-figure-workflow-consultation-to-booking"), true);
   assert.equal(rows.some((row) => row.id === "six-figure-workflow-planning-to-anniversary"), true);
+  assert.equal(rows.some((row) => row.id === "six-figure-workflow-post-delivery"), true);
+  assert.equal(rows.some((row) => row.id === "six-figure-workflow-referral-follow-up-email"), true);
   assert.equal(rows.some((row) => row.type === "workflow"), true);
   assert.equal(rows.some((row) => row.type === "email"), true);
   assert.equal(rows.some((row) => row.type === "questionnaire"), true);

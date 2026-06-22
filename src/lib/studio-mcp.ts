@@ -2077,6 +2077,71 @@ function workflowDraftForStep(input: {
     };
   }
 
+  if (input.stepKey === "day-after-touchpoint") {
+    return {
+      outputTitle: `${input.title} - draft`,
+      outputSummary: "Prepared a day-after celebration message for Tyler approval.",
+      outputKind: "workflow_draft",
+      outputBody: [
+        `Draft day-after message for ${clientName}:`,
+        "",
+        `Hi ${clientName}, we are still thinking about your day and loved being part of ${projectLabel}. Thank you again for trusting us with it.`,
+        "",
+        "Review notes:",
+        "- Mention sneak peek timing if known; otherwise set a simple expectation.",
+        "- Keep this celebratory and brief.",
+        "- Do not send automatically.",
+      ].join("\n"),
+    };
+  }
+
+  if (input.stepKey === "sneak-peek-delivery" || input.stepKey === "gallery-delivery") {
+    const deliveryLabel = input.stepKey === "sneak-peek-delivery" ? "sneak peek" : "full gallery";
+    return {
+      outputTitle: `${input.title} - draft`,
+      outputSummary: `Prepared a ${deliveryLabel} delivery message for Tyler approval.`,
+      outputKind: "workflow_draft",
+      outputBody: [
+        `Draft ${deliveryLabel} delivery for ${clientName}:`,
+        "",
+        `Hi ${clientName}, your ${deliveryLabel} for ${projectLabel} is ready.`,
+        "",
+        "Include for Tyler review:",
+        "- Gallery link placeholder or confirmed URL.",
+        "- Download, sharing, or print guidance as appropriate.",
+        input.stepKey === "sneak-peek-delivery"
+          ? "- Brief note on when the full gallery is expected."
+          : "- Warm close to the project experience and any album/print next steps.",
+        "- Do not send automatically.",
+        "",
+        "Source context:",
+        sources,
+      ].join("\n"),
+    };
+  }
+
+  if (input.stepKey === "review-request" || input.stepKey === "referral-follow-up") {
+    const askLabel = input.stepKey === "review-request" ? "review" : "referral";
+    return {
+      outputTitle: `${input.title} - draft`,
+      outputSummary: `Prepared a ${askLabel} follow-up message for Tyler approval.`,
+      outputKind: "workflow_draft",
+      outputBody: [
+        `Draft ${askLabel} follow-up for ${clientName}:`,
+        "",
+        input.stepKey === "review-request"
+          ? `Hi ${clientName}, it meant so much to serve you on ${projectLabel}. If you have a moment, a short review helps future couples know what working with The Reeses feels like.`
+          : `Hi ${clientName}, thank you again for the kind words about ${projectLabel}. If you know anyone currently planning a wedding or session, we would be grateful for a personal introduction.`,
+        "",
+        "Review notes:",
+        input.stepKey === "review-request"
+          ? "- Include the review link before sending."
+          : "- Keep the referral ask personal and low-pressure.",
+        "- Do not send automatically.",
+      ].join("\n"),
+    };
+  }
+
   return {
     outputTitle: `${input.title} - workflow brief`,
     outputSummary: `Prepared a ${input.assignedAgent} workflow brief for Tyler approval.`,
