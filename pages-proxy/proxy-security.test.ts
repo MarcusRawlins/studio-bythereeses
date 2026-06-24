@@ -93,6 +93,15 @@ async function main() {
   );
   assert.equal(forwardedRequest, null, "studio protected browser pages should not reach the Worker without a session");
 
+  const loginResponse = await pagesProxyWorker.fetch(
+    new Request("https://studio.bythereeses.com/admin/login?next=%2Fprojects"),
+    { ORIGIN_PROXY_SECRET: "origin-secret" },
+  );
+  const loginHtml = await loginResponse.text();
+  assert.equal(loginResponse.status, 200);
+  assert.match(loginHtml, /The Reeses Studio/);
+  assert.doesNotMatch(loginHtml, /Alex\s*&\s*Tyler|alex-tyler-logo|alt="Alex & Tyler"/i);
+
   console.log("pages proxy security tests passed");
 }
 

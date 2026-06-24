@@ -149,7 +149,7 @@ function loginPage(nextPath = "/") {
     @font-face { font-family: TimesNow; src: url('/fonts/times-now-light.woff') format('woff'); font-display: swap; }
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f8f6f3; color: #222; font-family: Arial, sans-serif; }
     main { width: min(460px, calc(100vw - 40px)); border: 1px solid #d5d0c8; background: #fffdfa; padding: 36px; box-shadow: 0 8px 20px rgb(0 0 0 / 0.05); }
-    img { display: block; width: 210px; max-width: 72%; margin: 0 auto 32px; }
+    .brand { font-family: TimesNow, Georgia, serif; text-transform: uppercase; letter-spacing: .18em; font-size: 15px; margin: 0 0 28px; }
     h1 { font-family: TimesNow, Georgia, serif; text-transform: uppercase; letter-spacing: .08em; font-size: 42px; font-weight: 300; line-height: .95; margin: 0 0 12px; }
     p { color: #6f665b; line-height: 1.6; margin: 0 0 24px; }
     a { display: inline-flex; justify-content: center; width: 100%; box-sizing: border-box; border: 1px solid #222; background: #222; color: #f8f6f3; text-decoration: none; padding: 13px 16px; font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
@@ -157,7 +157,7 @@ function loginPage(nextPath = "/") {
 </head>
 <body>
   <main>
-    <img src="/brand/alex-tyler-logo.png" alt="Alex & Tyler" />
+    <div class="brand">The Reeses Studio</div>
     <h1>Studio</h1>
     <p>This private workspace is only for The Reeses. Sign in with hello@bythereeses.com to continue.</p>
     <a href="/admin/auth/google?next=${encodeURIComponent(safeNext)}">Sign in with Google</a>

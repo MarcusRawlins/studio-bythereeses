@@ -57,7 +57,7 @@ async function main() {
     body: JSON.stringify({
       title: "Alex Wedding Proposal",
       packageName: "Heritage Day",
-      validUntil: "2026-06-15",
+      validUntil: "2099-06-15",
       scopeSummary: "Generated from discovery call notes.",
       contractTitle: "Photography Agreement",
       contractBody: "A short draft agreement.",
