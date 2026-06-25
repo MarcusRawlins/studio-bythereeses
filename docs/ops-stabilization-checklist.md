@@ -12,6 +12,15 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
 - Before strategic/durable changes: cross-check Obsidian first.
 - Drift guard (run before durable git work or cross-copy sync): `npm run check:source-drift` (`scripts/check-source-drift.mjs`). Reports primary + known local copies for origin URL, upstream tracking, ahead/behind, dirty worktree, branch/HEAD, and cross-copy HEAD/origin alignment. Non-zero exit on critical drift (HEAD/origin mismatch across present copies). Warnings only for dirty worktree, absent copies, and ahead/behind upstream.
 
+## Current Production Baseline
+- 2026-06-24: Production deploy completed from `main` after `0082_shooting_locations`.
+- Cloudflare account verified: `hello@bythereeses.com` / account `765e233f8635f207a8a3db4847efd3e9`.
+- Local keychain service for deploy token: `reese-crm-cloudflare-api-token`.
+- Runtime fix: keep origin guard in `src/middleware.ts`; do not reintroduce `src/proxy.ts` until OpenNext Cloudflare supports Next.js edge proxy for this target.
+- Production smoke after deploy: 165 projects, 164 clients, 0 data-health issues, 53 MCP tools, required task/workflow MCP tools present.
+- 2026-06-24 stabilization verification: `npm test` 168/168, `npm run lint`, `npm run build`, `npm run deploy:preflight`, `npm run deploy:capture-versions`, and `npm run smoke:production` passed.
+- 2026-06-24 cleanup: Pages proxy login HTML no longer references the old Alex/Tyler logo; `npm run deploy:preflight` now passes without stale-branding warnings.
+
 ## Deploy Gate
 - Required before any `npm run deploy` or `opennextjs-cloudflare deploy`:
   - `npm run lint`
@@ -24,6 +33,8 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
   - Requires `CLOUDFLARE_API_TOKEN`
   - Requires `src/middleware.ts`, `wrangler.jsonc`, `pages-proxy/_worker.js`
   - Rejects if `src/proxy.ts` present (Next.js 16 proxy runs on Node.js, which OpenNext Cloudflare cannot deploy)
+  - Requires a non-empty fresh D1 export at `/Volumes/reeseai-memory/backups/reese-photography-crm/d1/latest.sql` (<=36h old)
+  - Checks the MCP source still contains the finance, durable task-loop, and project workflow tool names asserted by production smoke
   - Warns on stale Alex/Tyler branding at studio/schedule domains
 - Full flow (from package.json + deployment doc):
   ```
@@ -98,9 +109,9 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
   - [x] 3. Add version capture (`scripts/capture-deploy-versions.mjs`, `npm run deploy:capture-versions`) + rollback helper (`scripts/rollback-deploy.mjs`, `scripts/rollback.sh`, `npm run deploy:rollback`).
   - [x] 11. Agent/MCP access docs (`docs/studio-agent-access.md`) reconciled with finance approval guard + smoke surface.
   - [ ] 4. Expand with Obsidian priorities + `docs/superpowers/plans/2026-05-20-project-reliability-efficiency.md` items in scope.
-  - [ ] 5. Add backup freshness + MCP tool surface assertions into deploy gate where cheap.
+  - [x] 5. Add backup freshness + MCP tool surface assertions into deploy gate where cheap.
   - [ ] 6. Document token rotation drill + "who has the token" inventory (keychain + CF secrets + launchd).
-  - [ ] 7. Run non-destructive verification (`lint`, `build`, `deploy:preflight` if token present, `deploy:capture-versions`, smoke against prod with token).
+  - [x] 7. Run non-destructive verification (`lint`, `build`, `deploy:preflight` if token present, `deploy:capture-versions`, smoke against prod with token).
   - [ ] 8. PR back to main only after checklist items pass review + no feature deltas in stabilization slices.
 - Do not deploy from stabilization work until explicit sign-off.
 - Track via checkboxes in this doc + Obsidian.
@@ -110,6 +121,7 @@ See package.json scripts, `docs/backups.md`, `docs/deployment-live-testing.md`, 
 
 - Capture before deploy: `npm run deploy:capture-versions`
 - Rollback plan: `npm run deploy:rollback -- --plan`
+- CI/dev gate: `npm test && npm run lint && npm run build`
 - Preflight+smoke loop: `npm run deploy:preflight && npm run smoke:production`
 - Backup drill: `npm run backup:reconcile`
 - Restore drill: `npm run db:restore-local:d1 -- --dry-run`

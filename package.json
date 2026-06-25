@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "node scripts/run-tests.mjs",
     "check:source-drift": "node scripts/check-source-drift.mjs",
     "deploy:preflight": "node scripts/check-source-drift.mjs && node scripts/deploy-preflight.mjs",
     "deploy:capture-versions": "node scripts/capture-deploy-versions.mjs",

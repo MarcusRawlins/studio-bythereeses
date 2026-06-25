@@ -66,7 +66,7 @@ async function main() {
   const result = await createProposalFromAgent("project-1", {
     title: "Alex Wedding Proposal",
     proposalPackageTemplateId: "template-package-1",
-    validUntil: "2026-06-15",
+    validUntil: "2099-06-15",
     contractTemplateId: "template-contract-1",
     lineItems: [
       { name: "Wedding photography coverage", quantity: 1, unitPriceCents: 900000 },
@@ -107,7 +107,7 @@ async function main() {
   const updated = await updateProposalFromAgent("project-1", result.proposalId, {
     title: "Alex Wedding Proposal Revised",
     proposalPackageTemplateId: "template-package-1",
-    validUntil: "2026-06-30",
+    validUntil: "2099-06-30",
     scopeSummary: null,
     contractTemplateId: "template-contract-1",
     contractBody: null,
@@ -133,7 +133,7 @@ async function main() {
   assert.deepEqual(updatedProposal, {
     title: "Alex Wedding Proposal Revised",
     package_name: "Signature Collection",
-    valid_until: "2026-06-30",
+    valid_until: "2099-06-30",
     scope_summary: "Proposal package for Alex Taylor at The Garden House on 2026-09-19: $10,750.",
     total_cents: 1075000,
     contract_status: "ready",
