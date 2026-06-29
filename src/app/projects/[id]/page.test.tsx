@@ -96,6 +96,23 @@ async function main() {
       'questionnaire_response', 'response-1', 'needs_google_connection', ?, ?
     )
   `).run(now, now);
+  database.prepare(`
+    INSERT INTO questionnaires (
+      id, title, description, status, created_at, updated_at
+    ) VALUES (
+      'questionnaire-1', 'Photography Timeline & Vision Questionnaire',
+      'Timeline and planning details.', 'active', ?, ?
+    )
+  `).run(now, now);
+  database.prepare(`
+    INSERT INTO questionnaire_responses (
+      id, questionnaire_id, project_id, client_id, respondent_name, respondent_email,
+      submitted_at, answers_json, created_at, updated_at
+    ) VALUES (
+      'response-1', 'questionnaire-1', 'project-1', 'client-1', 'Alex Taylor',
+      'alex@example.com', '2026-06-16T14:30:00.000Z', '[]', ?, ?
+    )
+  `).run(now, now);
 
   const markup = renderToStaticMarkup(await ProjectDetailPage({
     params: Promise.resolve({ id: "project-1" }),
@@ -120,6 +137,11 @@ async function main() {
   assert.match(markup, /Ceremony begins at 4:30 PM/);
   assert.match(markup, /Locations &amp; logistics/);
   assert.match(markup, /Questionnaire answers can fill these in automatically/);
+  assert.match(markup, /Responses for this project/);
+  assert.match(markup, /Photography Timeline &amp; Vision Questionnaire/);
+  assert.match(markup, /View responses/);
+  assert.match(markup, /href="\/questionnaires\/questionnaire-1\/responses\/response-1"/);
+  assert.doesNotMatch(markup, /href="\/questionnaires\/questionnaire-1\/responses\/response-1\/edit"/);
   assert.match(markup, /Evidence the Studio can cite/);
   assert.match(markup, /Tasks land in the Inbox/);
   assert.match(markup, /Create proposal task/);

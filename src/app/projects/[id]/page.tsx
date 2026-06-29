@@ -506,9 +506,9 @@ export default async function ProjectDetailPage({
                       <span className="w-fit rounded-full border border-[var(--line)] px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                         {status}
                       </span>
-                      <Link href={`/questionnaires/${response.questionnaireId}/responses/${response.id}/edit`} className="inline-flex items-center gap-1.5 rounded-sm border border-[var(--line)] px-2.5 py-1.5 text-xs font-semibold transition hover:border-[var(--foreground)]">
-                        <Pencil className="h-3.5 w-3.5" />
-                        Edit responses
+                      <Link href={`/questionnaires/${response.questionnaireId}/responses/${response.id}`} className="inline-flex items-center gap-1.5 rounded-sm border border-[var(--line)] px-2.5 py-1.5 text-xs font-semibold transition hover:border-[var(--foreground)]">
+                        <Eye className="h-3.5 w-3.5" />
+                        View responses
                       </Link>
                     </div>
                   </div>
