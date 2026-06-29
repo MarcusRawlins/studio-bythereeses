@@ -145,13 +145,14 @@ async function main() {
   assert.match(markup, /Evidence the Studio can cite/);
   assert.match(markup, /Tasks land in the Inbox/);
   assert.match(markup, /Create proposal task/);
-  assert.match(markup, /Create timeline task/);
+  assert.match(markup, /Create timeline draft/);
   assert.match(markup, /Create invoice task/);
   assert.match(markup, /Create expense task/);
   assert.match(markup, /Create follow-up task/);
   assert.match(markup, /name="projectSourceId" value="source-discovery-1"/);
   assert.match(markup, /name="assignedAgent" value="Proposal Agent"/);
   assert.match(markup, /name="assignedAgent" value="Timeline Agent"/);
+  assert.match(markup, /name="runTimelineDraft" value="1"/);
   assert.match(markup, /name="assignedAgent" value="Billing Agent"/);
   assert.match(markup, /name="assignedAgent" value="Bookkeeping Agent"/);
   assert.match(markup, /name="assignedAgent" value="Communications Agent"/);

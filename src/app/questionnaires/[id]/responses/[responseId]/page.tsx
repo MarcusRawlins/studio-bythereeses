@@ -71,6 +71,7 @@ export default async function QuestionnaireResponseDetailPage({
                 <input type="hidden" name="priority" value="normal" />
                 <input type="hidden" name="assignedAgent" value="Timeline Agent" />
                 <input type="hidden" name="projectSourceId" value={response.projectSourceId ?? ""} />
+                <input type="hidden" name="runTimelineDraft" value="1" />
                 <button className="brand-primary-button inline-flex items-center gap-2 rounded-sm px-3 py-2 text-sm">
                   <Bot className="h-4 w-4" />
                   Create timeline
