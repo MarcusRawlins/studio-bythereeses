@@ -1372,13 +1372,25 @@ export async function getQuestionnaireResponseDetail(responseId: string) {
 
   if (!response) return null;
 
+  const responseProjectSource = response.projectId
+    ? await db.query.projectSources.findFirst({
+        where: and(
+          eq(projectSources.projectId, response.projectId),
+          eq(projectSources.sourceType, "questionnaire_response"),
+          eq(projectSources.sourceId, response.id),
+        ),
+      })
+    : null;
   const questions = await listQuestionnaireQuestions(response.questionnaireId);
   const storedAnswers = parseQuestionnaireAnswers(response.answersJson);
   const answersByQuestionId = new Map(storedAnswers.map((answer) => [answer.questionId, answer]));
   const answersByTitle = new Map(storedAnswers.map((answer) => [answer.title, answer]));
 
   return {
-    response,
+    response: {
+      ...response,
+      projectSourceId: responseProjectSource?.id ?? null,
+    },
     answers: questions.map((question) => {
       const storedAnswer = answersByQuestionId.get(question.id) ?? answersByTitle.get(question.title);
       const value = storedAnswer?.value;
