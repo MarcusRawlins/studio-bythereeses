@@ -21,6 +21,7 @@ import { createInvoiceFromAgent, createProposalFromAgent, createProposalLinkFrom
 import { listStudioSchedulerMeetingTypes, parseInviteeQuestions, recordSchedulerBookingPaymentFromAgent, updateSchedulerBookingPaymentFromAgent, type SchedulerBookingPaymentInput } from "./scheduler";
 import { enabledPaymentMethods, getAppSettings } from "./settings";
 import { createInvoicePaymentCheckoutSession } from "./stripe-checkout";
+import { buildTimelineDraftFromProjectContext } from "./timeline-draft";
 import { dateKeyInTimeZone } from "./timezone";
 
 export const STUDIO_MCP_PROTOCOL_VERSION = "2025-06-18";
@@ -2203,6 +2204,66 @@ export async function runStudioWorkflowDraftTask(input: {
     metadata: {
       generatedBy: "studio_rule_based_workflow_runner",
       previewOnly: false,
+    },
+  });
+
+  return {
+    agentTaskRun,
+    draft,
+    completion,
+    completed: true,
+  };
+}
+
+export async function runStudioTimelineDraftTask(input: {
+  taskId?: string | null;
+  projectId?: string | null;
+  assignedAgent?: string | null;
+  previewOnly?: boolean | null;
+}) {
+  const agentTaskRun = await startStudioAgentTaskRun({
+    taskId: input.taskId,
+    projectId: input.projectId,
+    assignedAgent: input.assignedAgent ?? "Timeline Agent",
+  });
+  if (!agentTaskRun) return null;
+  if (!agentTaskRun.agentTask?.projectId || !agentTaskRun.projectContext) {
+    throw new Error("Timeline draft tasks require linked project context.");
+  }
+  const assignedAgent = cleanTaskRunText(input.assignedAgent)
+    ?? agentTaskRun.agentTask.assignedAgent
+    ?? "Timeline Agent";
+  if (assignedAgent !== "Timeline Agent") {
+    throw new Error("Timeline draft runner only handles Timeline Agent tasks.");
+  }
+
+  const sourceId = agentTaskRun.agentTask.sourceType === "project_source"
+    ? agentTaskRun.agentTask.sourceId
+    : null;
+  const draft = buildTimelineDraftFromProjectContext(agentTaskRun.projectContext, { sourceId });
+  const resultSummary = [
+    `Prepared timeline draft with ${draft.timelineItems.length} timeline items.`,
+    `${draft.familyFormals.length} family formal groups.`,
+    `${draft.openQuestions.length} review questions.`,
+  ].join(" ");
+
+  if (input.previewOnly) {
+    return {
+      agentTaskRun,
+      draft,
+      completed: false,
+    };
+  }
+
+  const completion = await updateAgentTaskStatus(agentTaskRun.agentTask.id, {
+    status: "completed",
+    assignedAgent,
+    resultSummary,
+    outputJson: {
+      projectId: agentTaskRun.agentTask.projectId,
+      projectSourceId: sourceId ?? undefined,
+      timelineDraft: draft,
+      generatedBy: "studio_rule_based_timeline_draft_runner",
     },
   });
 

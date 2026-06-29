@@ -100,6 +100,22 @@ function taskSourceLabel(sourceType: string | null, sourceId: string | null, sou
   return null;
 }
 
+function taskTimelineDraft(outputJson: string | null) {
+  if (!outputJson) return null;
+  try {
+    const parsed = JSON.parse(outputJson) as {
+      timelineDraft?: {
+        openQuestions?: string[];
+        timelineItems?: Array<{ title?: string; startAt?: string; confidence?: string }>;
+        familyFormals?: Array<{ groupName?: string; people?: string[] }>;
+      };
+    };
+    return parsed.timelineDraft ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function datetimeLocalValue(value: string | null) {
   if (!value) return "";
   return value.slice(0, 16);
@@ -205,6 +221,12 @@ export default async function ProjectDetailPage({
         {saved === "agent-task" && (
           <div className="rounded-md border border-[var(--accent)] bg-[#edf6f1] p-4 text-sm font-semibold text-[var(--accent-strong)]">
             Agent task assigned. It is now in the Inbox and linked to this project.
+          </div>
+        )}
+
+        {saved === "timeline-draft" && (
+          <div className="rounded-md border border-[var(--accent)] bg-[#edf6f1] p-4 text-sm font-semibold text-[var(--accent-strong)]">
+            Timeline draft created. Review it in Agent tasks before applying anything to the canonical timeline.
           </div>
         )}
 
@@ -1204,9 +1226,10 @@ export default async function ProjectDetailPage({
                       <input type="hidden" name="priority" value="high" />
                       <input type="hidden" name="assignedAgent" value="Timeline Agent" />
                       <input type="hidden" name="projectSourceId" value={source.id} />
+                      <input type="hidden" name="runTimelineDraft" value="1" />
                       <button className="inline-flex items-center justify-center gap-2 rounded-sm border border-[var(--line)] px-3 py-2 text-xs font-semibold transition hover:border-[var(--foreground)]">
                         <CalendarCheck className="h-3.5 w-3.5" />
-                        Create timeline task
+                        Create timeline draft
                       </button>
                     </form>
                     <form action={`/api/projects/${data.project.id}/agent-tasks`} method="post">
@@ -1360,6 +1383,37 @@ export default async function ProjectDetailPage({
                       </div>
                     )}
                     {task.errorMessage && <p className="mt-2 text-sm text-[var(--danger)]">{task.errorMessage}</p>}
+                    {taskTimelineDraft(task.outputJson) && (
+                      <div className="mt-3 rounded-md border border-[var(--line)] bg-white p-3">
+                        <div className="studio-caps text-[0.55rem] text-[var(--ink-3)]">Timeline draft</div>
+                        <div className="mt-2 grid gap-3 text-sm md:grid-cols-3">
+                          <div>
+                            <div className="font-semibold">{taskTimelineDraft(task.outputJson)?.timelineItems?.length ?? 0} timeline items</div>
+                            <ul className="mt-1 space-y-1 text-[var(--ink-2)]">
+                              {(taskTimelineDraft(task.outputJson)?.timelineItems ?? []).slice(0, 4).map((item, index) => (
+                                <li key={`${item.title}-${index}`}>{item.startAt ? `${item.startAt} - ` : ""}{item.title}</li>
+                              ))}
+                            </ul>
+                          </div>
+                          <div>
+                            <div className="font-semibold">{taskTimelineDraft(task.outputJson)?.familyFormals?.length ?? 0} family groups</div>
+                            <ul className="mt-1 space-y-1 text-[var(--ink-2)]">
+                              {(taskTimelineDraft(task.outputJson)?.familyFormals ?? []).slice(0, 4).map((group, index) => (
+                                <li key={`${group.groupName}-${index}`}>{group.groupName} ({group.people?.length ?? 0})</li>
+                              ))}
+                            </ul>
+                          </div>
+                          <div>
+                            <div className="font-semibold">{taskTimelineDraft(task.outputJson)?.openQuestions?.length ?? 0} review questions</div>
+                            <ul className="mt-1 space-y-1 text-[var(--ink-2)]">
+                              {(taskTimelineDraft(task.outputJson)?.openQuestions ?? []).slice(0, 3).map((question, index) => (
+                                <li key={`${question}-${index}`}>{question}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div className="flex flex-col items-start gap-2 text-xs text-[var(--ink-3)] sm:items-end">
                     <span>{new Date(task.createdAt).toLocaleDateString()}</span>
