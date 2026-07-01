@@ -25,14 +25,14 @@
 }
 
 :root {
-  --bg: #ffffff;
-  --paper: #ffffff;
-  --paper-2: #f5f1ea;
+  --bg: #fbf8f2;
+  --paper: #fffdf9;
+  --paper-2: #f5efe6;
   --ink: #1c1a17;
   --ink-2: #4a443c;
   --ink-3: #8b8278;
-  --line: #d8d2c5;
-  --line-soft: #e6e0d3;
+  --line: #ddd4c6;
+  --line-soft: #ebe4d8;
   --accent: #7a5a3a;
   --accent-soft: #f5eee5;
   --danger: #b42318;
@@ -48,9 +48,14 @@
   --brand-sage: #4d6b3a;
   --brand-slate: #6a8a92;
   --brand-warm: #fbf8f2;
-  --radius-control: 8px;
-  --radius-panel: 8px;
-  --shadow-control: 0 1px 2px rgba(31, 27, 24, 0.04), 0 8px 24px rgba(31, 27, 24, 0.03);
+  --warm-highlight: #f0e6d8;
+  --warm-glow: rgba(122, 90, 58, 0.1);
+  --command-pad: 24px;
+  --section-scroll-margin: 7rem;
+  --radius-control: 10px;
+  --radius-panel: 12px;
+  --shadow-control: 0 1px 2px rgba(31, 27, 24, 0.05), 0 8px 24px rgba(31, 27, 24, 0.04);
+  --shadow-panel: 0 1px 0 rgba(31, 27, 24, 0.04), 0 12px 32px rgba(31, 27, 24, 0.05);
   --serif: "Times Now", "Cormorant Garamond", Georgia, serif;
   --caps: "Copperplate CC", "Trajan Pro", serif;
   --sans: "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
@@ -149,7 +154,168 @@ a {
   background: var(--paper);
   padding: var(--card-p);
   border-radius: var(--radius-panel);
-  box-shadow: none;
+  box-shadow: var(--shadow-panel);
+}
+
+.studio-section-card {
+  scroll-margin-top: var(--section-scroll-margin);
+  border: 1px solid var(--line);
+  background: var(--paper);
+  padding: var(--card-p);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-panel);
+}
+
+.studio-command-hero {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--command-pad);
+  background: linear-gradient(180deg, var(--paper) 0%, transparent 100%);
+}
+
+.studio-kpi-strip {
+  display: grid;
+  gap: var(--gap);
+}
+
+.studio-kpi-card {
+  border: 1px solid var(--line-soft);
+  background: linear-gradient(165deg, var(--paper) 0%, var(--paper-2) 100%);
+  padding: 1.1rem 1.25rem;
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-control);
+}
+
+.studio-action-row {
+  display: grid;
+  gap: 0.75rem;
+  border-top: 1px solid var(--line-soft);
+  padding: 1rem 0;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.studio-action-row:first-child {
+  border-top: 0;
+}
+
+.studio-action-row:hover {
+  border-color: var(--line);
+  background: var(--warm-highlight);
+  margin-inline: -0.75rem;
+  padding-inline: 0.75rem;
+  border-radius: var(--radius-control);
+}
+
+.studio-action-context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.35rem;
+}
+
+.studio-review-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--brand-stone);
+  background: var(--accent-soft);
+  color: var(--brand-brown);
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  font-family: var(--caps);
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.studio-action-due {
+  font-size: 0.75rem;
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.studio-action-detail {
+  font-size: 0.8rem;
+  color: var(--ink-3);
+}
+
+.studio-pipeline-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  background: var(--paper);
+  padding: 0.75rem 0.85rem;
+  transition: background 160ms ease, transform 160ms ease;
+}
+
+.studio-pipeline-row:hover {
+  background: var(--warm-highlight);
+  transform: translateX(2px);
+}
+
+.studio-nav-link {
+  border-left-color: transparent;
+  color: var(--ink-2);
+}
+
+.studio-nav-link:hover {
+  border-left-color: var(--accent);
+  background: var(--paper-2);
+  color: var(--ink);
+}
+
+.studio-nav-link-active {
+  border-left-color: var(--brand-brown);
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.studio-section-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  position: sticky;
+  top: 0.75rem;
+  z-index: 10;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  backdrop-filter: blur(10px);
+  padding: 0.65rem;
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-control);
+}
+
+.studio-section-nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-2);
+  padding: 0.38rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.studio-section-nav-link:hover {
+  border-color: var(--line);
+  background: var(--paper-2);
+  color: var(--ink);
+}
+
+.studio-project-hero {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1.25rem;
+}
+
+.studio-overview-strip {
+  display: grid;
+  gap: 0.85rem;
 }
 
 .studio-card-muted {

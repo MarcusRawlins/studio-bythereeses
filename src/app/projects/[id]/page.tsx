@@ -1,5 +1,6 @@
 import { AppShell } from "@/components/AppShell";
 import { LinkActions } from "@/components/LinkActions";
+import { ProjectSectionNav } from "@/components/ProjectSectionNav";
 import { listAgentTasks } from "@/lib/agent-tasks";
 import { getProject } from "@/lib/crm";
 import { formatActivityAction, formatDate, formatMoney } from "@/lib/format";
@@ -8,7 +9,7 @@ import { getProjectFinancialSummary } from "@/lib/project-finance";
 import { listProjectWorkflowRuns, sixFigureAutomationSteps } from "@/lib/project-workflow-automation";
 import { listProjectQuestionnaireResponses, listQuestionnaires, questionnaireResponseStatus } from "@/lib/questionnaires";
 import { listProjectBookingLinks } from "@/lib/scheduler";
-import { Bot, CalendarCheck, CalendarPlus, CheckCircle2, ClipboardEdit, ClipboardList, Copy, ExternalLink, Eye, FileQuestion, FileSignature, Mail, MapPin, NotebookPen, Pencil, ReceiptText, Send, Sparkles } from "lucide-react";
+import { Bot, CalendarCheck, CalendarPlus, CheckCircle2, ClipboardEdit, ClipboardList, Copy, ExternalLink, Eye, FileQuestion, FileSignature, Landmark, Mail, MapPin, NotebookPen, Pencil, ReceiptText, Send, Sparkles, UsersRound } from "lucide-react";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
@@ -151,31 +152,47 @@ export default async function ProjectDetailPage({
   const sixFigureRun = workflowRuns.find((workflow) => workflow.run.workflowKey === "six-figure-maximized-workflow");
   const selectedWorkflowStepKeys = new Set(sixFigureRun?.steps.map(({ step }) => step.stepKey) ?? []);
 
+  const sectionNavItems = [
+    { id: "overview", label: "Overview", icon: UsersRound },
+    ...(financialSummary ? [{ id: "finances", label: "Finances", icon: Landmark }] : []),
+    { id: "sales", label: "Sales", icon: FileSignature },
+    { id: "questionnaires", label: "Questionnaires", icon: ClipboardList },
+    { id: "timeline", label: "Timeline", icon: CalendarCheck },
+    { id: "agent-tasks", label: "Agent", icon: Bot },
+    { id: "details", label: "Details", icon: MapPin },
+  ];
+
   return (
     <AppShell>
       <div className="space-y-6">
-        <header className="flex flex-col justify-between gap-4 border-b border-[var(--line)] pb-5 lg:flex-row lg:items-end">
+        <header className="studio-project-hero flex flex-col justify-between gap-4 lg:flex-row lg:items-end">
           <div>
-            <p className="text-sm font-medium capitalize text-[var(--ink-muted)]">{data.project.stage.replaceAll("_", " ")}</p>
-            <h1 className="brand-page-title mt-2 text-4xl">{data.project.name}</h1>
+            <div className="flex flex-wrap items-center gap-3">
+              <span className={`studio-chip studio-stage-${data.project.stage}`}>{data.project.stage.replaceAll("_", " ")}</span>
+              <span className="studio-caps text-[0.56rem] text-[var(--ink-3)]">{data.project.type}</span>
+            </div>
+            <h1 className="brand-page-title mt-3 text-4xl md:text-5xl">{data.project.name}</h1>
             <p className="mt-2 text-sm text-[var(--ink-muted)]">
               {data.project.venueName ?? "Venue TBD"} · {formatDate(data.project.eventDate)}
+              {primaryClient ? ` · ${[primaryClient.firstName, primaryClient.lastName].filter(Boolean).join(" ")}` : ""}
             </p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
-            <Link href={`/projects/${data.project.id}/edit`} className="inline-flex items-center justify-center gap-2 rounded-sm border border-[var(--line)] px-4 py-2.5 text-sm font-semibold transition hover:border-[var(--foreground)]">
+            <Link href={`/projects/${data.project.id}/edit`} className="studio-secondary-button inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold">
               <Pencil className="h-4 w-4" />
               Edit project
             </Link>
             <form action={`/api/projects/${data.project.id}/portal`} method="post">
               <input type="hidden" name="projectId" value={data.project.id} />
               <input type="hidden" name="clientId" value={primaryClient?.id ?? ""} />
-              <button className="brand-primary-button rounded-sm px-4 py-2.5 transition">
+              <button className="brand-primary-button px-4 py-2.5 transition">
                 Generate portal link
               </button>
             </form>
           </div>
         </header>
+
+        <ProjectSectionNav items={sectionNavItems} />
 
         {portalLink && (
           <div className="rounded-md border border-[var(--accent)] bg-[#edf6f1] p-4">
@@ -268,29 +285,69 @@ export default async function ProjectDetailPage({
           </div>
         )}
 
-        <section className="grid gap-4 md:grid-cols-3">
-          <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
-            <div className="text-sm text-[var(--ink-muted)]">Project value</div>
-            <div className="mt-2 text-2xl font-semibold">{formatMoney(data.project.budgetCents)}</div>
+        <section id="overview" className="studio-section-card grid gap-4 md:grid-cols-3">
+          <div className="studio-kpi-card">
+            <div className="studio-caps text-[0.58rem] text-[var(--ink-3)]">Project value</div>
+            <div className="studio-serif mt-2 text-3xl tabular-nums">{formatMoney(data.project.budgetCents)}</div>
           </div>
-          <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
-            <div className="text-sm text-[var(--ink-muted)]">Client</div>
+          <div className="studio-kpi-card">
+            <div className="studio-caps text-[0.58rem] text-[var(--ink-3)]">Client</div>
             {primaryClient ? (
-              <Link href={`/clients/${primaryClient.id}`} className="mt-2 block text-2xl font-semibold transition hover:text-[var(--accent-strong)]">
+              <Link href={`/clients/${primaryClient.id}`} className="studio-serif mt-2 block text-3xl transition hover:text-[var(--accent-strong)]">
                 {[primaryClient.firstName, primaryClient.lastName].filter(Boolean).join(" ")}
               </Link>
             ) : (
-              <div className="mt-2 text-2xl font-semibold">Unassigned</div>
+              <div className="studio-serif mt-2 text-3xl">Unassigned</div>
             )}
           </div>
-          <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
-            <div className="text-sm text-[var(--ink-muted)]">Portal tokens</div>
-            <div className="mt-2 text-2xl font-semibold">{data.tokens.length}</div>
+          <div className="studio-kpi-card">
+            <div className="studio-caps text-[0.58rem] text-[var(--ink-3)]">Portal tokens</div>
+            <div className="studio-serif mt-2 text-3xl tabular-nums">{data.tokens.length}</div>
+          </div>
+
+          <div className="md:col-span-3 grid gap-4 md:grid-cols-2">
+            <form action={`/api/projects/${data.project.id}/stage`} method="post" className="studio-card-muted flex flex-col gap-3 p-4 sm:flex-row sm:items-end sm:justify-between">
+              <input type="hidden" name="projectId" value={data.project.id} />
+              <label className="space-y-1.5 text-sm font-medium sm:min-w-72">
+                Stage
+                <select
+                  name="stage"
+                  defaultValue={data.project.stage}
+                  className="studio-input"
+                >
+                  {projectStages.map((stage) => (
+                    <option key={stage} value={stage}>
+                      {stage.replaceAll("_", " ")}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button className="brand-primary-button px-4 py-2.5 transition">
+                Update stage
+              </button>
+            </form>
+
+            <form action={`/api/projects/${data.project.id}/primary-client`} method="post" className="studio-card-muted flex flex-col gap-3 p-4 sm:flex-row sm:items-end sm:justify-between">
+              <input type="hidden" name="projectId" value={data.project.id} />
+              <label className="space-y-1.5 text-sm font-medium sm:min-w-96">
+                Primary client
+                <select name="clientId" defaultValue={primaryClient?.id ?? ""} className="studio-input">
+                  {data.participants.map(({ client, role, isPrimaryContact }) => (
+                    <option key={client.id} value={client.id}>
+                      {[client.firstName, client.lastName].filter(Boolean).join(" ") || client.email || client.id} · {role}{isPrimaryContact ? " · primary" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button className="brand-primary-button px-4 py-2.5 transition">
+                Set primary
+              </button>
+            </form>
           </div>
         </section>
 
         {financialSummary && (
-          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+          <section id="finances" className="studio-section-card">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
                 <h2 className="text-lg font-semibold">Project finances</h2>
@@ -344,50 +401,8 @@ export default async function ProjectDetailPage({
           </section>
         )}
 
-        <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
-          <form action={`/api/projects/${data.project.id}/stage`} method="post" className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <input type="hidden" name="projectId" value={data.project.id} />
-            <label className="space-y-1.5 text-sm font-medium sm:min-w-72">
-              Stage
-              <select
-                name="stage"
-                defaultValue={data.project.stage}
-                className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none transition focus:border-[var(--accent)] focus:ring-2 focus:ring-[rgba(47,93,80,0.14)]"
-              >
-                {projectStages.map((stage) => (
-                  <option key={stage} value={stage}>
-                    {stage.replaceAll("_", " ")}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button className="brand-primary-button rounded-sm px-4 py-2.5 transition">
-              Update stage
-            </button>
-          </form>
-        </section>
-
-        <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
-          <form action={`/api/projects/${data.project.id}/primary-client`} method="post" className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <input type="hidden" name="projectId" value={data.project.id} />
-            <label className="space-y-1.5 text-sm font-medium sm:min-w-96">
-              Primary client
-              <select name="clientId" defaultValue={primaryClient?.id ?? ""} className={inputClass}>
-                {data.participants.map(({ client, role, isPrimaryContact }) => (
-                  <option key={client.id} value={client.id}>
-                    {[client.firstName, client.lastName].filter(Boolean).join(" ") || client.email || client.id} · {role}{isPrimaryContact ? " · primary" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button className="brand-primary-button rounded-sm px-4 py-2.5 transition">
-              Set primary
-            </button>
-          </form>
-        </section>
-
         <div className="grid gap-6 xl:grid-cols-[1fr_420px]">
-          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 xl:col-span-2">
+          <section id="sales" className="studio-section-card xl:col-span-2">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
               <div>
                 <h2 className="text-lg font-semibold">Sales package</h2>
@@ -432,7 +447,7 @@ export default async function ProjectDetailPage({
             </div>
           </section>
 
-          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 xl:col-span-2">
+          <section id="questionnaires" className="studio-section-card xl:col-span-2">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
               <div>
                 <div className="flex items-center gap-2">
@@ -541,7 +556,7 @@ export default async function ProjectDetailPage({
             </div>
           </section>
 
-          <section id="details" className="scroll-mt-24 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+          <section id="details" className="studio-section-card">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
                 <h2 className="text-lg font-semibold">Project details</h2>
@@ -704,7 +719,7 @@ export default async function ProjectDetailPage({
             </details>
           </section>
 
-          <section id="events" className="scroll-mt-24 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+          <section id="events" className="studio-section-card">
             <h2 className="text-lg font-semibold">Project booking links</h2>
             <p className="mt-1 text-sm text-[var(--ink-muted)]">Signed scheduler links that save bookings back to this project.</p>
             <div className="mt-4 space-y-3">
@@ -722,7 +737,7 @@ export default async function ProjectDetailPage({
             </div>
           </section>
 
-          <section className="studio-card">
+          <section id="timeline" className="studio-section-card">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
               <div>
                 <h2 className="studio-serif text-3xl">Timeline</h2>
@@ -795,7 +810,7 @@ export default async function ProjectDetailPage({
             </div>
           </section>
 
-          <section className="studio-card p-4">
+          <section id="workflow" className="studio-section-card">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
                 <div className="flex items-center gap-2">
@@ -883,7 +898,7 @@ export default async function ProjectDetailPage({
             )}
           </section>
 
-          <section className="studio-card">
+          <section id="communications" className="studio-section-card">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
                 <div className="flex items-center gap-2">
@@ -1102,7 +1117,7 @@ export default async function ProjectDetailPage({
             </div>
           </section>
 
-          <section className="studio-card">
+          <section id="sources" className="studio-section-card">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
                 <div className="flex items-center gap-2">
@@ -1288,7 +1303,7 @@ export default async function ProjectDetailPage({
             </div>
           </section>
 
-          <section className="studio-card">
+          <section id="agent-tasks" className="studio-section-card">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
                 <div className="flex items-center gap-2">
@@ -1479,7 +1494,7 @@ export default async function ProjectDetailPage({
             </div>
           </section>
 
-          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+          <section id="calendar" className="studio-section-card">
             <details className="group">
               <summary className="list-none cursor-pointer">
                 <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
@@ -1650,7 +1665,7 @@ export default async function ProjectDetailPage({
             </div>
           </section>
 
-          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+          <section id="locations" className="studio-section-card">
             <details className="group">
               <summary className="list-none cursor-pointer">
                 <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
@@ -1787,7 +1802,7 @@ export default async function ProjectDetailPage({
             </div>
           </section>
 
-          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+          <section id="portal" className="studio-section-card">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
                 <h2 className="text-lg font-semibold">Client portal access</h2>
@@ -1843,7 +1858,7 @@ export default async function ProjectDetailPage({
           </section>
         </div>
 
-        <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+        <section id="activity" className="studio-section-card">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Activity</h2>
             <ExternalLink className="h-4 w-4 text-[var(--ink-muted)]" />
