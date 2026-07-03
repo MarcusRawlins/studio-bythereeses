@@ -27,6 +27,7 @@ These routes are private Studio UI and should only be reachable through `studio.
 - `/questionnaires`, `/questionnaires/:id`, `/questionnaires/:id/edit`, `/questionnaires/:id/send`, `/questionnaires/:id/responses`, `/questionnaires/:id/responses/:responseId`, `/questionnaires/:id/responses/:responseId/edit`
 - `/scheduler`, `/scheduler/bookings/:id`
 - `/settings`
+- `/system-status`
 - `/shooting-locations`
 - `/templates`
 
@@ -115,5 +116,5 @@ These routes are intentionally public:
 
 - Move front-door rate limits from in-memory Pages proxy buckets to Cloudflare WAF, Turnstile, or another durable edge control if public abuse appears.
 - Replace shared agent bearer auth with scoped credentials before any external agent/client access.
-- Add a small internal security status page that reports proxy guard, agent auth, token-link policy, and last review date.
+- Internal security status page lives at `/system-status` and reports proxy guard, agent auth, backup/deploy policy, npm audit state, token-link policy, data-health counts, and last review date without exposing secret values.
 - Keep the scoped Next/PostCSS npm override until a stable Next release ships with patched PostCSS directly, then remove the override after audit, build, and tests pass.

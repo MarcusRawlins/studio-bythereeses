@@ -1,6 +1,7 @@
 import { AppShell } from "@/components/AppShell";
 import { enabledPaymentMethods, getAppSettings, type PaymentMethodKey } from "@/lib/settings";
-import { CreditCard, Landmark, Mail, Settings, WalletCards } from "lucide-react";
+import { CreditCard, Landmark, Mail, Settings, ShieldCheck, WalletCards } from "lucide-react";
+import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
@@ -43,8 +44,18 @@ export default async function SettingsPage() {
               Store business details and payment options once, then reuse them across invoices, proposal packages, and client-facing payment pages.
             </p>
           </div>
-          <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--ink-muted)]">
-            <span className="font-semibold text-[var(--foreground)]">{enabledMethods.length}</span> payment methods enabled
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--ink-muted)]">
+              <span className="font-semibold text-[var(--foreground)]">{enabledMethods.length}</span> payment methods enabled
+            </div>
+            <Link
+              href="/system-status"
+              prefetch={false}
+              className="inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--surface)] px-4 py-3 text-sm font-semibold text-[var(--foreground)] transition hover:border-[var(--ink)]"
+            >
+              <ShieldCheck className="h-4 w-4 text-[var(--brand-brown)]" />
+              System status
+            </Link>
           </div>
         </header>
 

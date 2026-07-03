@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CalendarDays, CalendarRange, ClipboardList, FileSignature, FolderKanban, HeartPulse, History, Inbox, Landmark, LayoutDashboard, MapPin, ReceiptText, Settings, SwatchBook, UsersRound } from "lucide-react";
+import { CalendarDays, CalendarRange, ClipboardList, FileSignature, FolderKanban, HeartPulse, History, Inbox, Landmark, LayoutDashboard, MapPin, ReceiptText, Settings, ShieldCheck, SwatchBook, UsersRound } from "lucide-react";
 import { AppNavLink } from "./AppNavLink";
 import { QuickFind } from "./QuickFind";
 
@@ -22,6 +22,7 @@ const studioItems = [
   { href: "/invoices", label: "Invoices", icon: ReceiptText },
   { href: "/activity", label: "Activity", icon: History },
   { href: "/data-health", label: "Data Health", icon: HeartPulse },
+  { href: "/system-status", label: "System Status", icon: ShieldCheck },
   { href: "/questionnaires", label: "Questionnaires", icon: ClipboardList },
   { href: "/templates", label: "Templates", icon: SwatchBook },
   { href: "/settings", label: "Settings", icon: Settings },
