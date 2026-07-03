@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const backupRoot = "/Volumes/reeseai-memory/backups/reese-photography-crm";
+const backupRoot = "/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm";
 const defaultSource = path.join(backupRoot, "d1", "latest.sql");
 const defaultDatabase = path.join(repoRoot, "data", "local.db");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");

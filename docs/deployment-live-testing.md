@@ -41,7 +41,7 @@ Google Calendar setup details live in `docs/google-calendar-setup.md`.
 2. Run `npm run lint`.
 3. Run `npm run build`.
 4. Run `npm run backup:data` with a valid Cloudflare API token in the shell.
-5. Run `npm run deploy:capture-versions` to snapshot current Worker/Pages deployment IDs + git HEAD into `/Volumes/reeseai-memory/backups/reese-photography-crm/manifests/latest-deploy-versions.json`.
+5. Run `npm run deploy:capture-versions` to snapshot current Worker/Pages deployment IDs + git HEAD into `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/manifests/latest-deploy-versions.json`.
 6. Run `npm run check:source-drift` to confirm known local copies agree on origin URL and HEAD (warnings only for dirty worktree, absent copies, or ahead/behind upstream).
 7. Run `npm run deploy:preflight` (includes source-drift check).
 8. Confirm the remote D1 schema is current.
@@ -120,4 +120,4 @@ Alternative: redeploy a known-good git commit after the full deploy gate. See [`
 
 - D1 stores compact relational records and small JSON answers only.
 - R2 stores only files that must be part of the product.
-- Operational backups stay on `/Volumes/reeseai-memory/backups/reese-photography-crm`.
+- Operational backups stay on `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm`.

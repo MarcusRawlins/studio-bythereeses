@@ -14,9 +14,9 @@ Obsidian holds durable business context and current priorities. Before strategic
 
 ## Locations
 
-- **Canonical active repo:** `/Volumes/reeseai-memory/code/reese-photography-crm`
-- **Data backups:** `/Volumes/reeseai-memory/backups/reese-photography-crm`
-- **Planning docs backup:** `/Volumes/reeseai-memory/businesses/photography/crm`
+- **Canonical active repo:** `/Volumes/reeseai-memory/04_Code/reese-photography-crm`
+- **Data backups:** `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm`
+- **Planning docs backup:** `/Volumes/reeseai-memory/01_Businesses/photography/crm`
 - **Archived (removed):** `/Users/tyler-macmini/code/reese-photography-crm` — do not use as a working copy
 
 Run `npm run check:source-drift` before durable git or cross-copy work. Details: [`docs/crm-source-of-truth-sop.md`](docs/crm-source-of-truth-sop.md).

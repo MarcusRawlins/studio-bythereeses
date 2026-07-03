@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export const KNOWN_COPIES = [
-  "/Volumes/reeseai-memory/code/reese-photography-crm",
+  "/Volumes/reeseai-memory/04_Code/reese-photography-crm",
   "/Users/tyler-macmini/code/reese-photography-crm",
   "/Users/tyler-macmini/Documents/studio-bythereeses",
 ];

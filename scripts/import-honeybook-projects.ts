@@ -1,6 +1,6 @@
 import { importHoneyBookProjectsFromCsv } from "@/lib/honeybook-import";
 
-const defaultFilePath = "/Volumes/reeseai-memory/businesses/photography/clients/honeybook-data/January-2020-February-2026-Project-report-(HoneyBook).csv";
+const defaultFilePath = "/Volumes/reeseai-memory/01_Businesses/photography/clients/honeybook-data/January-2020-February-2026-Project-report-(HoneyBook).csv";
 
 function optionValue(name: string) {
   const prefix = `--${name}=`;

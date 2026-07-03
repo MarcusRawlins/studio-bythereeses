@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
-BACKUP_ROOT="/Volumes/reeseai-memory/backups/reese-photography-crm"
+BACKUP_ROOT="/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm"
 SQLITE_DIR="$BACKUP_ROOT/sqlite"
 D1_DIR="$BACKUP_ROOT/d1"
 

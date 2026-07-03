@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const WORKER_NAME = "reese-photography-crm";
 export const PAGES_PROJECT_NAME = "studio-bythereeses";
-export const MANIFEST_DIR = "/Volumes/reeseai-memory/backups/reese-photography-crm/manifests";
+export const MANIFEST_DIR = "/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/manifests";
 
 export function normalizeDeploymentList(raw) {
   if (Array.isArray(raw)) return raw;
@@ -19,8 +19,22 @@ export function normalizeDeploymentList(raw) {
   return [];
 }
 
+function deploymentCreatedAt(deployment) {
+  return deployment.created_on || deployment.created_at || deployment.CreatedOn || deployment.Status || null;
+}
+
+function newestFirst(left, right) {
+  const leftTime = Date.parse(deploymentCreatedAt(left) || "");
+  const rightTime = Date.parse(deploymentCreatedAt(right) || "");
+  if (Number.isFinite(rightTime) && Number.isFinite(leftTime)) return rightTime - leftTime;
+  if (Number.isFinite(rightTime)) return 1;
+  if (Number.isFinite(leftTime)) return -1;
+  return 0;
+}
+
 export function summarizeWorkerDeployments(deployments) {
-  const rows = normalizeDeploymentList(deployments)
+  const rows = [...normalizeDeploymentList(deployments)]
+    .sort(newestFirst)
     .map((deployment) => {
       const version = Array.isArray(deployment.versions) ? deployment.versions[0] : null;
       return {
@@ -41,13 +55,14 @@ export function summarizeWorkerDeployments(deployments) {
 }
 
 export function summarizePagesDeployments(deployments) {
-  const rows = normalizeDeploymentList(deployments)
+  const rows = [...normalizeDeploymentList(deployments)]
+    .sort(newestFirst)
     .map((deployment) => ({
-      deploymentId: deployment.id || deployment.deployment_id || null,
-      createdOn: deployment.created_on || deployment.created_at || null,
-      environment: deployment.environment || deployment.env || null,
-      url: deployment.url || deployment.deployment_trigger?.metadata?.branch || null,
-      status: deployment.latest_stage?.status || deployment.stage?.status || deployment.status || null,
+      deploymentId: deployment.id || deployment.deployment_id || deployment.Id || null,
+      createdOn: deployment.created_on || deployment.created_at || deployment.CreatedOn || null,
+      environment: deployment.environment || deployment.env || deployment.Environment || null,
+      url: deployment.url || deployment.Deployment || deployment.deployment_trigger?.metadata?.branch || null,
+      status: deployment.latest_stage?.status || deployment.stage?.status || deployment.status || deployment.Status || null,
     }))
     .filter((row) => row.deploymentId);
 

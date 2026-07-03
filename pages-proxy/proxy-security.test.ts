@@ -46,6 +46,16 @@ async function main() {
     "pages proxy should not expose the private worker origin to browsers",
   );
   assert.equal(
+    response.headers.get("strict-transport-security"),
+    "max-age=31536000; includeSubDomains; preload",
+    "pages proxy should attach HSTS to browser responses",
+  );
+  assert.match(
+    response.headers.get("content-security-policy") ?? "",
+    /frame-ancestors 'none'/,
+    "pages proxy should prevent framing public and Studio responses",
+  );
+  assert.equal(
     response.headers.get("location"),
     "https://schedule.bythereeses.com/book/wedding-photography-discovery-call",
     "pages proxy should still rewrite worker-origin redirects to the public host",
@@ -101,6 +111,20 @@ async function main() {
   assert.equal(loginResponse.status, 200);
   assert.match(loginHtml, /The Reeses Studio/);
   assert.doesNotMatch(loginHtml, /Alex\s*&\s*Tyler|alex-tyler-logo|alt="Alex & Tyler"/i);
+  assert.equal(loginResponse.headers.get("x-frame-options"), "DENY");
+
+  let limitedResponse: Response | null = null;
+  for (let index = 0; index < 61; index += 1) {
+    limitedResponse = await pagesProxyWorker.fetch(
+      new Request(`https://studio.bythereeses.com/proposal/test-token-${index}`, {
+        headers: { "cf-connecting-ip": "203.0.113.10" },
+      }),
+      { ORIGIN_PROXY_SECRET: "origin-secret" },
+    );
+  }
+  assert.equal(limitedResponse?.status, 429, "tokenized public links should be rate limited by client IP");
+  assert.equal(limitedResponse?.headers.get("retry-after") !== null, true);
+  assert.equal(limitedResponse?.headers.get("x-content-type-options"), "nosniff");
 
   console.log("pages proxy security tests passed");
 }

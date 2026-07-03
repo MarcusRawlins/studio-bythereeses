@@ -6,9 +6,9 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
 - Authoritative in-repo SOP: [`crm-source-of-truth-sop.md`](crm-source-of-truth-sop.md) (layer hierarchy, canonical working copy, drift guard).
 - Durable business/system context + current priorities: Obsidian (`/Users/tyler-macmini/Documents/Obsidian Vault/02 Businesses/The Reeses/Reese Photography CRM - Source of Truth and Backups.md` and `00 System/System Cleanup Command Center - 2026-05-21.md`).
 - Implementation, deployment, and engineering details: this repo only.
-- Canonical active repo: `/Volumes/reeseai-memory/code/reese-photography-crm`
+- Canonical active repo: `/Volumes/reeseai-memory/04_Code/reese-photography-crm`
 - Archived (removed): `/Users/tyler-macmini/code/reese-photography-crm`, `/Users/tyler-macmini/Documents/studio-bythereeses`
-- Backup artifacts (code mirror + exports + snaps): `/Volumes/reeseai-memory/backups/reese-photography-crm/{d1,sqlite,manifests,logs,reconciliations}`
+- Backup artifacts (code mirror + exports + snaps): `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/{d1,sqlite,manifests,logs,reconciliations}`
 - Before strategic/durable changes: cross-check Obsidian first.
 - Drift guard (run before durable git work or cross-copy sync): `npm run check:source-drift` (`scripts/check-source-drift.mjs`). Reports primary + known local copies for origin URL, upstream tracking, ahead/behind, dirty worktree, branch/HEAD, and cross-copy HEAD/origin alignment. Non-zero exit on critical drift (HEAD/origin mismatch across present copies). Warnings only for dirty worktree, absent copies, and ahead/behind upstream.
 
@@ -33,7 +33,7 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
   - Requires `CLOUDFLARE_API_TOKEN`
   - Requires `src/middleware.ts`, `wrangler.jsonc`, `pages-proxy/_worker.js`
   - Rejects if `src/proxy.ts` present (Next.js 16 proxy runs on Node.js, which OpenNext Cloudflare cannot deploy)
-  - Requires a non-empty fresh D1 export at `/Volumes/reeseai-memory/backups/reese-photography-crm/d1/latest.sql` (<=36h old)
+  - Requires a non-empty fresh D1 export at `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/d1/latest.sql` (<=36h old)
   - Checks the MCP source still contains the finance, durable task-loop, and project workflow tool names asserted by production smoke
   - Warns on stale Alex/Tyler branding at studio/schedule domains
 - Full flow (from package.json + deployment doc):

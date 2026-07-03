@@ -6,13 +6,13 @@ Source-of-truth SOP (canonical working copy): [`crm-source-of-truth-sop.md`](crm
 
 ## What Gets Backed Up
 
-- Code mirror: `/Volumes/reeseai-memory/code/reese-photography-crm`
-- Local SQLite dev database snapshots: `/Volumes/reeseai-memory/backups/reese-photography-crm/sqlite`
-- Cloudflare D1 production SQL exports: `/Volumes/reeseai-memory/backups/reese-photography-crm/d1`
-- Backup manifests: `/Volumes/reeseai-memory/backups/reese-photography-crm/manifests`
-- Pre-deploy version captures: `/Volumes/reeseai-memory/backups/reese-photography-crm/manifests/latest-deploy-versions.json` (see `npm run deploy:capture-versions`)
-- Weekly reconciliation reports: `/Volumes/reeseai-memory/backups/reese-photography-crm/reconciliations`
-- Backup run logs: `/Volumes/reeseai-memory/backups/reese-photography-crm/logs`
+- Code mirror: `/Volumes/reeseai-memory/04_Code/reese-photography-crm`
+- Local SQLite dev database snapshots: `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/sqlite`
+- Cloudflare D1 production SQL exports: `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/d1`
+- Backup manifests: `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/manifests`
+- Pre-deploy version captures: `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/manifests/latest-deploy-versions.json` (see `npm run deploy:capture-versions`)
+- Weekly reconciliation reports: `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/reconciliations`
+- Backup run logs: `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/logs`
 - LaunchAgent stdout/stderr logs: `~/Library/Logs/reese-photography-crm`
 
 The code mirror is intentionally non-destructive. It does not use `--delete`, so a bad local state cannot erase the archive mirror in one run.
@@ -44,7 +44,7 @@ npm run db:restore-local:d1 -- --dry-run
 npm run db:restore-local:d1 -- --yes
 ```
 
-The restore command imports `/Volumes/reeseai-memory/backups/reese-photography-crm/d1/latest.sql` into a temporary SQLite database first, validates that Studio tables and project/client rows are present, saves a `local-before-d1-restore-*.db` snapshot of the current local database, replaces `data/local.db`, runs `npm run db:migrate`, and writes a JSON restore report under `/Volumes/reeseai-memory/backups/reese-photography-crm/logs`.
+The restore command imports `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/d1/latest.sql` into a temporary SQLite database first, validates that Studio tables and project/client rows are present, saves a `local-before-d1-restore-*.db` snapshot of the current local database, replaces `data/local.db`, runs `npm run db:migrate`, and writes a JSON restore report under `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/logs`.
 
 To restore from a specific D1 export or into a temporary database:
 

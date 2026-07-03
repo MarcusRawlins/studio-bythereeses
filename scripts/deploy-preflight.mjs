@@ -3,7 +3,7 @@ import path from "node:path";
 
 const STUDIO_URL = "https://studio.bythereeses.com/projects";
 const SCHEDULE_URL = "https://schedule.bythereeses.com/book/wedding-photography-discovery-call";
-const BACKUP_ROOT = "/Volumes/reeseai-memory/backups/reese-photography-crm";
+const BACKUP_ROOT = "/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm";
 const MAX_D1_BACKUP_AGE_HOURS = 36;
 const REQUIRED_MCP_TOOLS = [
   "studio_get_finance_report",

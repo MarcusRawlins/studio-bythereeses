@@ -6,6 +6,6 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 > Authoritative in-repo docs: `docs/crm-source-of-truth-sop.md` (working copy, drift guard, layer hierarchy) and `docs/studio-agent-access.md` (agent/MCP auth, tools, finance approval guard, smoke). Obsidian holds durable business context — check `/Users/tyler-macmini/Documents/Obsidian Vault/02 Businesses/The Reeses/Reese Photography CRM - Source of Truth and Backups.md` and `/Users/tyler-macmini/Documents/Obsidian Vault/00 System/System Cleanup Command Center - 2026-05-21.md` before strategic changes.
 >
-> Canonical working copy: `/Volumes/reeseai-memory/code/reese-photography-crm`. Archived `/Users/tyler-macmini/code/reese-photography-crm` is removed.
+> Canonical working copy: `/Volumes/reeseai-memory/04_Code/reese-photography-crm`. Archived `/Users/tyler-macmini/code/reese-photography-crm` is removed.
 >
 > Ops stabilization (deploy gate, rollback, backup/MCP drills): `docs/ops-stabilization-checklist.md`.

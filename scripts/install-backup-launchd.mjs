@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourceDir = path.join(repoRoot, "ops", "launchd");
 const targetDir = path.join(os.homedir(), "Library", "LaunchAgents");
-const backupLogDir = "/Volumes/reeseai-memory/backups/reese-photography-crm/logs";
+const backupLogDir = "/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/logs";
 const localLogDir = path.join(os.homedir(), "Library", "Logs", "reese-photography-crm");
 const labels = [
   "com.reeses.crm.daily-backup",

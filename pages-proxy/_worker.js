@@ -7,6 +7,23 @@ const ADMIN_STATE_COOKIE = "reese_studio_oauth_state";
 const ADMIN_SESSION_DAYS = 30;
 
 const textEncoder = new TextEncoder();
+const rateLimitBuckets = new Map();
+
+const SECURITY_HEADERS = {
+  "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  "content-security-policy": "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; upgrade-insecure-requests",
+};
+
+const RATE_LIMITS = {
+  adminAuth: { max: 20, windowSeconds: 300 },
+  tokenAccess: { max: 60, windowSeconds: 60 },
+  publicMutation: { max: 20, windowSeconds: 300 },
+  agentApi: { max: 120, windowSeconds: 60 },
+};
 
 function base64UrlEncode(input) {
   const bytes = input instanceof Uint8Array ? input : textEncoder.encode(String(input));
@@ -82,8 +99,15 @@ function redirectResponse(url, status = 303) {
     status,
     headers: {
       location: url.toString(),
+      ...SECURITY_HEADERS,
     },
   });
+}
+
+function applySecurityHeaders(headers) {
+  for (const [key, value] of Object.entries(SECURITY_HEADERS)) {
+    headers.set(key, value);
+  }
 }
 
 function isStudioHost(url) {
@@ -137,6 +161,65 @@ function isSchedulePublicPath(pathname) {
   );
 }
 
+function clientAddress(request) {
+  return request.headers.get("cf-connecting-ip")
+    || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    || "unknown";
+}
+
+function rateLimitKind(url, request) {
+  const pathname = url.pathname;
+  if (pathname === "/admin/auth/google" || pathname === "/api/google/callback") return "adminAuth";
+  if (pathname === "/api/mcp" || pathname.startsWith("/api/agent/")) return "agentApi";
+  if (
+    pathname.startsWith("/proposal/") ||
+    pathname.startsWith("/p/") ||
+    pathname === "/portal" ||
+    pathname.startsWith("/api/proposal/")
+  ) {
+    return "tokenAccess";
+  }
+  if (
+    request.method !== "GET" &&
+    (
+      pathname.startsWith("/api/scheduler/bookings") ||
+      /^\/api\/questionnaires\/[^/]+\/responses\/?$/.test(pathname)
+    )
+  ) {
+    return "publicMutation";
+  }
+  return null;
+}
+
+function rateLimitResponse(request, url) {
+  const kind = rateLimitKind(url, request);
+  if (!kind) return null;
+
+  const limit = RATE_LIMITS[kind];
+  const now = Date.now();
+  const windowMs = limit.windowSeconds * 1000;
+  const key = `${kind}:${clientAddress(request)}`;
+  const current = rateLimitBuckets.get(key);
+  const bucket = current && current.resetAt > now
+    ? current
+    : { count: 0, resetAt: now + windowMs };
+
+  bucket.count += 1;
+  rateLimitBuckets.set(key, bucket);
+
+  if (bucket.count <= limit.max) return null;
+
+  const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+  return new Response("Too many requests.", {
+    status: 429,
+    headers: {
+      "retry-after": String(retryAfter),
+      "cache-control": "private, no-store",
+      ...SECURITY_HEADERS,
+    },
+  });
+}
+
 function loginPage(nextPath = "/") {
   const safeNext = nextPath.startsWith("/") && !nextPath.startsWith("//") ? nextPath : "/";
   const body = `<!doctype html>
@@ -168,6 +251,7 @@ function loginPage(nextPath = "/") {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "private, no-store",
+      ...SECURITY_HEADERS,
     },
   });
 }
@@ -280,9 +364,13 @@ const pagesProxyWorker = {
         status: 204,
         headers: {
           "cache-control": "private, no-store",
+          ...SECURITY_HEADERS,
         },
       });
     }
+
+    const rateLimited = rateLimitResponse(request, incomingUrl);
+    if (rateLimited) return rateLimited;
 
     if (incomingUrl.hostname === "schedule.bythereeses.com") {
       if (incomingUrl.pathname === "/") {
@@ -348,6 +436,7 @@ const pagesProxyWorker = {
       if (cached) {
         const cachedHeaders = new Headers(cached.headers);
         cachedHeaders.set("x-reese-cache", "HIT");
+        applySecurityHeaders(cachedHeaders);
         return new Response(cached.body, {
           status: cached.status,
           statusText: cached.statusText,
@@ -384,6 +473,7 @@ const pagesProxyWorker = {
     responseHeaders.delete("content-security-policy");
     responseHeaders.delete("x-reese-origin-secret");
     responseHeaders.set("x-reese-cache", shouldCachePublicBookingPage ? "MISS" : "BYPASS");
+    applySecurityHeaders(responseHeaders);
     if (location?.startsWith(WORKER_ORIGIN)) {
       responseHeaders.set("location", location.replace(WORKER_ORIGIN, incomingUrl.origin));
     }

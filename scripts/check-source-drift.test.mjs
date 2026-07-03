@@ -7,7 +7,7 @@ import {
 } from "./check-source-drift.mjs";
 
 const primary = {
-  path: "/Volumes/reeseai-memory/code/reese-photography-crm",
+  path: "/Volumes/reeseai-memory/04_Code/reese-photography-crm",
   present: true,
   isGitRepo: true,
   branch: "crm-drift-guard",

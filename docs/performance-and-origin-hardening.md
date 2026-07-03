@@ -65,3 +65,23 @@ npm run smoke:perf
 ```
 
 Then check that the raw Worker origin returns `404` while the custom domains still work.
+
+## Front-Door Security Headers and Rate Limits
+
+The Pages proxy applies baseline security headers to proxied, cached, login, redirect, and rate-limit responses:
+
+- `Strict-Transport-Security`
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: strict-origin-when-cross-origin`
+- `Permissions-Policy`
+- a minimal CSP that blocks framing, plugins, and unsafe base URLs
+
+The proxy also rate-limits these sensitive surfaces by client IP:
+
+- admin OAuth start/callback
+- tokenized proposal and portal links
+- public scheduler/questionnaire mutation requests
+- Studio agent and MCP API requests
+
+This is a practical front-door baseline for a private CRM. If the public surfaces start receiving real abuse, move the same policy into Cloudflare WAF/Turnstile or another durable edge control.

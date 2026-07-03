@@ -30,9 +30,9 @@ Ops stabilization (deploy gate, rollback, backup/MCP drills): [`ops-stabilizatio
 | Source-of-truth hierarchy, working copy, drift guard | [`crm-source-of-truth-sop.md`](crm-source-of-truth-sop.md) |
 | Agent/MCP auth, tools, finance guard, smoke | This doc (`docs/studio-agent-access.md`) |
 | Ops stabilization, deploy gate, rollback | [`ops-stabilization-checklist.md`](ops-stabilization-checklist.md), [`deployment-live-testing.md`](deployment-live-testing.md) |
-| Canonical active repo | `/Volumes/reeseai-memory/code/reese-photography-crm` |
+| Canonical active repo | `/Volumes/reeseai-memory/04_Code/reese-photography-crm` |
 | Archived (removed) | `/Users/tyler-macmini/code/reese-photography-crm`, `/Users/tyler-macmini/Documents/studio-bythereeses` |
-| Backup artifacts | `/Volumes/reeseai-memory/backups/reese-photography-crm` (see [`backups.md`](backups.md)) |
+| Backup artifacts | `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm` (see [`backups.md`](backups.md)) |
 
 Before strategic or durable changes, cross-check Obsidian first, then [`crm-source-of-truth-sop.md`](crm-source-of-truth-sop.md). Engineering details in this doc reflect the stacked CRM integration branch reality at slice 11.
 

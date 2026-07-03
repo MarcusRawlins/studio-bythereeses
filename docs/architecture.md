@@ -10,13 +10,13 @@
 
 ## Data Ownership
 
-The canonical active repo is `/Volumes/reeseai-memory/code/reese-photography-crm`. Daily backup rsync targets the same path (non-destructive). See [`crm-source-of-truth-sop.md`](crm-source-of-truth-sop.md).
+The canonical active repo is `/Volumes/reeseai-memory/04_Code/reese-photography-crm`. Daily backup rsync targets the same path (non-destructive). See [`crm-source-of-truth-sop.md`](crm-source-of-truth-sop.md).
 
 ## Storage Budget
 
 Cloudflare free-tier usage is a hard product constraint. Keep D1 lean by storing only structured CRM records, IDs, timestamps, statuses, small JSON form answers, and audit metadata. Do not store generated PDFs, images, file attachments, raw email bodies, large exports, base64 blobs, or duplicative calendar payloads in D1.
 
-R2 is reserved for client-facing files that must live with the product, such as signed PDFs, generated proposal PDFs, attachments, and export bundles. Prefer compact generated artifacts, predictable object keys, and explicit retention/archive rules before adding any file-heavy workflow. Operational backups belong on `/Volumes/reeseai-memory/backups/reese-photography-crm`, not in production R2 by default.
+R2 is reserved for client-facing files that must live with the product, such as signed PDFs, generated proposal PDFs, attachments, and export bundles. Prefer compact generated artifacts, predictable object keys, and explicit retention/archive rules before adding any file-heavy workflow. Operational backups belong on `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm`, not in production R2 by default.
 
 ## Trust Boundaries
 

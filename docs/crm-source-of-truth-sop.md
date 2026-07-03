@@ -16,7 +16,7 @@ Authoritative in-repo map for where decisions, code, backups, and agent access l
 
 ## Canonical Working Copy
 
-- **Active repo:** `/Volumes/reeseai-memory/code/reese-photography-crm`
+- **Active repo:** `/Volumes/reeseai-memory/04_Code/reese-photography-crm`
 - **Git origin:** `https://github.com/MarcusRawlins/studio-bythereeses.git`
 - **Archived (removed):** `/Users/tyler-macmini/code/reese-photography-crm`, `/Users/tyler-macmini/Documents/studio-bythereeses` — do not treat these paths as current working copies.
 
@@ -24,9 +24,9 @@ Run all git work, `npm run dev:studio`, deploy gates, and agent doc updates from
 
 ## Backup and Mirror Surfaces
 
-- **Code mirror target (daily backup):** `/Volumes/reeseai-memory/code/reese-photography-crm` (same path as canonical working copy; backup rsync is non-destructive)
-- **Data backups:** `/Volumes/reeseai-memory/backups/reese-photography-crm/{d1,sqlite,manifests,logs,reconciliations}`
-- **Planning docs backup:** `/Volumes/reeseai-memory/businesses/photography/crm`
+- **Code mirror target (daily backup):** `/Volumes/reeseai-memory/04_Code/reese-photography-crm` (same path as canonical working copy; backup rsync is non-destructive)
+- **Data backups:** `/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm/{d1,sqlite,manifests,logs,reconciliations}`
+- **Planning docs backup:** `/Volumes/reeseai-memory/01_Businesses/photography/crm`
 
 Production database: Cloudflare D1 `studio-bythereeses`. Local SQLite at `data/local.db` is development-only.
 

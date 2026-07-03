@@ -6,8 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const backupRoot = "/Volumes/reeseai-memory/backups/reese-photography-crm";
-const mirrorRoot = "/Volumes/reeseai-memory/code/reese-photography-crm";
+const backupRoot = "/Volumes/reeseai-memory/09_Backups/backups/reese-photography-crm";
+const mirrorRoot = "/Volumes/reeseai-memory/04_Code/reese-photography-crm";
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
 const dirs = {
