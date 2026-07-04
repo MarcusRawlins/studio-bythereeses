@@ -1,6 +1,6 @@
 # Route Access Audit
 
-Last reviewed: 2026-07-03
+Last reviewed: 2026-07-04 (booking hardening landed on branch `claude/reese-crm-production-qa-4caxz0`, not yet deployed: `POST /api/scheduler/bookings` now rejects inactive meeting types, caps input lengths, and does not overwrite an existing client's phone).
 
 ## Enforcement Layers
 

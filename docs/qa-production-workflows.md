@@ -1,5 +1,7 @@
 # Production Workflow QA Audit
 
+> **Superseded by [`qa-production-workflows-2026-07-04.md`](qa-production-workflows-2026-07-04.md)** (2026-07-04 QA + security pass, 172/172 tests, booking-hardening fixes). This 2026-07-03 record is retained as a historical audit; its "171/171" and "2026-07-03" figures reflect that date, not current state.
+
 **Status:** ACHIEVED  
 **Audit date:** 2026-07-03  
 **Auditor:** Brunel (Codex execution specialist)  

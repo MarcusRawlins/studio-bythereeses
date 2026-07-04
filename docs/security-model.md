@@ -1,6 +1,8 @@
 # Security Model
 
-Last reviewed: 2026-07-03. See `docs/route-access-audit.md` for the current route-level access inventory.
+Last reviewed: 2026-07-04. See `docs/route-access-audit.md` for the current route-level access inventory and `docs/qa-production-workflows-2026-07-04.md` for the latest QA + security pass.
+
+Post-2026-07-04-review changes (branch `claude/reese-crm-production-qa-4caxz0`, verifiers green, not yet deployed): the public booking path no longer overwrites an existing client's phone, rejects inactive meeting types, and caps input lengths; scheduler/questionnaire link secrets and the reminder-cron secret now fail closed in production when unset; the agent bearer token is compared in constant time. Deferred hardening (still open): in-app signed-proxy-header admin authz, `Referrer-Policy` on `/proposal/**`, and a CSP `script-src`.
 
 ## Current MVP
 
