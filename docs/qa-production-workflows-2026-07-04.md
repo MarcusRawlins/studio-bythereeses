@@ -1,6 +1,6 @@
 # Production Workflow QA + Security Pass — 2026-07-04
 
-**Status:** PASS with findings (0 critical, 0 high, 6 medium/low security hardening items)
+**Status:** PASS with findings (0 critical, 0 high, 9 medium/low hardening findings — 6 fixed on this branch, see Remediation Status)
 **Auditor:** Claude (autonomous QA session)
 **Base commit:** `42c9472` (`feat: add studio system status page`); `main == origin/main`
 **Environment:** Fresh cloud clone at `/home/user/studio-bythereeses`. The canonical macOS working copy (`/Volumes/reeseai-memory/04_Code/reese-photography-crm`) is not mounted here; this container has **no Google admin session and no `STUDIO_AGENT_API_TOKEN`**, which bounds what could be exercised live (see "Areas not tested").
@@ -11,7 +11,7 @@ Related: [`qa-production-workflows.md`](qa-production-workflows.md) (2026-07-03 
 
 Production is **healthy and correctly locked down** for every surface reachable without privileged credentials. Host split, origin blocking, agent/MCP auth, tokenized client links, Stripe webhook verification, and the finance approval guard are all enforced and match the documented model. Local verifiers are green.
 
-No critical or high-severity exploitable defect was found. Nine hardening findings are listed below; the top three are unauthenticated-booking input-handling issues that should be fixed before any wider public exposure. **No code was changed and nothing was pushed or deployed** (per safety rules). **No production test records were created** — the live booking mutation was intentionally held (rationale below).
+No critical or high-severity exploitable defect was found. Nine hardening findings are listed below; the top three are unauthenticated-booking input-handling issues. _At audit time_ no code was changed and nothing was pushed or deployed; **six findings (M1–M3, L5, L6, L9) were subsequently fixed on this branch after Tyler's approval — see the Remediation Status section.** **No production test records were created** — the live booking mutation was intentionally held (rationale below).
 
 | Gate | Result |
 | --- | --- |
@@ -131,8 +131,9 @@ Six findings were fixed in this branch; verifiers re-run green (lint, build, **1
 ## Recommended Next Steps
 
 1. Have Tyler run the live booking test above (or provide the agent token so `smoke:production` can run here).
-2. Approve the scoped fixes for **M1–M3** (unauthenticated booking hardening) — these are the highest-value, low-risk changes. I can implement them on a QA branch, run lint/build/test, and hold for approval.
-3. Consider L5/L6 fail-closed changes and L9 constant-time compare in the same batch.
-4. Track M4 and L7/L8 as defense-in-depth hardening.
+2. ~~Approve the scoped fixes for M1–M3~~ — **done** (fixed on this branch; verifiers green).
+3. ~~L5/L6 fail-closed + L9 constant-time~~ — **done** (same batch).
+4. Track M4 and L7/L8 (and the finance dead-code cleanup) as defense-in-depth hardening — scheduled as **Phase 6** in [`roadmap.md`](roadmap.md); design spec in `docs/specs/phase-6-hardening-r2.md`.
+5. Deploy the branch to production (fixes are not live until deployed).
 
-_No push or deploy performed. Awaiting Tyler approval before any commit is pushed or any fix is applied._
+_Update: six fixes were applied and pushed after Tyler's approval; see Remediation Status. Not yet deployed._
