@@ -1,6 +1,7 @@
 # Phase 6: Hardening + R2 private access — Design Spec
 
 **Status:** DESIGN ONLY (no implementation in this document). Author: senior engineer. Date: 2026-07-04.
+**Review:** Fable gate — APPROVE-WITH-CHANGES (2026-07-04). Four blocking fixes incorporated below (marked `[Fable-fix]`): M4 classifier must exclude `/portal`; cached `/book/*` must omit `script-src` (not use nonce-free `'self'`, which blocks Next's inline bootstrap); nonces require dynamic rendering + `preview` hydration is a hard gate; the M4 break-glass flag location + exact rollback command are specified. High-value suggestions also folded in (migrations dir, WebCrypto in middleware, inbound-header stripping, cross-host replay binding, serving-route DB lookup, TTL cap).
 **Runtime facts this spec is grounded in:** Next.js 16 App Router on Cloudflare Workers via OpenNext (`@opennextjs/cloudflare`, worker entry `.open-next/worker.js`), Drizzle + D1 (binding `DB`, db `studio-bythereeses`), R2 bucket `studio-bythereeses` bound as `CRM_ASSETS` in `wrangler.jsonc` **but currently unused in code**. A Cloudflare Pages front door (`pages-proxy/_worker.js`) sits in front of the Worker origin (`reese-photography-crm.solitary-flower-c3ab.workers.dev`) and terminates the Google admin session, injects `x-reese-origin-secret`, and applies the final security headers. Bindings are read in-app via `getCloudflareContext().env` (see `src/db/client.ts:964-970`).
 
 **Sources closed by this phase:** `docs/qa-production-workflows-2026-07-04.md` findings **M4** (single-layer admin authz), **L7** (proposal token in URL / Referrer-Policy), **L8** (CSP has no `script-src`), and the **Info — dead code** item (6 blocked finance `*FromAgent` bodies). Roadmap Phase 6 bullet, `docs/security-model.md` "Remaining Hardening", and `docs/route-access-audit.md` "Known Follow-Ups".
@@ -19,7 +20,7 @@
 Private-by-default storage + serving for owned assets: generated contract PDFs, invoice PDFs, and any future gallery-adjacent owned files. R2 buckets have **no public access unless a public `r2.dev`/custom domain is attached** — the design's first rule is: **never attach a public domain to `studio-bythereeses`.** Every read flows through the Worker with an authenticated or signed request.
 
 ### Data model (new D1 table + migration)
-New Drizzle table `asset_objects` (migration file: next number in `src/db/` migration sequence, e.g. `0083_asset_objects` — confirm the current max in `src/db/`):
+New Drizzle table `asset_objects`. **[Fable-fix]** Migrations live in the repo-root `migrations/` dir (per `drizzle.config.ts` `out`), **not** `src/db/`; current max is `0082_shooting_locations.sql`, so add `migrations/0083_asset_objects.sql` plus the Drizzle table in `src/db/schema.ts`. Note `src/db/client.ts` also carries an inline ensure-migrations path — `asset_objects` uses the standard `migrations/` file applied by `npm run db:migrate` (the client ensure-path is a fallback only; do not hand-roll the table there).
 
 ```
 asset_objects
@@ -65,7 +66,7 @@ async function getAssetMeta(assetId: string): Promise<AssetRow | null>
 ### Serving — two authenticated paths
 
 **(a) Primary: authenticated Worker proxy route** — `src/app/api/assets/[...key]/route.ts` (GET only).
-Serves the object after verifying **one** of:
+**[Fable-fix]** For **all three** auth paths, the route MUST first look up the `asset_objects` row by key (row exists AND `deleted_at IS NULL`) before any R2 read — so raw R2 keys can't be probed and soft-deletes are honored even before the object is physically removed. Then it serves the object after verifying **one** of:
 - a valid admin proxy proof (Section 2) → full read; or
 - a valid **signed asset URL** (below); or
 - a portal/proposal session/token whose scope covers the object's `project_id`/`proposal_id` (see mapping).
@@ -81,7 +82,7 @@ function signAssetUrl(assetId: string, opts: {
 }): string   // -> `/api/assets/{key}?exp={unix}&sc={scope}&ref={scopeRef}&sig={base64url-hmac}`
 function verifyAssetUrl(url: URL): { ok: boolean; assetId?: string }
 ```
-HMAC-SHA256 over `key + "\n" + exp + "\n" + scope + "\n" + scopeRef` with new secret **`R2_URL_SIGNING_SECRET`**. Constant-time compare (`node:crypto timingSafeEqual`, mirror `src/lib/agent-api.ts:6-11`). Reuse the existing hashing idiom from `src/lib/portal.ts:31-32`.
+HMAC-SHA256 over `key + "\n" + exp + "\n" + scope + "\n" + scopeRef` with new secret **`R2_URL_SIGNING_SECRET`**. Constant-time compare (`node:crypto timingSafeEqual`, mirror `src/lib/agent-api.ts:6-11`). Reuse the existing hashing idiom from `src/lib/portal.ts:31-32`. **[Fable-fix]** `signAssetUrl` MUST cap `ttlSeconds` at a hard maximum (7 days) regardless of caller input. Revocation for the long email-link TTL is documented as: delete the asset (soft-delete row honored by the serving lookup above) or rotate `R2_URL_SIGNING_SECRET` (invalidates all outstanding signed URLs).
 
 ### Token/scope → object access mapping
 The existing token model already scopes credentials to project/proposal/client (`portalAccessTokens`, `proposalAccessTokens`; hashing in `src/lib/portal.ts` and `src/lib/sales.ts:77`). Mapping rules enforced in the assets route:
@@ -120,22 +121,29 @@ Admin authorization is **single-layer**: only the Pages proxy Google session gat
 The proxy already validates the Google session (`verifyAdminSession`, `pages-proxy/_worker.js:68-85`). After that passes for a Studio admin request, the proxy sets a signed proof header the app independently verifies.
 
 **Header:** `x-reese-admin-proof: v1.{tsSeconds}.{sigBase64url}`
-where `sig = HMAC_SHA256(ADMIN_PROOF_SECRET, `${method}\n${pathname}\n${tsSeconds}`)`.
-Path is bound (prevents replay against a different route); timestamp bounds replay window.
+where `sig = HMAC_SHA256(ADMIN_PROOF_SECRET, `${method}\n${host}\n${pathname}\n${tsSeconds}`)`.
+Path is bound (prevents replay against a different route); timestamp bounds replay window. **[Fable-fix]** `{host}` (the incoming `x-forwarded-host`) is bound into the HMAC input to prevent cross-host replay; verifier recomputes with the same host.
 
 **New shared secret:** `ADMIN_PROOF_SECRET` — set as **both** a Pages-proxy env var and a Worker runtime secret (single value in two places, like the existing `ORIGIN_PROXY_SECRET` split).
 
-**Proxy side** (`pages-proxy/_worker.js`): reuse existing `hmac(secret, value)` helper (line 41). In the Studio-host branch, after `verifyAdminSession(request, env)` returns true and the path is an admin surface (i.e. not `isStudioPublicPath`), compute the proof and set it on the forwarded `headers` alongside `x-reese-origin-secret` (near line 452). It must be set on the request to the origin, not the response. Also strip any inbound `x-reese-admin-proof` from the client first (defense against spoofing), exactly as origin-secret is trusted only from the proxy.
+**Proxy side** (`pages-proxy/_worker.js`): reuse existing `hmac(secret, value)` helper (line 41). In the Studio-host branch, after `verifyAdminSession(request, env)` returns true and the path is an admin surface (i.e. not `isStudioPublicPath`), compute the proof and set it on the forwarded `headers` alongside `x-reese-origin-secret` (near line 452). It must be set on the request to the origin, not the response. **[Fable-fix]** Strip any inbound `x-reese-admin-proof` at the **shared header-build site (~line 448)** so it is removed for **both** hosts (client can never spoof it); while there, also unconditionally `headers.delete("x-reese-origin-secret")` on inbound (today it passes through if `ORIGIN_PROXY_SECRET` is unset — a latent gap closed by the same one-line change).
 
 **App side — new helper** `src/lib/admin-proxy-auth.ts`:
 ```ts
 export const ADMIN_PROOF_HEADER = "x-reese-admin-proof";
 export async function verifyAdminProxyProof(request: Request, opts?: {
   now?: number; maxSkewSeconds?: number;   // default 300
-}): Promise<boolean>;                        // false unless: secret configured, header present, ts within skew, HMAC(method,path,ts) matches (timingSafeEqual)
+}): Promise<boolean>;                        // false unless: secret configured, header present, ts within skew, HMAC(method,host,path,ts) matches
 export function adminProofRequired(pathname: string): boolean;  // true for admin surfaces, false for agent/public/token/webhook paths
 ```
-`adminProofRequired` reuses the negative of `isPublicOriginBypassPath` / `isPublicOriginBypassApiPath` from `src/lib/origin-guard.ts` **plus** excludes `/api/agent/*`, `/api/mcp`, `/api/stripe/webhook`, `/api/google/*`, `/api/cron/*` (which authenticate by their own bearer/signature, not the admin session).
+**[Fable-fix — crypto]** `verifyAdminProxyProof` runs in `src/middleware.ts`, which is build-checked as **edge runtime** — do **not** use `node:crypto`. Use WebCrypto (`crypto.subtle`, recompute-HMAC then compare), mirroring the proxy's own `hmac()` helper, to avoid Next edge build friction.
+
+**[Fable-fix — BLOCKING: classifier must not break the client portal]** `adminProofRequired` cannot be defined as merely "the negation of origin-guard's bypass lists." The client portal (`/portal`, and `/portal/proposals/:id` if client-reachable) is public at the **proxy** (`isPortalPublicPath`, `_worker.js:128-130`) but `/portal` does **not** prefix-match origin-guard's `/p/` entry — so a naive negation would require an admin proof on `/portal` and **404 the entire client portal** under enforcement (`src/app/p/[token]/route.ts` redirects every client token claim to `/portal`). The classifier MUST:
+- explicitly return `false` (public) for `/portal`, `/portal/proposals/`, and normalize trailing slashes before matching (the proxy's questionnaire regexes allow a trailing `/?`; origin-guard's don't — reconcile so they can't disagree);
+- return `false` for `/api/agent/*`, `/api/mcp`, `/api/stripe/webhook`, `/api/google/*`, `/api/cron/*`, and all token/public surfaces (`/proposal/*`, `/api/proposal/*`, `/p/*`, `/book/*`, `/api/scheduler/*`, questionnaire public routes, `/api/assets/*`, static assets);
+- return `true` only for genuine admin pages/APIs (`/`, `/finance`, `/projects`, `/clients`, `/api/settings`, `/api/clients/*`, etc.).
+
+**[Fable-fix — required drift test]** Add a test that asserts the app classifier and the proxy's public-path predicates (`isStudioPublicPath` / `isPortalPublicPath` / `isSchedulePublicPath`) agree on a shared fixture list of paths, so the two can never drift apart. This catches the failure mode at design time instead of relying on the log-only window. **Intentional side effect to encode in the test:** under enforcement `/api/scheduler/meeting-types` and `/api/scheduler/settings` (admin-only forms, but proxy-public under `/api/scheduler/*`) become admin-proof-required — a hardening win; assert it is deliberate.
 
 ### Enforcement points
 Primary choke point is `src/middleware.ts` (already runs for `/api/:path*` and all matched pages). Extend `middleware()`:
@@ -155,7 +163,7 @@ Middleware becomes `async` (already edge; verify OpenNext supports async edge mi
 
 ### Config / secrets / env keys
 - New: `ADMIN_PROOF_SECRET` (Pages proxy env + Worker secret).
-- New: `ADMIN_PROOF_ENFORCE` (Worker var, `"1"` to hard-enforce) — enables phased rollout (fail-open → fail-closed) without a code redeploy.
+- New: `ADMIN_PROOF_ENFORCE` — **[Fable-fix — BLOCKING: this is the break-glass against locking Tyler out of admin, so its location and rollback command must be exact].** Store it as a **Worker secret** (not a `wrangler.jsonc` var — changing a var requires a full `deploy` rebuild). Enforce path reads `env.ADMIN_PROOF_ENFORCE === "1"`. Fast enable: `wrangler secret put ADMIN_PROOF_ENFORCE` (new Worker version, no build). **Instant rollback (break-glass): `wrangler secret delete ADMIN_PROOF_ENFORCE`** (or set to `"0"`) → next request is proxy-only again, no code redeploy. A Cloudflare-dashboard secret edit is the GUI equivalent. **Pre-enforcement checklist step:** before flipping to enforce, prove the rollback works by toggling the secret off and confirming an admin page still loads, and confirm at least one admin request carried a valid proof in the log-only window.
 
 ### Files touched
 `pages-proxy/_worker.js`, `src/middleware.ts`, `src/lib/admin-proxy-auth.ts` (new), optionally `src/lib/origin-guard.ts` (export the surface-classification helpers), and the highest-value admin route handlers if `guardAdminApiRequest` is added.
@@ -211,6 +219,11 @@ Ships with `npm run deploy:pages-proxy`. Header-only, no data risk. Rollback: re
 The proxy strips the origin CSP and sets a minimal static one with no `script-src`/`default-src` (`pages-proxy/_worker.js:18,473`). XSS is mitigated by React escaping only. Fix: add `script-src 'self' 'nonce-<per-request>' 'strict-dynamic'` with a real per-request nonce, without breaking hydration.
 
 ### Design — nonce generation + propagation
+
+**[Fable-fix — BLOCKING: dynamic-rendering constraint].** The repo's own Next 16 doc (`node_modules/next/dist/docs/01-app/02-guides/content-security-policy.md`) states nonces **require dynamic rendering**, and its documented pattern uses `proxy.ts` — which this repo explicitly **cannot** use (OpenNext can't deploy Node middleware; `middleware.ts` must stay edge). Consequences the implementer MUST honor:
+- A statically-rendered or OpenNext-cached page receives a **frozen** nonce while the CSP header is regenerated per request → nonce mismatch → all scripts blocked (same failure class as the `/book/*` cache below). Therefore **every route that gets a nonced `script-src` must render dynamically** — audit each Studio route's rendering mode; force `dynamic` where needed.
+- The legacy-`middleware.ts` nonce path is **not** the documented Next 16 shape (that assumes `proxy.ts`). Treat the `npm run preview` (local OpenNext) hydration + CSP-violation check as a **hard gate**, not a suggestion: if the nonce cannot be threaded reliably through edge `middleware.ts` on this OpenNext target, ship L8 as a **hash-based or `'self'`-only CSP for Studio without a nonce** rather than a broken nonce.
+
 Read `node_modules/next/dist/docs/` for the exact Next 16 nonce contract before implementing; the shape below matches the documented App Router pattern (middleware generates nonce, exposes it via a request header, Next injects it into framework/inline scripts, server components read it for custom `<script>`).
 
 1. **Generate in `src/middleware.ts`** (edge, per request): `const nonce = crypto.randomUUID()` → base64. Build the full CSP string including `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'; ...`. Set it on a cloned **request** header (`x-nonce` and the `content-security-policy` request header Next reads) via `NextResponse.next({ request: { headers } })`, and set the response `Content-Security-Policy` header to the same value.
@@ -219,7 +232,9 @@ Read `node_modules/next/dist/docs/` for the exact Next 16 nonce contract before 
 
 ### Hydration + caching risks (must handle)
 - **Nonce mismatch → hydration break.** The nonce in the CSP header and the nonce on emitted scripts must be identical. Only generate the nonce in **one** place (middleware) and never regenerate downstream. Do not set the nonce in a React render path.
-- **Cached public booking pages** (`pages-proxy/_worker.js:429-498` caches `/book/*` HTML for 60s under `caches.default`). A per-request nonce baked into a cached HTML body would be reused across requests → CSP header (regenerated per request) would not match the frozen script nonces → all scripts blocked. **Resolution:** do **not** apply a nonce'd `script-src` to cacheable public booking responses. For the schedule host / `/book/*`, use a nonce-free `script-src 'self'` (no `'strict-dynamic'`, no nonce) so the cached body stays valid. Gate nonce generation in middleware to non-cacheable routes (reuse the predicate mirroring `canCachePublicBookingPage`).
+- **Cached public booking pages** (`pages-proxy/_worker.js:429-498` caches `/book/*` HTML for 60s under `caches.default`). A per-request nonce baked into a cached HTML body would be reused across requests → CSP header (regenerated per request) would not match the frozen script nonces → all scripts blocked. **[Fable-fix — BLOCKING: correct resolution].** Do **not** use a nonce-free `script-src 'self'` for booking either — Next App Router pages always emit **inline** bootstrap scripts (`self.__next_f.push(...)`), and `script-src 'self'` with no nonce/hash/`'unsafe-inline'` blocks all inline scripts → booking page dead. Correct resolution: for cacheable `/book/*` HTML, **omit `script-src` entirely** and keep today's baseline CSP (`base-uri`/`object-src`/`frame-ancestors`/`upgrade-insecure-requests`) as the proxy fallback; scope L8's `script-src` to the **Studio + token surfaces** only. A hash-based CSP for the booking page is a documented **follow-up**, not part of Phase 6.
+- **[Fable-fix — cache-HIT path].** The proxy's cache-HIT branch (`_worker.js:437-444`) re-applies `applySecurityHeaders` independently of the main path. It MUST get the **same preserve-app-CSP-vs-inject-fallback** logic — amending only lines 473-476 (the miss path) is insufficient and would serve the wrong CSP on every cache hit.
+- **[Fable-fix — host predicate].** The middleware "skip nonce for cacheable booking" predicate MUST key off `x-forwarded-host` (set by the proxy), **not** the request URL hostname — the app/middleware sees the internal `workers.dev` origin URL, never `schedule.bythereeses.com`.
 - **`'strict-dynamic'`** drops `'self'` allowlisting in supporting browsers; verify all first-party scripts are loaded through nonced bootstrap. If any static `/brand` or third-party inline breaks, fall back to `script-src 'self' 'nonce-…'` without `'strict-dynamic'`.
 - **OpenNext specifics:** confirm middleware runs before the cached asset short-circuit and that `NextResponse.next({ request })` header mutation survives the OpenNext adapter. Validate in `npm run preview` (local OpenNext) before deploy.
 
@@ -333,8 +348,8 @@ Each task is independently shippable; ordering respects dependencies and risk. R
 | 3 | **§5 ops drills + access inventory** — restore-verify script + test, `drill:restore`, rotation runbook, who-has-access table, doc-content test. | — | `scripts/restore-verify-d1.mjs`(+test), `docs/*`, `package.json` | M | Low |
 | 4 | **§1a R2 storage primitives** — `asset_objects` migration + schema; `src/lib/assets.ts` (`putAsset`/`getAssetObject`/`deleteAsset`/`getAssetMeta`); `R2_URL_SIGNING_SECRET` fail-closed; `assets.test.ts`; `cf:typegen`. | — | `src/db/*`, `src/lib/assets.ts` | M | Med |
 | 5 | **§1b R2 serving route + signed URLs + scope mapping** — `/api/assets/[...key]` GET; `signAssetUrl`/`verifyAssetUrl`; portal/proposal scope enforcement; origin-guard + proxy public-path + rate-limit wiring; route test. | 4 | `src/app/api/assets/[...key]/route.ts`, `src/lib/assets.ts`, `src/lib/origin-guard.ts`, `pages-proxy/_worker.js` | M | Med |
-| 6 | **§2 M4 admin proxy proof** — proxy sets `x-reese-admin-proof` after session check + strips inbound; `src/lib/admin-proxy-auth.ts`; async middleware enforcement behind `ADMIN_PROOF_ENFORCE`; `ADMIN_PROOF_SECRET` in both envs; classification + verify tests; phased log-only rollout. | 2 (proxy edits) | `pages-proxy/_worker.js`, `src/middleware.ts`, `src/lib/admin-proxy-auth.ts`, `src/lib/origin-guard.ts` | L | Med |
-| 7 | **§4 CSP nonce (L8)** — `src/lib/csp.ts`; nonce in middleware (skip cacheable `/book/*`); proxy stops clobbering app CSP (fallback only); layout reads nonce; `CSP_REPORT_ONLY` report-only rollout; csp/middleware tests + `preview` validation. | 6 (middleware now async) | `src/middleware.ts`, `src/lib/csp.ts`, `src/app/layout.tsx`, `pages-proxy/_worker.js` | L | High |
+| 6 | **§2 M4 admin proxy proof** — proxy sets host+path-bound `x-reese-admin-proof` after session check + strips inbound (both hosts); WebCrypto verify in async middleware behind `ADMIN_PROOF_ENFORCE` (Worker secret, break-glass = `wrangler secret delete`); **classifier MUST exclude `/portal` + normalize trailing slash + drift test vs proxy predicates** (Fable-blocking); `ADMIN_PROOF_SECRET` in both envs; phased log-only rollout with pre-enforce rollback proof. | 2 (proxy edits) | `pages-proxy/_worker.js`, `src/middleware.ts`, `src/lib/admin-proxy-auth.ts`, `src/lib/origin-guard.ts` | L | Med |
+| 7 | **§4 CSP nonce (L8)** — `src/lib/csp.ts`; nonce in middleware for **dynamic Studio routes only**, keyed off `x-forwarded-host`; **cacheable `/book/*` omits `script-src` entirely** (Fable-blocking — `'self'` would block Next inline bootstrap); proxy stops clobbering app CSP on **both miss and cache-HIT paths**; `preview` hydration = hard gate; `CSP_REPORT_ONLY` first. | 6 (middleware now async) | `src/middleware.ts`, `src/lib/csp.ts`, `src/app/layout.tsx`, `pages-proxy/_worker.js` | L | High |
 
 **Suggested delivery order:** 1 → 2 → 3 (fast, low-risk, independent) → 4 → 5 (R2 prerequisite for Phase 7) → 6 → 7 (highest hydration/caching risk last, behind report-only). Tasks 6 and 7 both edit `pages-proxy/_worker.js` and `src/middleware.ts`; sequence them to avoid merge churn (6 makes middleware async; 7 builds on that). Every task ends with `npm run lint && npm run build && npm run test`; proxy/app changes additionally validated in `npm run preview` and `npm run smoke:production` after deploy, per the deploy gate in `ops-stabilization-checklist.md`. No merge to `main` / deploy without explicit Tyler approval.
 
