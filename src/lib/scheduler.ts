@@ -238,6 +238,16 @@ function textValue(formData: FormData, key: string) {
   return String(formData.get(key) ?? "").trim();
 }
 
+// Length caps for the public, unauthenticated booking endpoint, mirroring the
+// public questionnaire response route so a single request cannot store an
+// unbounded payload.
+const MAX_ATTENDEE_NAME_LENGTH = 200;
+const MAX_ATTENDEE_EMAIL_LENGTH = 320;
+const MAX_ATTENDEE_PHONE_LENGTH = 50;
+const MAX_BOOKING_NOTES_LENGTH = 5000;
+const MAX_INVITEE_ANSWER_LENGTH = 5000;
+const MAX_SERIALIZED_INVITEE_ANSWERS_LENGTH = 100000;
+
 function numberValue(formData: FormData, key: string, fallback: number) {
   const value = Number(textValue(formData, key));
   return Number.isFinite(value) && value >= 0 ? value : fallback;
@@ -346,7 +356,12 @@ type ProjectBookingContext = {
 };
 
 function schedulerLinkSecret() {
-  return process.env.SCHEDULER_LINK_SECRET || process.env.AUTH_SECRET || "local-development-scheduler-link-secret";
+  const configured = process.env.SCHEDULER_LINK_SECRET || process.env.AUTH_SECRET;
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("SCHEDULER_LINK_SECRET (or AUTH_SECRET) must be set in production.");
+  }
+  return "local-development-scheduler-link-secret";
 }
 
 function base64UrlEncode(value: string) {
@@ -476,10 +491,14 @@ async function findOrCreateSchedulerClient(name: string, email: string, phone: s
     where: eq(clients.email, email),
   });
   if (existing) {
-    await db.update(clients).set({
-      phone: phone || existing.phone,
-      updatedAt: new Date().toISOString(),
-    }).where(eq(clients.id, existing.id));
+    // Public, unauthenticated booking must not overwrite an existing client's
+    // contact facts. Only fill the phone when the record has none yet.
+    if (!existing.phone && phone) {
+      await db.update(clients).set({
+        phone,
+        updatedAt: new Date().toISOString(),
+      }).where(eq(clients.id, existing.id));
+    }
     return existing.id;
   }
 
@@ -816,14 +835,32 @@ export async function createSchedulerBookingFromForm(formData: FormData) {
   if (!meetingTypeId || !attendeeName || !attendeeEmail || !startAt || !endAt) {
     throw new Error("Meeting type, name, email, and time are required.");
   }
+  if (
+    attendeeName.length > MAX_ATTENDEE_NAME_LENGTH ||
+    attendeeEmail.length > MAX_ATTENDEE_EMAIL_LENGTH ||
+    (attendeePhone && attendeePhone.length > MAX_ATTENDEE_PHONE_LENGTH) ||
+    (notes && notes.length > MAX_BOOKING_NOTES_LENGTH)
+  ) {
+    throw new Error("One or more booking fields are too long.");
+  }
 
   const [settings, meetingType] = await Promise.all([
     db.query.schedulerSettings.findFirst({ where: eq(schedulerSettings.id, "default") }),
     db.query.schedulerMeetingTypes.findFirst({ where: eq(schedulerMeetingTypes.id, meetingTypeId) }),
   ]);
   if (!settings || !meetingType) throw new Error("Scheduler is not configured.");
+  if (!meetingType.isActive) throw new Error("This meeting type is no longer available for booking.");
   const inviteeQuestions = parseInviteeQuestions(meetingType.inviteeQuestionsJson);
   const inviteeAnswers = answersFromForm(formData, inviteeQuestions);
+  for (const answer of Object.values(inviteeAnswers)) {
+    const tooLong = Array.isArray(answer)
+      ? answer.some((entry) => entry.length > MAX_INVITEE_ANSWER_LENGTH)
+      : answer.length > MAX_INVITEE_ANSWER_LENGTH;
+    if (tooLong) throw new Error("One or more answers are too long.");
+  }
+  if (JSON.stringify(inviteeAnswers).length > MAX_SERIALIZED_INVITEE_ANSWERS_LENGTH) {
+    throw new Error("Submitted answers are too large.");
+  }
   const zoomJoinUrl = meetingType.zoomJoinUrl || settings.zoomJoinUrl;
   const selectedDate = dateKeyInTimeZone(new Date(startAt), settings.timezone);
   const availableSlots = await getAvailableSlots(meetingType.slug, selectedDate, { bypassGoogleCache: true });

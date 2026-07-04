@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
+import { timingSafeEqual } from "node:crypto";
 
 const AGENT_AUTH_SCHEME = "Bearer ";
+
+function tokensMatch(provided: string | null, expected: string) {
+  if (!provided) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 function configuredAgentToken() {
   return process.env.STUDIO_AGENT_API_TOKEN?.trim() || null;
@@ -21,7 +29,7 @@ export async function guardAgentApiRequest(request: Request) {
     );
   }
 
-  if (requestBearerToken(request) !== expectedToken) {
+  if (!tokensMatch(requestBearerToken(request), expectedToken)) {
     return NextResponse.json(
       { error: "Unauthorized agent request." },
       { status: 401 },

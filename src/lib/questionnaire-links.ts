@@ -13,7 +13,12 @@ export type QuestionnaireLinkContext = {
 };
 
 function questionnaireLinkSecret() {
-  return process.env.SCHEDULER_LINK_SECRET || process.env.AUTH_SECRET || "local-development-questionnaire-link-secret";
+  const configured = process.env.SCHEDULER_LINK_SECRET || process.env.AUTH_SECRET;
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("SCHEDULER_LINK_SECRET (or AUTH_SECRET) must be set in production.");
+  }
+  return "local-development-questionnaire-link-secret";
 }
 
 function base64UrlEncode(value: string) {
