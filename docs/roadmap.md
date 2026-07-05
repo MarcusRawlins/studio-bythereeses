@@ -54,11 +54,19 @@ Decision (2026-07-04): **integrate an existing gallery/delivery tool** (Pixieset
 - Sync gallery status/links into Studio (project record + agent/MCP context) so the assistant can reference and send them.
 - Keep R2 private object access (Phase 6) available for any owned-asset needs (contracts, PDFs) independent of the gallery provider.
 
+## Phase 6.5 (near-term, right after Phase 6): Portal self-service magic-link login
+
+Gap found 2026-07-04: the portal's security foundation exists (256-bit scoped tokens, SHA-256 at rest, 30-day httpOnly session, expiry/revocation, no IDOR), but there is **no self-service flow** — portal links are minted by admin/agent and sent manually. Add: a public "enter your email" page that verifies the email matches a project contact, then emails a single-use, short-TTL magic link (reusing the existing scoped-token + Resend infra). Security-sensitive: constant-time no-enumeration response, per-IP + per-email rate limiting, single-use expiring request token. Reuses Phase 6 hardening.
+
 ## Phase 8: Communications engine
 
+- **Inquiry-email → project automation** (see decision note below): ingest inbound inquiry emails, create a triage draft + agent-proposed project via the existing `studio_create_project` canonical path, and draft a reply — Tyler approves creation + send. Recommended transport: **Cloudflare Email Routing → Worker → existing agent pipeline** (owned/tested/secure), not an external n8n instance.
 - Inbound email capture into the project thread (currently send-only via Resend).
 - SMS via Twilio (schema already has `smsOptIn`); all sends stay behind the existing Tyler-approval guard.
 - Automated sequences on existing workflow-automation rails: invoice dunning, pre-event timeline nudges, post-delivery review requests.
+
+### Decision note — inquiry-email automation transport (2026-07-04)
+Recommendation: build inbound intake **in-house on Cloudflare** rather than an external n8n script holding email + CRM credentials. Rationale: keeps inquiries in the canonical source-of-truth model, keeps email creds + agent token inside Cloudflare secrets (avoids widening the shared-bearer exposure we are actively reducing), reuses the tested agent/MCP + D1 pipeline, and adds no new external attack surface. n8n is fine as a *day-one prototype* to validate parsing/flow, but not as the production path. Guardrail: inbound email creates a **draft/triage inquiry**, not an auto-created live project or auto-sent reply — Tyler approves, matching the existing "agents draft, Tyler sends" guard (spam/mis-parse and brand/deliverability risk otherwise).
 
 ## Phase 9: Financial completeness
 
