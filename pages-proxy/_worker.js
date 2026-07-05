@@ -94,12 +94,22 @@ function clearCookie(name) {
   return cookie(name, "", { maxAge: 0 });
 }
 
-function redirectResponse(url, status = 303) {
+// L7: proposal surfaces carry a bearer token in the URL itself; force `no-referrer`
+// there so the token can never leak via the Referer header on outbound navigations.
+// Every other surface keeps the default strict-origin-when-cross-origin policy.
+function referrerPolicyFor(pathname) {
+  return pathname.startsWith("/proposal/") || pathname.startsWith("/api/proposal/")
+    ? "no-referrer"
+    : SECURITY_HEADERS["referrer-policy"];
+}
+
+function redirectResponse(url, status = 303, pathname = url.pathname) {
   return new Response(null, {
     status,
     headers: {
       location: url.toString(),
       ...SECURITY_HEADERS,
+      "referrer-policy": referrerPolicyFor(pathname),
     },
   });
 }
@@ -474,6 +484,7 @@ const pagesProxyWorker = {
     responseHeaders.delete("x-reese-origin-secret");
     responseHeaders.set("x-reese-cache", shouldCachePublicBookingPage ? "MISS" : "BYPASS");
     applySecurityHeaders(responseHeaders);
+    responseHeaders.set("referrer-policy", referrerPolicyFor(incomingUrl.pathname));
     if (location?.startsWith(WORKER_ORIGIN)) {
       responseHeaders.set("location", location.replace(WORKER_ORIGIN, incomingUrl.origin));
     }

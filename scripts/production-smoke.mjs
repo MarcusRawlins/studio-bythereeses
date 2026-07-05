@@ -114,6 +114,14 @@ export function evaluateProductionSmoke(results) {
   if (!mcpWorkflowToolsPresent) {
     errors.push("MCP tools/list should expose the project workflow automation tools.");
   }
+  // Optional checks: only run when the caller supplies these results (production
+  // runProductionSmoke() does; existing unit-test fixtures omit them and are unaffected).
+  if (results.proposalReferrerPolicy && results.proposalReferrerPolicy.referrerPolicy !== "no-referrer") {
+    errors.push("Proposal surfaces (/proposal/**) should send referrer-policy: no-referrer.");
+  }
+  if (results.defaultReferrerPolicy && results.defaultReferrerPolicy.referrerPolicy !== "strict-origin-when-cross-origin") {
+    errors.push("Non-proposal surfaces should keep the default strict-origin-when-cross-origin referrer-policy.");
+  }
 
   return {
     errors,
@@ -137,6 +145,17 @@ async function fetchHead(url) {
   return {
     status: response.status,
     location: response.headers.get("location"),
+  };
+}
+
+// L7 (phase-6-hardening-r2.md, Section 3): the proxy must force `no-referrer` on
+// proposal surfaces (token lives in the URL) and keep the default
+// strict-origin-when-cross-origin policy everywhere else.
+async function fetchReferrerPolicy(url) {
+  const response = await fetch(url, { method: "HEAD", redirect: "manual" });
+  return {
+    status: response.status,
+    referrerPolicy: response.headers.get("referrer-policy"),
   };
 }
 
@@ -202,6 +221,8 @@ async function runProductionSmoke() {
     financeReport: await fetchJson(`${studio}/api/agent/finance/report?paymentStatus=needs_reconciliation&expenseStatus=needs_reconciliation`, token),
     agentTasks: await fetchJson(`${studio}/api/agent/tasks?limit=5`, token),
     mcpTools: await callMcpToolsList(`${studio}/api/mcp`, token),
+    proposalReferrerPolicy: await fetchReferrerPolicy(`${studio}/proposal/smoke-check-${Date.now()}`),
+    defaultReferrerPolicy: await fetchReferrerPolicy(`${studio}/admin/login`),
   };
   const firstProjectId = results.agentProjects?.json?.projects?.[0]?.id;
   results.agentWorkflows = firstProjectId
