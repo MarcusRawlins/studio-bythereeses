@@ -163,7 +163,12 @@ Middleware becomes `async` (already edge; verify OpenNext supports async edge mi
 
 ### Config / secrets / env keys
 - New: `ADMIN_PROOF_SECRET` (Pages proxy env + Worker secret).
-- New: `ADMIN_PROOF_ENFORCE` — **[Fable-fix — BLOCKING: this is the break-glass against locking Tyler out of admin, so its location and rollback command must be exact].** Store it as a **Worker secret** (not a `wrangler.jsonc` var — changing a var requires a full `deploy` rebuild). Enforce path reads `env.ADMIN_PROOF_ENFORCE === "1"`. Fast enable: `wrangler secret put ADMIN_PROOF_ENFORCE` (new Worker version, no build). **Instant rollback (break-glass): `wrangler secret delete ADMIN_PROOF_ENFORCE`** (or set to `"0"`) → next request is proxy-only again, no code redeploy. A Cloudflare-dashboard secret edit is the GUI equivalent. **Pre-enforcement checklist step:** before flipping to enforce, prove the rollback works by toggling the secret off and confirming an admin page still loads, and confirm at least one admin request carried a valid proof in the log-only window.
+- New: `ADMIN_PROOF_ENFORCE` — **[Fable-fix — BLOCKING: this is the break-glass against locking Tyler out of admin, so its location and rollback command must be exact].** Store it as a **Worker secret** (not a `wrangler.jsonc` var — changing a var requires a full `deploy` rebuild). It is a **three-state** flag read by `adminProofMode(env)`:
+  - **unset / any other value → `off`** (default): the middleware does **not** evaluate the proof at all — strict fail-open, zero overhead, zero behavior change.
+  - **`"log"` → log-only observation window**: for `adminProofRequired(path)` requests the middleware evaluates `verifyAdminProxyProof`; on failure it emits a single structured `console.warn` line (`[admin-proof] missing/invalid proof for <method> <path>`, visible via `wrangler tail`) but **never blocks**. This is the coverage-proving window that makes the pre-enforcement checklist step below satisfiable.
+  - **`"1"` → enforce**: a required-but-missing/invalid proof yields a `404`.
+
+  Fast enable log-only: `wrangler secret put ADMIN_PROOF_ENFORCE` (value `log`); flip to enforce with value `1` — each is a new Worker version, no build. **Instant rollback (break-glass): `wrangler secret delete ADMIN_PROOF_ENFORCE`** (or set to `"0"`/any non-`1`/`log` value) → next request is proxy-only again (`off`), no code redeploy. A Cloudflare-dashboard secret edit is the GUI equivalent. **Pre-enforcement checklist step:** run the `"log"` window first, confirm via `wrangler tail` that real admin requests carry a valid proof (no `[admin-proof]` warnings for legitimate admin traffic), then prove the rollback works by toggling the secret off and confirming an admin page still loads before setting `"1"`.
 
 ### Files touched
 `pages-proxy/_worker.js`, `src/middleware.ts`, `src/lib/admin-proxy-auth.ts` (new), optionally `src/lib/origin-guard.ts` (export the surface-classification helpers), and the highest-value admin route handlers if `guardAdminApiRequest` is added.
@@ -174,10 +179,12 @@ Middleware becomes `async` (already edge; verify OpenNext supports async edge mi
 - Extend `scripts/production-smoke.mjs`: assert that a direct authenticated-looking request without the proof header to an admin API is rejected once `ADMIN_PROOF_ENFORCE=1` (post-cutover check).
 
 ### Rollout / rollback
+The `ADMIN_PROOF_ENFORCE` flag is three-state — `unset`/other = **off** (proof never evaluated), `"log"` = **observation window** (evaluate + warn, never block), `"1"` = **enforce** (404 on fail). Do **not** conflate "unset" with "log-only": with the flag unset the middleware does zero proof work, so it produces no coverage signal. The `"log"` value is what makes the pre-enforcement coverage check real.
 1. Deploy proxy that **sets** the header (no app enforcement yet) + set `ADMIN_PROOF_SECRET` in both places.
-2. Deploy app with verify code but `ADMIN_PROOF_ENFORCE` unset → log-only / fail-open; watch `observability` logs for admin requests missing/failing proof (catches any admin path the classifier misses).
-3. After a clean window, set `ADMIN_PROOF_ENFORCE=1`.
-Rollback: unset `ADMIN_PROOF_ENFORCE` (instant, no redeploy) → back to proxy-only. Full rollback: redeploy prior proxy/app. Risk: a misclassified public route getting the proof requirement would 404 legitimately-public traffic — the phased flag + log-only window mitigates this.
+2. Deploy app with verify code, flag **unset** → strict fail-open (off): no behavior change while the app rolls out.
+3. Set `ADMIN_PROOF_ENFORCE="log"` → **log-only observation window**: `verifyAdminProxyProof` runs for admin surfaces and `console.warn`s on failure (visible via `wrangler tail`) but never blocks. Watch for `[admin-proof]` warnings on legitimate admin traffic — each one is a classifier miss to fix **before** enforcing.
+4. After a clean window (no warnings for real admin requests) and after proving the break-glass rollback works, set `ADMIN_PROOF_ENFORCE="1"` → enforce.
+Rollback: `wrangler secret delete ADMIN_PROOF_ENFORCE` (or set to `"0"`) → instant return to `off`/proxy-only, no redeploy. Full rollback: redeploy prior proxy/app. Risk: a misclassified public route getting the proof requirement would 404 legitimately-public traffic — the phased flag + `"log"` observation window mitigates this.
 
 ---
 

@@ -139,7 +139,7 @@ function isPublicAssetPath(pathname) {
   );
 }
 
-function isPortalPublicPath(pathname) {
+export function isPortalPublicPath(pathname) {
   return pathname === "/portal" || pathname.startsWith("/p/");
 }
 
@@ -147,7 +147,7 @@ function isStudioTrustedAgentApiPath(pathname) {
   return pathname === "/api/mcp" || pathname.startsWith("/api/agent/");
 }
 
-function isStudioPublicPath(pathname) {
+export function isStudioPublicPath(pathname) {
   return (
     pathname === "/admin/login" ||
     pathname === "/admin/logout" ||
@@ -165,7 +165,7 @@ function isStudioPublicPath(pathname) {
   );
 }
 
-function isSchedulePublicPath(pathname) {
+export function isSchedulePublicPath(pathname) {
   return (
     pathname.startsWith("/book/") ||
     pathname.startsWith("/api/scheduler/") ||
@@ -391,6 +391,11 @@ const pagesProxyWorker = {
     const rateLimited = rateLimitResponse(request, incomingUrl);
     if (rateLimited) return rateLimited;
 
+    // M4 (§2): set true once a Studio admin session is verified on a genuine
+    // admin surface, so the shared header-build site below mints the signed
+    // `x-reese-admin-proof` header for the origin to independently verify.
+    let adminSurfaceVerified = false;
+
     if (incomingUrl.hostname === "schedule.bythereeses.com") {
       if (incomingUrl.pathname === "/") {
         return redirectResponse(new URL("/book/wedding-photography-discovery-call", incomingUrl.origin), 303);
@@ -421,8 +426,13 @@ const pagesProxyWorker = {
       if (incomingUrl.pathname === "/admin/auth/google") {
         return adminGoogleAuth(request);
       }
-      if (!isStudioPublicPath(incomingUrl.pathname) && !(await verifyAdminSession(request, env))) {
-        return redirectResponse(new URL(`/admin/login?next=${encodeURIComponent(incomingUrl.pathname + incomingUrl.search)}`, incomingUrl.origin), 303);
+      if (!isStudioPublicPath(incomingUrl.pathname)) {
+        if (!(await verifyAdminSession(request, env))) {
+          return redirectResponse(new URL(`/admin/login?next=${encodeURIComponent(incomingUrl.pathname + incomingUrl.search)}`, incomingUrl.origin), 303);
+        }
+        // Admin session verified on an admin surface — the origin may be given a
+        // signed proof (built at the shared header-build site below).
+        adminSurfaceVerified = true;
       }
     }
 
@@ -465,11 +475,28 @@ const pagesProxyWorker = {
     }
 
     const headers = new Headers(request.headers);
+    // Strip any client-supplied trust headers so they can never be spoofed
+    // through the proxy (for BOTH hosts). The proxy re-sets the legitimate
+    // values below. Deleting x-reese-origin-secret unconditionally also closes
+    // the latent gap where an inbound value passed through when
+    // ORIGIN_PROXY_SECRET was unset.
+    headers.delete("x-reese-admin-proof");
+    headers.delete("x-reese-origin-secret");
     headers.set("x-forwarded-host", incomingUrl.host);
     headers.set("x-forwarded-proto", incomingUrl.protocol.replace(":", ""));
     headers.set("x-reese-pages-proxy", "1");
     if (env.ORIGIN_PROXY_SECRET) {
       headers.set("x-reese-origin-secret", env.ORIGIN_PROXY_SECRET);
+    }
+    // M4 (§2): mint the signed admin proof after a verified admin session on an
+    // admin surface. Bound to method + host (the forwarded x-forwarded-host) +
+    // path + timestamp so it cannot be replayed against another route/host or
+    // outside the verifier's skew window.
+    if (adminSurfaceVerified && env.ADMIN_PROOF_SECRET) {
+      const tsSeconds = Math.floor(Date.now() / 1000);
+      const host = headers.get("x-forwarded-host") || incomingUrl.host;
+      const sig = await hmac(env.ADMIN_PROOF_SECRET, `${request.method}\n${host}\n${incomingUrl.pathname}\n${tsSeconds}`);
+      headers.set("x-reese-admin-proof", `v1.${tsSeconds}.${sig}`);
     }
     headers.delete("host");
     headers.delete("content-length");

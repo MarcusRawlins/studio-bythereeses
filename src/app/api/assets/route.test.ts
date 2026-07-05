@@ -209,6 +209,25 @@ async function main() {
     "proposal token is limited to contract_pdf",
   );
 
+  // 9. [N1] Signed-URL scope/scopeRef cross-check against the resolved asset row.
+  // A valid signature is not enough: a portal/proposal-scoped signature must be
+  // bound to THIS asset's project/proposal, else uniform 404.
+  // contract1 is project-1 / proposal-1.
+  const portalSignedWrong = await signAssetUrl(contract1.assetId, { ttlSeconds: 900, scope: "portal", scopeRef: "project-2" });
+  assert.equal((await get(portalSignedWrong)).status, 404, "portal-scope signed URL with a foreign projectId must 404");
+  const portalSignedRight = await signAssetUrl(contract1.assetId, { ttlSeconds: 900, scope: "portal", scopeRef: "project-1" });
+  assert.equal((await get(portalSignedRight)).status, 200, "portal-scope signed URL with the matching projectId must 200");
+
+  const proposalSignedWrong = await signAssetUrl(contract1.assetId, { ttlSeconds: 900, scope: "proposal", scopeRef: "proposal-2" });
+  assert.equal((await get(proposalSignedWrong)).status, 404, "proposal-scope signed URL with a foreign proposalId must 404");
+  const proposalSignedRight = await signAssetUrl(contract1.assetId, { ttlSeconds: 900, scope: "proposal", scopeRef: "proposal-1" });
+  assert.equal((await get(proposalSignedRight)).status, 200, "proposal-scope signed URL with the matching proposalId must 200");
+
+  // A portal-scoped signature (even with a real projectId ref) must not read a
+  // foreign project's asset — the ref must match THIS asset's row.
+  const portalSignedForeign = await signAssetUrl(contract2.assetId, { ttlSeconds: 900, scope: "portal", scopeRef: "project-1" });
+  assert.equal((await get(portalSignedForeign)).status, 404, "portal-scope signature must not read another project's asset");
+
   console.log("assets route tests passed");
 }
 

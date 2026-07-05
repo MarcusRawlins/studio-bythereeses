@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/db/client";
 import { assetObjects, portalAccessTokens, proposalAccessTokens } from "@/db/schema";
 import type { AssetRow } from "@/lib/assets";
+import { verifyAdminProxyProof } from "@/lib/admin-proxy-auth";
 import { assetKeyFromPathname, getAssetObject, verifyAssetUrl } from "@/lib/assets";
 import { hashProposalToken } from "@/lib/sales";
 
@@ -101,13 +102,25 @@ async function proposalTokenAuthorizes(rawToken: string, proposalId: string): Pr
 }
 
 async function isAuthorized(request: Request, url: URL, asset: AssetRow): Promise<boolean> {
-  // (a) Signed asset URL — includes the admin (scope='admin') path today.
-  // TODO(Task 6 / M4): once `verifyAdminProxyProof` exists, admins presenting a
-  // valid proxy proof may also be authorized here without a signed URL. Do not
-  // hard-depend on it — admin access is served via scope='admin' signed URLs
-  // until then.
-  if (url.searchParams.has("sig") && verifyAssetUrl(url).ok) {
+  // (a0) Admin via proxy proof (Task 6 / M4). Present only if the trusted proxy
+  // stamped it for a verified admin session; harmless (absent) otherwise, since
+  // `/api/assets/*` is proxy-public and the proof is not minted here in normal
+  // traffic. Signed scope='admin' URLs (below) remain the primary admin path.
+  if (await verifyAdminProxyProof(request)) {
     return true;
+  }
+
+  // (a) Signed asset URL. [N1] Beyond a valid signature, the signed scope/scopeRef
+  // must match THIS asset row so a portal/proposal-scoped signature can only
+  // serve its own object; a valid signature with a mismatched binding is a 404.
+  if (url.searchParams.has("sig")) {
+    const verified = verifyAssetUrl(url);
+    if (verified.ok) {
+      if (verified.scope === "admin") return true;
+      if (verified.scope === "portal" && verified.scopeRef === asset.projectId) return true;
+      if (verified.scope === "proposal" && verified.scopeRef === asset.proposalId) return true;
+      return false;
+    }
   }
 
   // (c) Proposal token — contract_pdf scoped to the object's proposal_id only.
