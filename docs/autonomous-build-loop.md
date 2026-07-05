@@ -33,8 +33,9 @@ reviewer prompt is seeded with the **Active-Learning Log** below.
 | 7a | Gallery delivery-link (provider-agnostic MVP) | ✅ deployed 2026-07-05 (dark) — Worker `0f7beefb`, migration 0086, `PORTAL_GALLERY_ENABLED` off |
 | 7b | Deep gallery provider integration (Pixieset/Pic-Time API) | 🅣 needs Tyler's provider choice + API credentials |
 | 8b | SMS (Twilio) | ✅ deployed 2026-07-05 (dark) — Worker `7ca815bf`, proxy `df082f06`, migration 0087; send-UI wiring = follow-up |
-| 8c | Automated sequences (dunning/nudges/reviews) | 🔵 speccing |
-| 9 | Financial completeness (refunds/disputes, QBO/Xero, tax/1099) | ⏭️ spec → build — money-movement pause |
+| 8c | Automated sequences (dunning/nudges/reviews) | ✅ deployed 2026-07-05 (dark) — Worker `3b78372e`, proxy `2913d3b4`, migration 0088 |
+| 9a | Finance completeness — refund/dispute WEBHOOK recording + QBO/Xero export + tax/1099 (NO money moved) | 🔵 speccing — safe to build+deploy dark |
+| 9b | Refund INITIATION (admin-triggered Stripe refund — MOVES money) | 🅣 MONEY-MOVEMENT PAUSE — build allowed, deploy needs Tyler's explicit go |
 | 10 | Intelligence + forecasting | ⏭️ spec → build |
 | 11 | Multi-user + RBAC | ⏭️ deferred until a real 2nd user |
 | — | Enablement flips (M4 log→enforce, CSP report→enforce, feature flags) | 🅣 Tyler runbook (deploy-record + per-phase) |
