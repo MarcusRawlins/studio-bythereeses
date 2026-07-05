@@ -275,6 +275,7 @@ async function main() {
       "studio_update_expense",
       "studio_create_communication",
       "studio_update_communication",
+      "studio_draft_sms",
     ],
   );
 

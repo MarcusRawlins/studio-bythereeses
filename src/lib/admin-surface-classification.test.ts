@@ -20,6 +20,8 @@ const studioPublic = [
   "/portal/proposals/abc", // Phase-6 fix (a): the whole /portal subtree is public
   "/api/portal/request-link", // Phase 6.5 self-service request endpoint (POST)
   "/api/inbound/inquiry-email", // Phase 8a inbound intake (self-authed by INBOUND_INTAKE_SECRET bearer)
+  "/api/twilio/inbound", // Phase 8b Twilio inbound webhook (self-authed by X-Twilio-Signature)
+  "/api/twilio/status", // Phase 8b Twilio status callback (self-authed by X-Twilio-Signature)
   "/p/some-token",
   "/proposal/some-token",
   "/api/proposal/some-token/accept",
@@ -42,6 +44,14 @@ assert.equal(isPortalPublicPath("/portal"), true, "/portal is a proxy portal-pub
 assert.equal(isPortalPublicPath("/portal/login"), true, "/portal/login is a proxy portal-public path");
 assert.equal(isPortalPublicPath("/portal/login/verify/tok"), true, "the verify route is proxy portal-public");
 assert.equal(isPortalPublicPath("/portal/proposals/abc"), true, "/portal/proposals/* is proxy portal-public");
+
+// Phase 8b: pin both Twilio webhook paths — admin-proof-exempt AND proxy-public —
+// so a future edit that drops either classification (silently losing every STOP/
+// status callback) fails loudly.
+assert.equal(adminProofRequired("/api/twilio/inbound"), false, "/api/twilio/inbound must be admin-proof-exempt");
+assert.equal(adminProofRequired("/api/twilio/status"), false, "/api/twilio/status must be admin-proof-exempt");
+assert.equal(isStudioPublicPath("/api/twilio/inbound"), true, "/api/twilio/inbound must be proxy-public");
+assert.equal(isStudioPublicPath("/api/twilio/status"), true, "/api/twilio/status must be proxy-public");
 
 // The client portal proposal detail and the magic-link surfaces are kept public
 // by the classifier (client-reachable) — assert the classifier decisions

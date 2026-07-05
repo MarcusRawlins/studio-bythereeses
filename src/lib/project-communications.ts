@@ -2,7 +2,9 @@ import { db } from "@/db/client";
 import { clients, projectCommunications, projectParticipants, projects } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { requireProjectSourceForTask } from "@/lib/agent-sources";
+import { SmsConsentError, sendProjectSms, type SmsSendResult } from "@/lib/sms";
 import { and, asc, desc, eq } from "drizzle-orm";
+import { createHash } from "node:crypto";
 
 const communicationDirections = ["outbound", "inbound", "internal"] as const;
 const communicationChannels = ["email", "sms", "call", "note"] as const;
@@ -127,13 +129,22 @@ async function createProjectCommunication(projectId: string, input: CreateProjec
 
   const recipientClient = await resolveRecipient(projectId, cleanText(input.clientId));
   const now = new Date().toISOString();
-  const status = enumValue(input.status, communicationStatuses, "draft");
+  const channel = enumValue(input.channel, communicationChannels, "email");
+  const requestedStatus = enumValue(input.status, communicationStatuses, "draft");
+  // B1(b) communication-integrity fix (spec §3.0b): an AGENT-authored `sms` row
+  // can only ever land `status = "draft"`. This forbids a prompt-injected agent
+  // minting a forged `channel:"sms", status:"sent"` ("we texted them" that never
+  // went out) via the generic studio_create_communication tool. It makes "only
+  // Tyler's admin send can mark an SMS sent" a table-level invariant, not a
+  // per-tool convention. Email (and non-agent actors) are UNAFFECTED — the
+  // narrowing is the `sms` channel for the agent actor only.
+  const status = actor.actorType === "agent" && channel === "sms" ? "draft" : requestedStatus;
   const communication = {
     id: crypto.randomUUID(),
     projectId,
     clientId: recipientClient?.id ?? cleanText(input.clientId),
     direction: enumValue(input.direction, communicationDirections, "outbound"),
-    channel: enumValue(input.channel, communicationChannels, "email"),
+    channel,
     status,
     subject: cleanText(input.subject),
     body,
@@ -183,7 +194,16 @@ async function updateProjectCommunication(
   if (!nextBody) throw new Error("Communication body is required.");
 
   const now = new Date().toISOString();
-  const nextStatus = hasOwn(input, "status") ? enumValue(input.status, communicationStatuses, communication.status as typeof communicationStatuses[number]) : communication.status;
+  const nextChannel = hasOwn(input, "channel") ? enumValue(input.channel, communicationChannels, communication.channel as typeof communicationChannels[number]) : communication.channel;
+  const requestedStatus = hasOwn(input, "status") ? enumValue(input.status, communicationStatuses, communication.status as typeof communicationStatuses[number]) : communication.status;
+  // B1(b) communication-integrity fix (spec §3.0b): an agent can never flip an
+  // `sms` row (existing OR newly re-channeled to sms) into `sent`/`queued`. Any
+  // agent-supplied send-state on an sms row is clamped back to "draft" so the
+  // approval trail stays truthful. Email/non-agent actors are unaffected.
+  const nextStatus =
+    actor.actorType === "agent" && nextChannel === "sms" && (requestedStatus === "sent" || requestedStatus === "queued")
+      ? "draft"
+      : requestedStatus;
   const nextSentAt = hasOwn(input, "sentAt") ? cleanText(input.sentAt) : communication.sentAt;
   const nextSourceType = hasOwn(input, "sourceType") ? cleanText(input.sourceType) : communication.sourceType;
   const nextSourceId = hasOwn(input, "sourceId") ? cleanText(input.sourceId) : communication.sourceId;
@@ -196,7 +216,7 @@ async function updateProjectCommunication(
 
   const updates = {
     direction: hasOwn(input, "direction") ? enumValue(input.direction, communicationDirections, communication.direction as typeof communicationDirections[number]) : communication.direction,
-    channel: hasOwn(input, "channel") ? enumValue(input.channel, communicationChannels, communication.channel as typeof communicationChannels[number]) : communication.channel,
+    channel: nextChannel,
     status: nextStatus,
     subject: hasOwn(input, "subject") ? cleanText(input.subject) : communication.subject,
     body: nextBody,
@@ -277,6 +297,108 @@ export async function updateProjectCommunicationFromForm(projectId: string, comm
     scheduledFor: formString(formData, "scheduledFor"),
     sentAt: formString(formData, "sentAt"),
   }, studioActor);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8b — admin-only "send approved SMS" action. This is the SOLE place
+// `sendProjectSms` is invoked; it is behind the admin session + Phase 6 admin
+// proof (like every other Studio server action). No agent/MCP/automation/inbound
+// path reaches it.
+// ---------------------------------------------------------------------------
+
+export type SendApprovedSmsResult =
+  | { ok: true; communicationId: string; result: Extract<SmsSendResult, { ok: true }> }
+  | { ok: false; reason: "not_found" | "not_sms" | "not_draft" | "hash_mismatch" | "no_consent" | "bad_number" | "suppressed" | "flag_off"; message: string };
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+/** B1(a) content-binding (spec §3.0a): approval is bound to the exact bytes Tyler
+ * reviewed, not to a mutable row id. The send form submits `approvedBodyHash`
+ * (sha256 of the reviewed body); we recompute the hash of the STORED row body and
+ * REFUSE (no Twilio call) on mismatch — closing the draft-swap TOCTOU where a
+ * prompt-injected agent rewrites the draft after review but before send. */
+export async function sendApprovedProjectSms(input: {
+  projectId: string;
+  communicationId: string;
+  approvedBodyHash: string;
+  actorName?: string;
+}): Promise<SendApprovedSmsResult> {
+  const communication = await db.query.projectCommunications.findFirst({
+    where: (row, { and, eq }) => and(eq(row.id, input.communicationId), eq(row.projectId, input.projectId)),
+  });
+  if (!communication) {
+    return { ok: false, reason: "not_found", message: "SMS draft not found." };
+  }
+  if (communication.channel !== "sms") {
+    return { ok: false, reason: "not_sms", message: "This communication is not an SMS." };
+  }
+  // Only a NOT-yet-sent OUTBOUND draft can be sent. This refuses (zero Twilio
+  // calls): (a) a form re-submit of an already-"sent" row (no double-send), and
+  // (b) an INBOUND row — a client's STOP/reply (direction "inbound") must never be
+  // "sent" back to them, which would also clobber its providerMessageId.
+  if (communication.status !== "draft" || communication.direction !== "outbound") {
+    return { ok: false, reason: "not_draft", message: "Only an unsent outbound SMS draft can be sent." };
+  }
+
+  const storedHash = sha256Hex(communication.body ?? "");
+  if (!input.approvedBodyHash || storedHash !== input.approvedBodyHash) {
+    // The stored draft differs from what Tyler reviewed — refuse, NO Twilio call.
+    await logActivity({
+      projectId: input.projectId,
+      clientId: communication.clientId,
+      action: "project.communication.sms_send_refused",
+      actorType: "admin",
+      actorName: input.actorName || "Tyler",
+      metadata: { communicationId: input.communicationId, reason: "hash_mismatch" },
+    });
+    return {
+      ok: false,
+      reason: "hash_mismatch",
+      message: "This SMS draft changed after it was reviewed. Re-review before sending.",
+    };
+  }
+
+  let result: SmsSendResult;
+  try {
+    result = await sendProjectSms({
+      projectId: input.projectId,
+      clientId: communication.clientId,
+      body: communication.body,
+      communicationId: communication.id,
+      actorName: input.actorName,
+    });
+  } catch (error) {
+    if (error instanceof SmsConsentError) {
+      return { ok: false, reason: "no_consent", message: "Client has not opted in to SMS." };
+    }
+    throw error;
+  }
+
+  if (!result.ok) {
+    const messages: Record<Extract<SmsSendResult, { ok: false }>["reason"], string> = {
+      flag_off: "SMS is disabled.",
+      no_consent: "Client has not opted in to SMS.",
+      bad_number: "The client's phone number is not a valid SMS destination.",
+      suppressed: "This number has texted STOP and is suppressed.",
+    };
+    return { ok: false, reason: result.reason, message: messages[result.reason] };
+  }
+
+  return { ok: true, communicationId: communication.id, result };
+}
+
+export async function sendApprovedProjectSmsFromForm(formData: FormData): Promise<SendApprovedSmsResult> {
+  const projectId = cleanText(formString(formData, "projectId"));
+  const communicationId = cleanText(formString(formData, "communicationId"));
+  const approvedBodyHash = cleanText(formString(formData, "approvedBodyHash"));
+  if (!projectId || !communicationId) throw new Error("Project and communication are required.");
+  return sendApprovedProjectSms({
+    projectId,
+    communicationId,
+    approvedBodyHash: approvedBodyHash ?? "",
+  });
 }
 
 export async function listProjectCommunications(projectId: string, input: { status?: string | null; limit?: number | null } = {}) {

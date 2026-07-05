@@ -16,7 +16,25 @@ export const clients = sqliteTable("clients", {
   communicationPreference: text("communication_preference"),
   referralSource: text("referral_source"),
   notes: text("notes"),
+  // Phase 8b (SMS/TCPA): client-level SMS consent state. NOT NULL DEFAULT false so
+  // every existing client is opted-OUT until an explicit opt-in — the legally safe
+  // default. These are CURRENT-STATE only; the append-only proof of every consent
+  // change lives in activity_logs (client.sms.opted_in / client.sms.opted_out).
+  smsOptIn: integer("sms_opt_in", { mode: "boolean" }).notNull().default(false),
+  smsConsentSource: text("sms_consent_source"), // "booking" | "portal" | "admin" | "inbound_start" | null
+  smsConsentAt: text("sms_consent_at"),
+  smsOptOutAt: text("sms_opt_out_at"),
+  smsLastConsentNote: text("sms_last_consent_note"),
   ...timestamps,
+});
+
+// Phase 8b (SMS/TCPA): number-level suppression store. A STOP can arrive from a
+// number that matches no current client, so the send gate consults this table
+// independently of the client columns. Suppression WINS over the client column.
+export const smsSuppressions = sqliteTable("sms_suppressions", {
+  phoneE164: text("phone_e164").primaryKey(), // normalized destination; PRIMARY KEY = dedupe
+  stoppedAt: text("stopped_at").notNull(),
+  note: text("note"),
 });
 
 export const projects = sqliteTable("projects", {
@@ -351,6 +369,10 @@ export const projectCommunications = sqliteTable("project_communications", {
   sourceType: text("source_type"),
   sourceId: text("source_id"),
   createdBy: text("created_by").notNull().default("admin"),
+  // Phase 8b (SMS): Twilio Message SID + latest delivery status, updated by the
+  // status callback route keyed on providerMessageId.
+  providerMessageId: text("provider_message_id"),
+  deliveryStatus: text("delivery_status"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });

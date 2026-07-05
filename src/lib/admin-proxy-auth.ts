@@ -199,6 +199,12 @@ export function adminProofRequired(pathname: string): boolean {
   // through to `return true` and ADMIN_PROOF_ENFORCE would 404 the intake
   // Worker's POST (forcing every lead to the human fallback — no ingest at all).
   if (path === "/api/inbound/inquiry-email") return false;
+  // Phase 8b: Twilio inbound-message + delivery-status webhooks — authenticated by
+  // their own X-Twilio-Signature (HMAC-SHA1 over the configured URL), not the
+  // admin proof. Without this they fall through to `return true` and
+  // ADMIN_PROOF_ENFORCE would 404 Twilio's POST (silently losing every STOP/
+  // status). NOT in the origin-guard bypass — reachable only through the proxy.
+  if (path === "/api/twilio/inbound" || path === "/api/twilio/status") return false;
 
   // Client portal (public, client-reachable). BLOCKING [B1]: the ENTIRE /portal
   // subtree must stay public — including /portal/login, /portal/login/verify/*,

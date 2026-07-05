@@ -655,6 +655,28 @@ function migrate(database: LocalDatabase) {
     CREATE INDEX IF NOT EXISTS idx_project_galleries_project_status ON project_galleries(project_id, status);
   `);
 
+  // Phase 8b (SMS/TCPA): additive consent columns on clients, delivery columns on
+  // project_communications, and the number-level sms_suppressions table. Idempotent
+  // so local dev (better-sqlite3) and any partially-migrated prod D1 converge
+  // without a blanket `migrations apply`. addColumnIfMissing handles the columns;
+  // CREATE TABLE IF NOT EXISTS handles the suppression store.
+  addColumnIfMissing(database, "clients", "sms_opt_in", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(database, "clients", "sms_consent_source", "TEXT");
+  addColumnIfMissing(database, "clients", "sms_consent_at", "TEXT");
+  addColumnIfMissing(database, "clients", "sms_opt_out_at", "TEXT");
+  addColumnIfMissing(database, "clients", "sms_last_consent_note", "TEXT");
+  addColumnIfMissing(database, "project_communications", "provider_message_id", "TEXT");
+  addColumnIfMissing(database, "project_communications", "delivery_status", "TEXT");
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS sms_suppressions (
+      phone_e164 TEXT PRIMARY KEY NOT NULL,
+      stopped_at TEXT NOT NULL,
+      note TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_communications_provider_message_id
+      ON project_communications(provider_message_id);
+  `);
+
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),
   );

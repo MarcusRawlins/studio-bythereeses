@@ -32,6 +32,14 @@ const RATE_LIMITS = {
   // NOT origin-bypass-public), so keeping every request behind the proxy is what
   // prevents email-bombing.
   requestLink: { max: 5, windowSeconds: 900 },
+  // Phase 8b: a DEDICATED, GENEROUS ceiling for the Twilio webhooks — NOT
+  // publicMutation. The proxy limiter runs BEFORE signature verification, and all
+  // Twilio traffic arrives from a small set of egress IPs (concentrating on one
+  // bucket key), so the tight publicMutation cap (20/300s) would 429 a genuine
+  // STOP or drop a status-callback fan-out — a dropped STOP is a COMPLIANCE loss.
+  // The real trust boundary is the X-Twilio-Signature at the origin; this cap is
+  // only an abuse ceiling, so err generous.
+  twilioWebhook: { max: 600, windowSeconds: 60 },
 };
 
 function base64UrlEncode(input) {
@@ -214,6 +222,15 @@ export function isStudioPublicPath(pathname) {
     // NOT in the origin-guard bypass; it is reachable only through the proxy,
     // which stamps the origin secret.
     pathname === "/api/inbound/inquiry-email" ||
+    // Phase 8b: Twilio inbound-message + delivery-status webhooks. Self-
+    // authenticated by the X-Twilio-Signature (HMAC-SHA1 over the configured
+    // URL), so they must NOT be gated behind the admin Google session —
+    // otherwise Twilio's unauthenticated-to-the-proxy POST is 303'd to
+    // /admin/login (a 200 login PAGE), Twilio reads 2xx as success, and the
+    // STOP/status is silently lost. Like 8a, NOT in the origin-guard bypass;
+    // reachable only through the proxy (which stamps the origin secret).
+    pathname === "/api/twilio/inbound" ||
+    pathname === "/api/twilio/status" ||
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/api/proposal/") ||
     // Private R2 asset serving (Phase 6 §1b): signed-URL / portal / proposal
@@ -253,6 +270,15 @@ export function rateLimitKind(url, request) {
   // (POST) BEFORE the generic /portal → tokenAccess branch below; the verify GET
   // route (/portal/login/verify/*) stays under tokenAccess (token consumption).
   if (request.method !== "GET" && pathname === "/api/portal/request-link") return "requestLink";
+  // Phase 8b: Twilio webhooks get their own generous kind (NOT publicMutation) so
+  // a burst of STOPs / status callbacks is never 429'd. Match BEFORE the
+  // publicMutation branch below.
+  if (
+    request.method !== "GET" &&
+    (pathname === "/api/twilio/inbound" || pathname === "/api/twilio/status")
+  ) {
+    return "twilioWebhook";
+  }
   if (
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/p/") ||

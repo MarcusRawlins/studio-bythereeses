@@ -1183,6 +1183,23 @@ const studioTools = [
       additionalProperties: false,
     },
   },
+  {
+    name: "studio_draft_sms",
+    title: "Draft SMS",
+    description: "Drafts an SMS for Tyler to review and send. Never sends. This ALWAYS creates a draft, agent-authored SMS communication row (channel:sms, status:draft, createdBy:agent) regardless of any status/channel/createdBy supplied — it has zero send authority and can never trigger a Twilio message.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string", description: "Canonical Studio project id." },
+        clientId: { type: "string", description: "Optional project client id. Defaults to the primary project client." },
+        body: { type: "string", description: "SMS draft text for Tyler to review. Keep it short; opt-out language is appended at send time." },
+        sourceType: { type: "string", description: "Optional source label. Use project_source when sourceId points at project_sources.id." },
+        sourceId: { type: "string", description: "Optional source record id for traceability." },
+      },
+      required: ["projectId", "body"],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 function success(id: JsonRpcId, result: Record<string, unknown>): JsonRpcResponse {
@@ -2854,6 +2871,25 @@ async function callTool(params: unknown) {
       if (hasArg(args, key)) patch[key] = optionalStringArg(args, key);
     }
     const communication = await updateProjectCommunicationFromAgent(projectId, stringArg(args, "communicationId"), patch);
+    return textToolResult({ communication });
+  }
+
+  if (name === "studio_draft_sms") {
+    const projectId = stringArg(args, "projectId");
+    // HARD-FORCE channel:"sms", status:"draft", direction:"outbound". The hostile
+    // fields (status/channel/createdBy) are never read from args — an agent can
+    // never mint a sent/queued SMS or trigger a send. The real enforcement is the
+    // §3.0(b) boundary in createProjectCommunicationFromAgent (agent+sms ⇒ draft),
+    // so even the generic studio_create_communication cannot bypass it.
+    const communication = await createProjectCommunicationFromAgent(projectId, {
+      clientId: optionalStringArg(args, "clientId"),
+      direction: "outbound",
+      channel: "sms",
+      status: "draft",
+      body: stringArg(args, "body"),
+      sourceType: optionalStringArg(args, "sourceType"),
+      sourceId: optionalStringArg(args, "sourceId"),
+    });
     return textToolResult({ communication });
   }
 

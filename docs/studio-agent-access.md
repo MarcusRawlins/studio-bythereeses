@@ -87,6 +87,23 @@ npm run smoke:production
 
 Implementation: `requireTylerApprovalForAgentFinance` in `src/lib/sales.ts`, `requireTylerApprovalForAgentSchedulerPayment` in `src/lib/scheduler.ts`. Covered by `src/lib/studio-mcp.test.ts` and agent route tests.
 
+## Phase 8b — SMS (Twilio) Enable Runbook (Tyler)
+
+Built **dark**: `SMS_ENABLED` off, `TWILIO_*` unset → prod fail-closed. Drafting (`studio_draft_sms`) and inbound STOP-handling stay live regardless; only the outbound transport is gated. Enablement flips are NOT autonomous — Tyler completes these steps.
+
+**Rollout order (do before flipping):** (1) apply migration `0087` to prod **before** the Worker deploy — the five `clients` consent columns are read on an always-on code path (the consent gate runs independent of the flag), so existing client reads risk `no such column` if the Worker ships first. Use the idempotent direct `d1 execute --file` pattern; verify the columns + row sanity. (2) Deploy the app Worker (webhook + send helper + admin action + draft tool), `SMS_ENABLED` unset, `TWILIO_*` unset. (3) Deploy the Pages-proxy with the classifier edits (`isStudioPublicPath` + `twilioWebhook` rate-limit kind).
+
+**Tyler's provisioning steps:**
+1. Create/configure a Twilio account; buy an SMS-capable number (or provision a Messaging Service).
+2. **US A2P 10DLC brand + campaign registration** for the number/Messaging Service (carrier requirement; unregistered traffic is filtered). Lead-time item (days).
+3. Configure the number's **Messaging webhook** → `https://studio.bythereeses.com/api/twilio/inbound` (POST); **Status Callback** → `…/api/twilio/status`. These are **two distinct URLs** (B2).
+4. Enable Twilio **Advanced Opt-Out** on the Messaging Service so `HELP`/`STOP`/`START` are answered/enforced carrier-side in addition to our mirror.
+5. Set Worker secrets/vars: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, and the two per-route signing constants `TWILIO_PUBLIC_WEBHOOK_URL_INBOUND` / `TWILIO_PUBLIC_WEBHOOK_URL_STATUS` — each set to the **exact** URL configured in step 3 (used for signature verification and as the outbound `StatusCallback`). A mismatch between these constants and the console URLs is a designed-in `403`; double-check they are byte-identical.
+6. Set `SMS_ENABLED=1`.
+7. Send one consented test message to Tyler's phone; reply `STOP` then `START` and confirm the `sms_suppressions` row appears/disappears, `clients.smsOptIn` flips both ways, an inbound record is visible, and delivery status logs via the status callback.
+
+**Rollback (instant, non-destructive):** `wrangler secret delete SMS_ENABLED` (or set `0`) → transport no-ops; drafts remain, nothing sends. `wrangler secret delete TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER` → prod fail-closed throw (belt-and-suspenders). **Do NOT drop `sms_suppressions`** — a recorded `STOP` must survive a feature toggle. The `0087` columns/table are additive and harmless when unused; no down-migration.
+
 ## Remaining Live Integration Requirements
 
 Before treating production as fully operational for client-facing flows:
@@ -133,6 +150,12 @@ Every secret/credential Studio depends on, where it lives, who/what consumes it,
 | `RESEND_*` | Worker secret | Email delivery | Provider rotation |
 | `CLOUDFLARE_API_TOKEN` | keychain `reese-crm-cloudflare-api-token` | Deploy, backup/D1 export, `npm run drill:restore` source data | Scheduled |
 | `INBOUND_INTAKE_SECRET` *(Phase 8a — inquiry-email intake)* | `reese-inquiry-intake` Worker secret; app Worker secret | Intake Worker → `POST /api/inbound/inquiry-email` (write-triage-only; cannot create projects, move money, or send email). Dedicated + independently rotatable — NOT the shared agent token. | Suspected exposure; rotate independently of `STUDIO_AGENT_API_TOKEN` |
+| `TWILIO_ACCOUNT_SID` *(Phase 8b — SMS)* | app Worker secret | `src/lib/sms.ts` (Basic-auth user; Messages URL). Fail-closed in prod when unset. | Provider rotation |
+| `TWILIO_AUTH_TOKEN` *(Phase 8b — SMS)* | app Worker secret | `src/lib/sms.ts` (Basic-auth pass) **AND** the webhook HMAC-SHA1 signing key for `/api/twilio/inbound` + `/api/twilio/status`. **Dual role** — a leak compromises both send auth and inbound trust; rotation invalidates in-flight signature checks + send auth simultaneously. Never log. | Suspected exposure |
+| `TWILIO_FROM_NUMBER` *(Phase 8b — SMS)* | app Worker secret | `src/lib/sms.ts` (`From`). E.164 sending number / Messaging Service SID. | Provider rotation |
+| `TWILIO_PUBLIC_WEBHOOK_URL_INBOUND` *(Phase 8b — SMS)* | app Worker var/secret | `/api/twilio/inbound` signature verify. The **exact** inbound-webhook URL configured in the Twilio console; signed literal, not header-derived (B2). Route `503`s if unset. | On webhook URL change |
+| `TWILIO_PUBLIC_WEBHOOK_URL_STATUS` *(Phase 8b — SMS)* | app Worker var/secret | `/api/twilio/status` signature verify **and** the `sms.ts` outbound `StatusCallback` param. Must be byte-identical in the Twilio config, the send param, and the status route verify constant (B2). Route `503`s if unset. | On webhook URL change |
+| `SMS_ENABLED` *(Phase 8b — SMS)* | app Worker var | `src/lib/sms.ts` send gate + admin send action. Flag, **default OFF** (`"1"` to enable). Drafting + STOP-handling stay live when off; only the transport is gated. Rollback = delete / set `0`. | n/a (flag) |
 
 Ops stabilization checklist cross-reference: `docs/ops-stabilization-checklist.md` "Next Branch Plan" item 6. Security-model cross-reference: `docs/security-model.md` "Remaining Hardening".
 
@@ -250,6 +273,7 @@ Available tools:
 - `studio_create_communication`: creates a canonical project communication draft or logged message, usually from discovery-call source material.
 - `studio_update_communication`: updates an existing canonical communication draft/log, such as marking a drafted follow-up sent.
 - `studio_attach_gallery_link`: stages a provider gallery delivery link (Pixieset/Pic-Time/Cloudinary/other) against a project. **Draft/attach-only** — always creates a `status: "draft"`, `createdBy: "agent"` row regardless of any `status`/`createdBy` supplied, so an agent can never publish a client-visible gallery or send anything to the client. Tyler reviews and flips it to `delivered` in Studio admin.
+- `studio_draft_sms` *(Phase 8b)*: drafts an SMS for Tyler to review and send. **Draft-only — never sends.** Always writes a `channel: "sms"`, `status: "draft"`, `createdBy: "agent"` communication row regardless of any `status`/`channel`/`createdBy` supplied, so an agent can never mint a "sent" SMS or trigger a Twilio message. The real enforcement is a table-level boundary (`createProjectCommunicationFromAgent` clamps any agent-authored `sms` row to `draft` — the generic `studio_create_communication`/`studio_update_communication` tools cannot bypass it). Only Tyler's admin "send approved SMS" action (`sendApprovedProjectSms`, content-bound by a sha256 of the reviewed body) actually sends, and only when `SMS_ENABLED=1`, the client is opted-in, and the number is not suppressed. Consent + suppression + fail-closed transport are enforced in `src/lib/sms.ts`.
 
 ### Get Settings
 
