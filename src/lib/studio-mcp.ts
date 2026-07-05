@@ -2,6 +2,7 @@ import { db } from "@/db/client";
 import { agentTasks, clients, expenses, invoicePayments, invoices, projectParticipants, projects, projectWorkflowRuns, projectWorkflowSteps, proposalLineItems, proposals, questionnaireResponses, questionnaires, schedulerBookings, schedulerMeetingTypes, templates, vendors } from "@/db/schema";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { createProjectSourceFromAgent, updateProjectSourceFromAgent } from "./agent-sources";
+import { attachProjectGalleryFromAgent, type AgentGalleryAttachInput } from "./gallery";
 import { claimNextAgentTask, createAgentTask, hydrateAgentTaskLinkedSource, hydrateAgentTaskLinkedSources, listAgentTasks, updateAgentTaskStatus } from "./agent-tasks";
 import { getAgentFinanceReport } from "./agent-finance";
 import { getAgenda, type AgendaCategory } from "./agenda";
@@ -508,6 +509,24 @@ const studioTools = [
         sourceId: { type: "string", description: "Optional source record id for traceability." },
       },
       required: ["projectId", "locationId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "studio_attach_gallery_link",
+    title: "Attach Gallery Link",
+    description: "Stage a provider gallery delivery link (Pixieset, Pic-Time, Cloudinary, or other) against a project for Tyler to review. Draft/attach-only: this ALWAYS creates a draft, agent-authored gallery row — it can never publish a client-visible gallery or send anything to the client, regardless of any status field supplied.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string", description: "Canonical Studio project id." },
+        title: { type: "string", description: "Gallery title, e.g. \"Engagement gallery\" or \"Wedding gallery\"." },
+        url: { type: "string", description: "https:// provider delivery URL. Only https URLs are ever stored." },
+        provider: { type: "string", description: "Optional provider label such as Pixieset, Pic-Time, or Cloudinary." },
+        passcode: { type: "string", description: "Optional provider-side gallery passcode, display-only." },
+        expiresAt: { type: "string", description: "Optional provider expiry date/time (display only, \"available until\")." },
+      },
+      required: ["projectId", "title", "url"],
       additionalProperties: false,
     },
   },
@@ -1840,6 +1859,27 @@ async function projectContextResult(projectRecord: ProjectContextRecord) {
         })),
       };
     }),
+    // Phase 7a: always-on agent read of gallery delivery links. Sourced from
+    // `projectRecord.galleries`, which `getProject()` (src/lib/crm.ts) already
+    // fetches behind its own try/catch — a missing project_galleries table
+    // (pre-0086 deploy) degrades to `[]` there instead of throwing, so this
+    // "working production tool today" cannot 500 on a deploy-ordering race.
+    // All statuses are included (not just "delivered") because this is a
+    // trusted backoffice reader, unlike the flag-gated, delivered-only portal
+    // reader. Do not re-sort by `status` — lexicographic order
+    // (archived < delivered < draft) would surface drafts oddly; the
+    // deliveredAt/createdAt recency order from getProject() is preserved.
+    galleries: projectRecord.galleries.map((gallery) => ({
+      id: gallery.id,
+      title: gallery.title,
+      provider: gallery.provider,
+      url: gallery.url,
+      status: gallery.status,
+      passcode: gallery.passcode,
+      deliveredAt: gallery.deliveredAt,
+      expiresAt: gallery.expiresAt,
+      createdBy: gallery.createdBy,
+    })),
     expenses: expenseRows.map((row) => ({
       id: row.expense.id,
       vendorId: row.vendor.id,
@@ -2491,6 +2531,12 @@ async function callTool(params: unknown) {
     const projectId = stringArg(args, "projectId");
     const location = await createProjectLocationFromAgent(projectId, args as AgentProjectLocationInput);
     return textToolResult({ location });
+  }
+
+  if (name === "studio_attach_gallery_link") {
+    const projectId = stringArg(args, "projectId");
+    const gallery = await attachProjectGalleryFromAgent(projectId, args as AgentGalleryAttachInput);
+    return textToolResult({ gallery });
   }
 
   if (name === "studio_update_project_location") {

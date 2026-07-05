@@ -575,6 +575,28 @@ export const inboundInquiries = sqliteTable("inbound_inquiries", {
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
 
+// Phase 7a: provider-agnostic gallery delivery links. Provider-managed gallery
+// (Pixieset/Pic-Time/Cloudinary/other) — Studio stores the admin-pasted https
+// delivery URL only, never an owned asset. `provider` is free text (not an
+// enum) so 7a stays provider-agnostic. `status` defaults to "draft" so a
+// freshly attached gallery is admin-only until explicitly marked "delivered".
+export const projectGalleries = sqliteTable("project_galleries", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  provider: text("provider"),
+  title: text("title").notNull(),
+  url: text("url").notNull(),
+  // draft | delivered | archived
+  status: text("status").notNull().default("draft"),
+  passcode: text("passcode"),
+  deliveredAt: text("delivered_at"),
+  expiresAt: text("expires_at"),
+  // admin | agent
+  createdBy: text("created_by").notNull().default("admin"),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
 export const activityLogs = sqliteTable("activity_logs", {
   id: text("id").primaryKey(),
   projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
@@ -615,3 +637,4 @@ export type PortalAccessToken = typeof portalAccessTokens.$inferSelect;
 export type AssetObject = typeof assetObjects.$inferSelect;
 export type ActivityLog = typeof activityLogs.$inferSelect;
 export type InboundInquiry = typeof inboundInquiries.$inferSelect;
+export type ProjectGallery = typeof projectGalleries.$inferSelect;

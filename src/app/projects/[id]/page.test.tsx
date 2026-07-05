@@ -114,10 +114,28 @@ async function main() {
     )
   `).run(now, now);
 
+  // Phase 7a: one safe gallery + one hand-seeded UNSAFE row (a non-https url
+  // that could only exist via a direct D1 edit, bypassing normalizeGalleryUrl)
+  // to exercise the admin belt-and-suspenders isGalleryUrlSafe re-check.
+  database.prepare(`
+    INSERT INTO project_galleries (
+      id, project_id, provider, title, url, status, passcode, delivered_at, expires_at, created_by, created_at, updated_at
+    ) VALUES
+      ('gallery-safe', 'project-1', 'Pixieset', 'Safe wedding gallery', 'https://client.pixieset.com/wedding', 'delivered', NULL, ?, NULL, 'admin', ?, ?),
+      ('gallery-unsafe', 'project-1', 'Custom', 'Hand-edited unsafe gallery', 'javascript:alert(document.cookie)', 'draft', NULL, NULL, NULL, 'admin', ?, ?)
+  `).run(now, now, now, now, now);
+
   const markup = renderToStaticMarkup(await ProjectDetailPage({
     params: Promise.resolve({ id: "project-1" }),
     searchParams: Promise.resolve({}),
   }));
+
+  // The safe gallery renders a clickable "Open gallery" anchor.
+  assert.match(markup, /href="https:\/\/client\.pixieset\.com\/wedding"[^>]*target="_blank"[^>]*rel="noopener noreferrer"/);
+  // The unsafe (hand-edited) gallery must NOT render a clickable href — the
+  // url only appears as inert, escaped, non-anchor text.
+  assert.doesNotMatch(markup, /href="javascript:/i);
+  assert.match(markup, /Unsafe gallery URL \(not shown as a link\)/);
 
   assert.match(markup, /INV-PROJECT-FEE/);
   assert.match(markup, /\$6,174 balance/);

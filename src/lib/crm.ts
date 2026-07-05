@@ -1,5 +1,5 @@
 import { db } from "@/db/client";
-import { activityLogs, clients, invoicePayments, invoices, portalAccessTokens, projectCommunications, projectEvents, projectLocations, projectParticipants, projectSources, projectTimelineItems, projects, proposalAccessTokens, proposals, questionnaireResponses, questionnaires, schedulerBookings, schedulerMeetingTypes } from "@/db/schema";
+import { activityLogs, clients, invoicePayments, invoices, portalAccessTokens, projectCommunications, projectEvents, projectGalleries, projectLocations, projectParticipants, projectSources, projectTimelineItems, projects, proposalAccessTokens, proposals, questionnaireResponses, questionnaires, schedulerBookings, schedulerMeetingTypes } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { createGoogleCalendarAllDayEvent, deleteGoogleCalendarEvent, updateGoogleCalendarAllDayEvent } from "@/lib/google-calendar";
 import { invoiceClientPayableBalanceCents } from "@/lib/invoice-balances";
@@ -454,6 +454,22 @@ export async function getProject(projectId: string) {
     paymentsByInvoice.set(payment.invoiceId, [...(paymentsByInvoice.get(payment.invoiceId) ?? []), payment]);
   }
 
+  // Phase 7a: defense-in-depth try/catch here too (this record also feeds the
+  // always-on `studio_get_project_context` agent reader via
+  // `projectContextResult(await getProject(projectId))`) — a missing
+  // project_galleries table degrades to `[]` instead of breaking the project
+  // detail page or the agent tool.
+  let galleries: Array<typeof projectGalleries.$inferSelect> = [];
+  try {
+    galleries = await db.query.projectGalleries.findMany({
+      where: eq(projectGalleries.projectId, projectId),
+      orderBy: [desc(projectGalleries.deliveredAt), desc(projectGalleries.createdAt)],
+    });
+  } catch (error) {
+    console.error("project_galleries read failed; returning []", error);
+    galleries = [];
+  }
+
   return {
     project,
     clients: rows.map((row) => row.client),
@@ -472,6 +488,7 @@ export async function getProject(projectId: string) {
       ...invoice,
       clientPayableBalanceCents: invoiceClientPayableBalanceCents(invoice, paymentsByInvoice.get(invoice.id) ?? []),
     })),
+    galleries,
     tokens,
     activity,
   };

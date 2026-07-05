@@ -267,6 +267,70 @@ async function main() {
     schedulerPaidCents: 25000,
   });
 
+  // -------------------------------------------------------------------
+  // Phase 7a — "Your Gallery" portal surface: flag-off dark, delivered-only,
+  // no cross-project leak, and the https belt-and-suspenders re-check.
+  // -------------------------------------------------------------------
+
+  database.prepare(`
+    INSERT INTO clients (id, first_name, last_name, email, created_at, updated_at)
+    VALUES ('client-2', 'Jordan', 'Rivera', 'jordan@example.com', ?, ?)
+  `).run(now, now);
+  database.prepare(`
+    INSERT INTO projects (
+      id, name, type, stage, status, event_date, created_at, updated_at
+    ) VALUES ('project-2', 'Other Portal Wedding', 'wedding', 'planning', 'active', '2026-10-10', ?, ?)
+  `).run(now, now);
+  database.prepare(`
+    INSERT INTO project_participants (id, project_id, client_id, role, is_primary_contact, created_at)
+    VALUES ('participant-2', 'project-2', 'client-2', 'primary', 1, ?)
+  `).run(now);
+
+  database.prepare(`
+    INSERT INTO project_galleries (
+      id, project_id, provider, title, url, status, passcode, delivered_at, expires_at, created_by, created_at, updated_at
+    ) VALUES
+      ('gallery-draft', 'project-1', 'Pixieset', 'Draft gallery', 'https://client.pixieset.com/draft', 'draft', NULL, NULL, NULL, 'admin', ?, ?),
+      ('gallery-archived', 'project-1', 'Pixieset', 'Archived gallery', 'https://client.pixieset.com/archived', 'archived', NULL, ?, NULL, 'admin', ?, ?),
+      ('gallery-delivered', 'project-1', 'Pixieset', 'Wedding gallery', 'https://client.pixieset.com/wedding', 'delivered', 'peek2026', ?, '2027-01-01T00:00:00.000Z', 'admin', ?, ?),
+      ('gallery-unsafe', 'project-1', 'Custom', 'Hand-edited unsafe row', 'http://not-https.example.com/gallery', 'delivered', NULL, ?, NULL, 'admin', ?, ?),
+      ('gallery-other-project', 'project-2', 'Pixieset', 'Other project delivered gallery', 'https://client.pixieset.com/other', 'delivered', NULL, ?, NULL, 'admin', ?, ?)
+  `).run(
+    now, now,
+    now, now, now,
+    now, now, now,
+    now, now, now,
+    now, now, now,
+  );
+
+  // Flag unset (default OFF) → the client-facing surface is dark even though a
+  // delivered gallery exists for this project.
+  delete process.env.PORTAL_GALLERY_ENABLED;
+  const flagOffContext = await getPortalProjectContext("project-1", "client-1");
+  assert.deepEqual(flagOffContext?.galleries, [], "PORTAL_GALLERY_ENABLED unset must render zero galleries");
+
+  // Flag ON → only the "delivered" gallery for THIS project is returned; draft
+  // and archived are excluded; the hand-edited non-https row is dropped by the
+  // belt-and-suspenders re-check; project-2's delivered gallery never leaks
+  // into project-1's context.
+  process.env.PORTAL_GALLERY_ENABLED = "1";
+  const flagOnContext = await getPortalProjectContext("project-1", "client-1");
+  assert.deepEqual(
+    flagOnContext?.galleries.map((gallery) => ({ id: gallery.id, title: gallery.title, url: gallery.url, passcode: gallery.passcode })),
+    [{ id: "gallery-delivered", title: "Wedding gallery", url: "https://client.pixieset.com/wedding", passcode: "peek2026" }],
+    "only the delivered, https-safe gallery for this project is returned",
+  );
+  assert.ok(!flagOnContext?.galleries.some((gallery) => gallery.id === "gallery-other-project"), "no cross-project gallery leak");
+  assert.ok(!flagOnContext?.galleries.some((gallery) => gallery.id === "gallery-unsafe"), "non-https row dropped by the belt-and-suspenders re-check");
+  assert.ok(!("createdBy" in (flagOnContext?.galleries[0] ?? {})), "client-safe shape drops createdBy");
+
+  const otherProjectContext = await getPortalProjectContext("project-2", "client-2");
+  assert.deepEqual(
+    otherProjectContext?.galleries.map((gallery) => gallery.id),
+    ["gallery-other-project"],
+    "project-2's own delivered gallery is still visible in its own context",
+  );
+
   console.log("portal context tests passed");
 }
 

@@ -1,6 +1,6 @@
 import { clearPortalSession, getPortalProjectContext, requirePortalProject } from "@/lib/portal";
 import { formatDate, formatMoney } from "@/lib/format";
-import { CalendarDays, ClipboardList, ExternalLink, FileSignature, Landmark, LockKeyhole, MapPin } from "lucide-react";
+import { CalendarDays, ClipboardList, ExternalLink, FileSignature, Images, Landmark, LockKeyhole, MapPin } from "lucide-react";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -108,6 +108,40 @@ export function PortalProjectView({ data }: { data: PortalProjectContext }) {
             <div className="mt-2 text-2xl font-semibold capitalize">{data.project.stage.replaceAll("_", " ")}</div>
           </div>
         </section>
+
+        {data.galleries.length > 0 && (
+          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)]">
+            <div className="flex items-center gap-2 border-b border-[var(--line)] px-5 py-4">
+              <Images className="h-4 w-4 text-[var(--ink-muted)]" />
+              <h2 className="font-semibold">Your gallery</h2>
+            </div>
+            <div className="divide-y divide-[var(--line)]">
+              {data.galleries.map((gallery) => (
+                <div key={gallery.id} className="flex flex-wrap items-start justify-between gap-4 p-5">
+                  <div>
+                    <div className="font-semibold">{gallery.title}</div>
+                    {gallery.provider && <div className="mt-1 text-sm text-[var(--ink-muted)]">{gallery.provider}</div>}
+                    {gallery.expiresAt && (
+                      <div className="mt-2 text-sm text-[var(--ink-muted)]">Available until {formatDate(gallery.expiresAt)}</div>
+                    )}
+                    {gallery.passcode && (
+                      <div className="mt-1 text-sm text-[var(--ink-muted)]">Passcode: <span className="font-medium text-[var(--foreground)]">{gallery.passcode}</span></div>
+                    )}
+                  </div>
+                  <a
+                    href={gallery.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="brand-primary-button inline-flex items-center gap-2 rounded-sm px-4 py-2.5 text-sm"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    View gallery
+                  </a>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         {(data.events.length > 0 || data.locations.length > 0) && (
           <section className="rounded-md border border-[var(--line)] bg-[var(--surface)]">

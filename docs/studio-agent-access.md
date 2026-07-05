@@ -197,7 +197,7 @@ The MCP endpoint currently supports JSON responses and returns `405` for `GET`.
 Available tools:
 
 - `studio_search_projects`: finds canonical project ids by project name, client name, client email, venue, city, or state.
-- `studio_get_project_context`: reads canonical project, client, event, location, timeline, source, communication, proposal, invoice, payment ledger, and project expense context before the agent writes anything.
+- `studio_get_project_context`: reads canonical project, client, event, location, timeline, source, communication, proposal, invoice, payment ledger, project expense, and gallery delivery-link context before the agent writes anything. Gallery reads are always-on (not flag-gated) and include every status (draft/delivered/archived) plus `createdBy`, so the agent can see what is already client-visible vs. still staged.
 - `studio_get_client_context`: reads one canonical client/contact profile with linked projects, bookings, proposals, invoices, questionnaire responses, and recent activity before updating contact facts or drafting follow-up.
 - `studio_get_agenda`: reads the canonical Studio agenda for upcoming weddings, sessions, and scheduler calls.
 - `studio_list_activity`: reads recent canonical Studio activity before deciding whether an agent action is new work, follow-up, or a duplicate.
@@ -249,6 +249,7 @@ Available tools:
 - `studio_update_expense`: revises an existing canonical project expense and vendor link from receipt/bookkeeping corrections.
 - `studio_create_communication`: creates a canonical project communication draft or logged message, usually from discovery-call source material.
 - `studio_update_communication`: updates an existing canonical communication draft/log, such as marking a drafted follow-up sent.
+- `studio_attach_gallery_link`: stages a provider gallery delivery link (Pixieset/Pic-Time/Cloudinary/other) against a project. **Draft/attach-only** — always creates a `status: "draft"`, `createdBy: "agent"` row regardless of any `status`/`createdBy` supplied, so an agent can never publish a client-visible gallery or send anything to the client. Tyler reviews and flips it to `delivered` in Studio admin.
 
 ### Get Settings
 

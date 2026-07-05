@@ -9,7 +9,7 @@ process.env.STRIPE_SECRET_KEY = "sk_test_studio_mcp";
 
 async function main() {
   const { rawDb } = await import("@/db/client");
-  const { handleStudioMcpMessage } = await import("./studio-mcp");
+  const { handleStudioMcpMessage, getStudioProjectContext } = await import("./studio-mcp");
   const database = rawDb();
   const now = "2026-05-29T12:00:00.000Z";
 
@@ -245,6 +245,7 @@ async function main() {
       "studio_update_project_event",
       "studio_create_project_location",
       "studio_update_project_location",
+      "studio_attach_gallery_link",
       "studio_create_project_source",
       "studio_update_project_source",
       "studio_claim_agent_task",
@@ -2474,6 +2475,79 @@ async function main() {
     params: { name: "studio_missing_tool", arguments: {} },
   });
   assert.equal(missingTool.error.code, -32601);
+
+  // -------------------------------------------------------------------
+  // Phase 7a — agent gallery read (all statuses) + attach-only guard.
+  // -------------------------------------------------------------------
+
+  database.prepare(`
+    INSERT INTO project_galleries (
+      id, project_id, provider, title, url, status, passcode, delivered_at, expires_at, created_by, created_at, updated_at
+    ) VALUES (
+      'gallery-delivered', 'project-1', 'Pixieset', 'Wedding gallery', 'https://client.pixieset.com/wedding',
+      'delivered', NULL, ?, NULL, 'admin', ?, ?
+    )
+  `).run(now, now, now);
+
+  const attachGalleryCall = await handleStudioMcpMessage({
+    jsonrpc: "2.0",
+    id: 17,
+    method: "tools/call",
+    params: {
+      name: "studio_attach_gallery_link",
+      arguments: {
+        projectId: "project-1",
+        title: "Sneak peek gallery",
+        url: "https://client.pixieset.com/sneak-peek",
+        // Hostile/elevated fields — MUST be ignored (Active-Learning Log:
+        // agent authority guard).
+        status: "delivered",
+        createdBy: "admin",
+      },
+    },
+  });
+  assert.equal(attachGalleryCall.result.isError, false);
+  assert.equal(attachGalleryCall.result.structuredContent.gallery.status, "draft", "agent attach is forced to draft");
+  assert.equal(attachGalleryCall.result.structuredContent.gallery.createdBy, "agent", "agent attach is forced to createdBy=agent");
+
+  const deliveredGalleryCount = database.prepare(
+    "SELECT COUNT(*) AS count FROM project_galleries WHERE status = 'delivered' AND created_by = 'agent'",
+  ).get() as { count: number };
+  assert.equal(deliveredGalleryCount.count, 0, "the agent tool must never mint a client-visible gallery");
+
+  const galleryContextCall = await handleStudioMcpMessage({
+    jsonrpc: "2.0",
+    id: 18,
+    method: "tools/call",
+    params: {
+      name: "studio_get_project_context",
+      arguments: { projectId: "project-1" },
+    },
+  });
+  assert.equal(galleryContextCall.result.isError, false);
+  const contextGalleries = galleryContextCall.result.structuredContent.projectContext.galleries as Array<{
+    id: string;
+    status: string;
+    createdBy: string;
+  }>;
+  assert.equal(contextGalleries.length, 2, "the always-on agent reader surfaces every status, not just delivered");
+  assert.ok(contextGalleries.some((gallery) => gallery.status === "delivered"), "delivered gallery is visible to the agent");
+  assert.ok(contextGalleries.some((gallery) => gallery.status === "draft" && gallery.createdBy === "agent"), "draft agent-authored gallery is visible to the agent");
+  // Ordering is NOT lexicographic by status (archived < delivered < draft,
+  // which would surface drafts oddly) — it is deliveredAt/createdAt recency.
+  // The agent-attached draft has no deliveredAt (null) and was created after
+  // the seeded delivered row, so `ORDER BY deliveredAt DESC, createdAt DESC`
+  // (NULLs sort last in SQLite) places the delivered row first here.
+  assert.equal(contextGalleries[0].status, "delivered", "delivered (non-null deliveredAt) sorts before the null-deliveredAt draft");
+
+  // -------------------------------------------------------------------
+  // Phase 7a — missing-table resilience (B1): the always-on reader MUST NOT
+  // throw when project_galleries is absent (pre-0086 deploy race).
+  // -------------------------------------------------------------------
+
+  database.exec("DROP TABLE project_galleries;");
+  const resilientContext = await getStudioProjectContext("project-1");
+  assert.deepEqual(resilientContext.galleries, [], "a missing project_galleries table degrades to [] instead of throwing");
 
   console.log("studio mcp tests passed");
 }

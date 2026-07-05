@@ -1,6 +1,7 @@
 import { db } from "@/db/client";
-import { clients, invoicePayments, invoices, portalAccessTokens, projectEvents, projectLocations, projectParticipants, projectTimelineItems, projects, proposals, questionnaireResponses, questionnaires, schedulerBookings, schedulerMeetingTypes } from "@/db/schema";
+import { clients, invoicePayments, invoices, portalAccessTokens, projectEvents, projectGalleries, projectLocations, projectParticipants, projectTimelineItems, projects, proposals, questionnaireResponses, questionnaires, schedulerBookings, schedulerMeetingTypes } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
+import { isGalleryUrlSafe } from "@/lib/gallery";
 import { invoiceClientPayableBalanceCents, invoiceClientPayableCents, invoicePaymentClientPayableOpenCents, invoicePaymentOpenCents } from "@/lib/invoice-balances";
 import { createQuestionnaireContext, getQuestionnairePublicUrl } from "@/lib/questionnaire-links";
 import { createProposalLinkFromForm } from "@/lib/sales";
@@ -18,6 +19,15 @@ const PORTAL_MAGIC_LINK_PER_EMAIL_WINDOW_MINUTES = 15;
 
 function magicLinkEnabled() {
   return process.env.PORTAL_MAGIC_LINK_ENABLED === "1";
+}
+
+// Phase 7a: client-facing "Your Gallery" section. OFF by default so the
+// feature ships dark — Tyler can populate galleries via admin (always on)
+// and verify via agent context before flipping this on. Read in the function
+// body (not a destructured default param) to avoid the TS2559 weak-type
+// pitfall from `env: {...} = process.env`.
+function galleryPortalEnabled() {
+  return process.env.PORTAL_GALLERY_ENABLED === "1";
 }
 
 function magicLinkTtlMinutes() {
@@ -344,7 +354,7 @@ export async function getPortalProjectContext(projectId: string, clientId?: stri
     ? clientRows.find((client) => client.id === clientId) ?? clientRows[0] ?? null
     : clientRows[0] ?? null;
 
-  const [eventRows, locationRows, timelineItems, projectProposals, projectInvoices, bookingRows, responseRows] = await Promise.all([
+  const [eventRows, locationRows, timelineItems, projectProposals, projectInvoices, bookingRows, responseRows, galleryRows] = await Promise.all([
     db.query.projectEvents.findMany({
       where: eq(projectEvents.projectId, projectId),
       orderBy: asc(projectEvents.eventDate),
@@ -389,6 +399,16 @@ export async function getPortalProjectContext(projectId: string, clientId?: stri
         response: typeof questionnaireResponses.$inferSelect;
         questionnaire: typeof questionnaires.$inferSelect;
       }>>,
+    // Phase 7a: flag-gated so the client-facing portal surface does zero work
+    // (and no query) when PORTAL_GALLERY_ENABLED is unset — dark by default.
+    // Delivered-only for clients; draft/archived galleries are never returned
+    // here (they remain visible to admin + the always-on agent reader).
+    galleryPortalEnabled()
+      ? db.query.projectGalleries.findMany({
+          where: and(eq(projectGalleries.projectId, projectId), eq(projectGalleries.status, "delivered")),
+          orderBy: [desc(projectGalleries.deliveredAt), desc(projectGalleries.createdAt)],
+        })
+      : Promise.resolve([] as Array<typeof projectGalleries.$inferSelect>),
   ]);
 
   const invoiceIds = projectInvoices.map((invoice) => invoice.id);
@@ -503,6 +523,22 @@ export async function getPortalProjectContext(projectId: string, clientId?: stri
       proposalUrl: portalProposalUrl(proposal.id),
     })),
     invoices: portalInvoices,
+    // Phase 7a: "Your Gallery" — delivered-only (enforced by the query above),
+    // scoped to this `projectId` (never client-supplied — resolved from the
+    // session cookie/token by requirePortalProject). Belt-and-suspenders
+    // https re-check per §4.3: even a hand-edited D1 row cannot surface a
+    // non-https URL to the client-facing portal.
+    galleries: galleryRows
+      .filter((gallery) => isGalleryUrlSafe(gallery.url))
+      .map((gallery) => ({
+        id: gallery.id,
+        title: gallery.title,
+        provider: gallery.provider,
+        url: gallery.url,
+        passcode: gallery.passcode,
+        deliveredAt: gallery.deliveredAt,
+        expiresAt: gallery.expiresAt,
+      })),
     schedulerBookings: bookingRows.map((row) => {
       const urls = getBookingManageUrls(row.meetingType.slug, row.booking);
       return {

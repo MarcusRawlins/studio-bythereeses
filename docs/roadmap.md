@@ -55,6 +55,7 @@ Decision (2026-07-04): **integrate an existing gallery/delivery tool** (Pixieset
 - Evaluate + select provider; wire delivery links into the client portal and project record.
 - Sync gallery status/links into Studio (project record + agent/MCP context) so the assistant can reference and send them.
 - Keep R2 private object access (Phase 6) available for any owned-asset needs (contracts, PDFs) independent of the gallery provider.
+- ✅ **Phase 7a — provider-agnostic gallery delivery-link MVP** deployed dark (`docs/specs/phase-7a-gallery-delivery-link.md`, migration 0086): `project_galleries` table, https-only URL validation/normalization, admin create/update/delete with `gallery.*` activity logging, always-on (missing-table-resilient) agent/MCP read of all statuses, flag-gated (`PORTAL_GALLERY_ENABLED`, off by default) delivered-only "Your Gallery" portal section, and an optional draft/attach-only agent tool (`studio_attach_gallery_link`) with a guard test. 7b (provider API integration — OAuth, proofing sync, print-store status) remains `🅣`, gated on Tyler's provider choice.
 
 ## Phase 6.5 (near-term, right after Phase 6): Portal self-service magic-link login
 

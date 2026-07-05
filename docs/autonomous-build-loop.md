@@ -30,7 +30,7 @@ reviewer prompt is seeded with the **Active-Learning Log** below.
 | 6 | Hardening + R2 private access | ✅ deployed 2026-07-05 (M4/CSP off, R2 dark) |
 | 6.5 | Portal self-service magic-link | ✅ deployed 2026-07-05 (flag off) — Worker `b7c34f40`, proxy `821ed36f`, migration 0084 |
 | 8a | Inquiry-email intake | ✅ deployed 2026-07-05 (dark) — Worker `53ad5abc`, proxy `a7619737`, migration 0085 |
-| 7a | Gallery delivery-link (provider-agnostic MVP) | 🔵 speccing — buildable now (no provider API needed) |
+| 7a | Gallery delivery-link (provider-agnostic MVP) | ✅ built (dark) 2026-07-05 — migration 0086, `PORTAL_GALLERY_ENABLED` off; pending prod migration + deploy |
 | 7b | Deep gallery provider integration (Pixieset/Pic-Time API) | 🅣 needs Tyler's provider choice + API credentials |
 | 8b | SMS (Twilio) | ⏭️ spec → build |
 | 8c | Automated sequences (dunning/nudges/reviews) | ⏭️ spec → build |

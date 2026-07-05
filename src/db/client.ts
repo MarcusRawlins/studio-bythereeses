@@ -629,6 +629,32 @@ function migrate(database: LocalDatabase) {
     CREATE INDEX IF NOT EXISTS idx_inbound_inquiries_parsed_email ON inbound_inquiries(parsed_email);
   `);
 
+  const projectGalleriesMigrationPath = path.join(process.cwd(), "migrations", "0086_project_galleries.sql");
+  if (fs.existsSync(projectGalleriesMigrationPath)) {
+    database.exec(fs.readFileSync(projectGalleriesMigrationPath, "utf8"));
+  }
+
+  // Phase 7a: defensive idempotent create so local dev (better-sqlite3) and any
+  // partially-migrated prod D1 converge without a blanket `migrations apply`.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS project_galleries (
+      id TEXT PRIMARY KEY NOT NULL,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      provider TEXT,
+      title TEXT NOT NULL,
+      url TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      passcode TEXT,
+      delivered_at TEXT,
+      expires_at TEXT,
+      created_by TEXT NOT NULL DEFAULT 'admin',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_galleries_project ON project_galleries(project_id);
+    CREATE INDEX IF NOT EXISTS idx_project_galleries_project_status ON project_galleries(project_id, status);
+  `);
+
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),
   );

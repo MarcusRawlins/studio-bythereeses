@@ -83,10 +83,44 @@ async function main() {
     )
   `).run(now, now, now, now);
 
+  // Phase 7a: flag OFF (default/unset) → no gallery section renders at all,
+  // even though this project has no gallery rows to render yet either way.
+  delete process.env.PORTAL_GALLERY_ENABLED;
+  const flagOffContext = await getPortalProjectContext("project-1", "client-1");
+  assert.ok(flagOffContext);
+  const flagOffMarkup = renderToStaticMarkup(<PortalProjectView data={flagOffContext} />);
+  assert.doesNotMatch(flagOffMarkup, /Your gallery/);
+
+  database.prepare(`
+    INSERT INTO project_galleries (
+      id, project_id, provider, title, url, status, passcode, delivered_at, expires_at, created_by, created_at, updated_at
+    ) VALUES (
+      'gallery-1', 'project-1', 'Pixieset', 'Wedding gallery', 'https://client.pixieset.com/wedding',
+      'delivered', 'peek2026', ?, '2027-01-01T00:00:00.000Z', 'admin', ?, ?
+    )
+  `).run(now, now, now);
+
   const context = await getPortalProjectContext("project-1", "client-1");
   assert.ok(context);
 
   const markup = renderToStaticMarkup(<PortalProjectView data={context} />);
+
+  // Phase 7a: flag ON → the delivered gallery renders with BOTH
+  // target="_blank" AND rel="noopener noreferrer" on its anchor (§4.3 — the
+  // gallery link is semi-trusted/admin-pasted, unlike the fully-trusted
+  // hardcoded destinations elsewhere in the portal).
+  process.env.PORTAL_GALLERY_ENABLED = "1";
+  const galleryContext = await getPortalProjectContext("project-1", "client-1");
+  assert.ok(galleryContext);
+  const galleryMarkup = renderToStaticMarkup(<PortalProjectView data={galleryContext} />);
+  assert.match(galleryMarkup, /Your gallery/);
+  assert.match(galleryMarkup, /Wedding gallery/);
+  assert.match(galleryMarkup, /peek2026/);
+  assert.match(
+    galleryMarkup,
+    /href="https:\/\/client\.pixieset\.com\/wedding"[^>]*target="_blank"[^>]*rel="noopener noreferrer"/,
+    "gallery anchor must carry both target=\"_blank\" and rel=\"noopener noreferrer\"",
+  );
   assert.match(markup, /Project logistics/);
   assert.match(markup, /Welcome party/);
   assert.match(markup, /River Room/);

@@ -1,15 +1,17 @@
 import { AppShell } from "@/components/AppShell";
 import { LinkActions } from "@/components/LinkActions";
+import { ProjectGalleryDeleteForm, ProjectGalleryForm } from "@/components/ProjectGalleryForm";
 import { ProjectSectionNav } from "@/components/ProjectSectionNav";
 import { listAgentTasks } from "@/lib/agent-tasks";
 import { getProject } from "@/lib/crm";
 import { formatActivityAction, formatDate, formatMoney } from "@/lib/format";
+import { isGalleryUrlSafe } from "@/lib/gallery";
 import { projectWorkingNotes } from "@/lib/project-notes";
 import { getProjectFinancialSummary } from "@/lib/project-finance";
 import { listProjectWorkflowRuns, sixFigureAutomationSteps } from "@/lib/project-workflow-automation";
 import { listProjectQuestionnaireResponses, listQuestionnaires, questionnaireResponseStatus } from "@/lib/questionnaires";
 import { listProjectBookingLinks } from "@/lib/scheduler";
-import { Bot, CalendarCheck, CalendarPlus, CheckCircle2, ClipboardEdit, ClipboardList, Copy, ExternalLink, Eye, FileQuestion, FileSignature, Landmark, Mail, MapPin, NotebookPen, Pencil, ReceiptText, Send, Sparkles, UsersRound } from "lucide-react";
+import { Bot, CalendarCheck, CalendarPlus, CheckCircle2, ClipboardEdit, ClipboardList, Copy, ExternalLink, Eye, FileQuestion, FileSignature, Images, Landmark, Mail, MapPin, NotebookPen, Pencil, ReceiptText, Send, Sparkles, UsersRound } from "lucide-react";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
@@ -1799,6 +1801,69 @@ export default async function ProjectDetailPage({
                 );
               })}
               {!data.locations.length && <p className="text-sm text-[var(--ink-muted)]">No locations or logistics records yet.</p>}
+            </div>
+          </section>
+
+          <section id="galleries" className="studio-section-card">
+            <details className="group">
+              <summary className="list-none cursor-pointer">
+                <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                  <div>
+                    <h2 className="text-lg font-semibold">Galleries</h2>
+                    <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                      Provider delivery links (Pixieset, Pic-Time, Cloudinary, or other). Draft is admin/agent-only; set status to Delivered to make it client-visible in the portal once the gallery flag is on.
+                    </p>
+                  </div>
+                  <span className="inline-flex items-center justify-center gap-2 rounded-sm border border-[var(--line)] px-3 py-2 text-sm font-semibold transition group-open:border-[var(--foreground)] hover:border-[var(--foreground)]">
+                    <Images className="h-4 w-4" />
+                    Add gallery
+                  </span>
+                </div>
+              </summary>
+              <div className="mt-4">
+                <ProjectGalleryForm projectId={data.project.id} />
+              </div>
+            </details>
+            <div className="mt-4 space-y-3">
+              {data.galleries.map((gallery) => (
+                <div key={gallery.id} className="rounded-md border border-[var(--line)] p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">{gallery.title}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--ink-muted)]">
+                        <span className="rounded-full border border-[var(--line)] px-2 py-0.5 font-semibold capitalize">{gallery.status}</span>
+                        {gallery.provider && <span>{gallery.provider}</span>}
+                        {gallery.expiresAt && <span>Available until {formatDate(gallery.expiresAt)}</span>}
+                      </div>
+                      {isGalleryUrlSafe(gallery.url) ? (
+                        <a href={gallery.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs font-semibold underline">
+                          <ExternalLink className="h-3 w-3" />
+                          Open gallery
+                        </a>
+                      ) : (
+                        // Belt-and-suspenders (mirrors the portal shaper): a
+                        // hand-edited D1 row with a non-https/script-scheme url
+                        // must never become a clickable link in front of the
+                        // higher-value admin session — render it as inert text.
+                        <div className="mt-2 break-all text-xs text-[var(--danger)]">Unsafe gallery URL (not shown as a link): {gallery.url}</div>
+                      )}
+                    </div>
+                    <ProjectGalleryDeleteForm projectId={data.project.id} galleryId={gallery.id} />
+                  </div>
+                  <details className="mt-3 rounded-md border border-[var(--line)] bg-[#fbfaf7]">
+                    <summary className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm font-semibold">
+                      <span className="inline-flex items-center gap-2">
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit gallery
+                      </span>
+                    </summary>
+                    <div className="border-t border-[var(--line)] p-3">
+                      <ProjectGalleryForm projectId={data.project.id} gallery={gallery} />
+                    </div>
+                  </details>
+                </div>
+              ))}
+              {!data.galleries.length && <p className="text-sm text-[var(--ink-muted)]">No galleries yet.</p>}
             </div>
           </section>
 
