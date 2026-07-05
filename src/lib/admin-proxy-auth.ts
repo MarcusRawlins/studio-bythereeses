@@ -126,16 +126,17 @@ export async function verifyAdminProxyProof(
 export type AdminProofMode = "off" | "log" | "enforce";
 
 export function adminProofMode(
-  env: { ADMIN_PROOF_ENFORCE?: string } = process.env,
+  env?: { ADMIN_PROOF_ENFORCE?: string },
 ): AdminProofMode {
-  if (env.ADMIN_PROOF_ENFORCE === "1") return "enforce";
-  if (env.ADMIN_PROOF_ENFORCE === "log") return "log";
+  const flag = (env ?? process.env).ADMIN_PROOF_ENFORCE;
+  if (flag === "1") return "enforce";
+  if (flag === "log") return "log";
   return "off";
 }
 
 /** True when the break-glass enforcement flag is explicitly on (`ADMIN_PROOF_ENFORCE === "1"`). */
 export function adminProofEnforced(
-  env: { ADMIN_PROOF_ENFORCE?: string } = process.env,
+  env?: { ADMIN_PROOF_ENFORCE?: string },
 ): boolean {
   return adminProofMode(env) === "enforce";
 }
