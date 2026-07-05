@@ -124,6 +124,23 @@ function applySecurityHeaders(headers) {
   }
 }
 
+// Phase 6 §4 (L8): preserve an app-provided CSP instead of unconditionally
+// clobbering it. `applySecurityHeaders` always injects the STATIC baseline CSP
+// (no `script-src`) as the fallback for non-HTML / error / cached responses that
+// carry none. When the origin (Next middleware) emitted a per-request nonce'd
+// policy, that header carries the nonce and MUST win:
+//   - an enforced `content-security-policy` from the app REPLACES the baseline;
+//   - a `content-security-policy-report-only` from the app is layered on top of
+//     the still-enforced baseline (report mode = zero behavior change to the
+//     page — the nonce'd policy only reports violations).
+// `appCsp` / `appReportCsp` are read from the ORIGIN response BEFORE
+// `applySecurityHeaders` runs. Booking pages never carry an app CSP (the
+// middleware skips the nonce there), so cached HTML never freezes a nonce.
+function applyAppCsp(headers, appCsp, appReportCsp) {
+  if (appCsp) headers.set("content-security-policy", appCsp);
+  if (appReportCsp) headers.set("content-security-policy-report-only", appReportCsp);
+}
+
 function isStudioHost(url) {
   return url.hostname !== "schedule.bythereeses.com";
 }
@@ -464,8 +481,15 @@ const pagesProxyWorker = {
       const cached = await cache.match(cacheKey);
       if (cached) {
         const cachedHeaders = new Headers(cached.headers);
+        // [Fable-fix — cache-HIT path] Apply the SAME preserve-app-CSP-vs-inject-
+        // fallback logic as the miss path. The cached body was finalized on the
+        // miss (booking → baseline, never a nonce), so this re-preserves the
+        // baseline; amending only the miss path would serve the wrong CSP here.
+        const cachedAppCsp = cached.headers.get("content-security-policy");
+        const cachedAppReportCsp = cached.headers.get("content-security-policy-report-only");
         cachedHeaders.set("x-reese-cache", "HIT");
         applySecurityHeaders(cachedHeaders);
+        applyAppCsp(cachedHeaders, cachedAppCsp, cachedAppReportCsp);
         return new Response(cached.body, {
           status: cached.status,
           statusText: cached.statusText,
@@ -516,10 +540,19 @@ const pagesProxyWorker = {
     const responseHeaders = new Headers(response.headers);
     const location = responseHeaders.get("location");
 
+    // [Fable-fix] Capture any app-provided CSP BEFORE the static baseline is
+    // applied. The Next middleware emits a per-request nonce'd policy for
+    // eligible Studio/token document routes; the proxy must preserve it rather
+    // than clobber it (the header carries the nonce). Booking pages carry none,
+    // so their cached HTML stays baseline/no-nonce.
+    const appCsp = response.headers.get("content-security-policy");
+    const appReportCsp = response.headers.get("content-security-policy-report-only");
+
     responseHeaders.delete("content-security-policy");
     responseHeaders.delete("x-reese-origin-secret");
     responseHeaders.set("x-reese-cache", shouldCachePublicBookingPage ? "MISS" : "BYPASS");
     applySecurityHeaders(responseHeaders);
+    applyAppCsp(responseHeaders, appCsp, appReportCsp);
     responseHeaders.set("referrer-policy", referrerPolicyFor(incomingUrl.pathname));
     if (location?.startsWith(WORKER_ORIGIN)) {
       responseHeaders.set("location", location.replace(WORKER_ORIGIN, incomingUrl.origin));

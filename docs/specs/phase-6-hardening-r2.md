@@ -246,7 +246,7 @@ Read `node_modules/next/dist/docs/` for the exact Next 16 nonce contract before 
 - **OpenNext specifics:** confirm middleware runs before the cached asset short-circuit and that `NextResponse.next({ request })` header mutation survives the OpenNext adapter. Validate in `npm run preview` (local OpenNext) before deploy.
 
 ### Config / secrets / env keys
-- Optional `CSP_REPORT_ONLY` (Worker var): when set, emit `Content-Security-Policy-Report-Only` instead of enforcing, for a safe observation window.
+- `CSP_MODE` (Worker var), three-state, mirroring `ADMIN_PROOF_ENFORCE`: **unset/other = off** (middleware emits no CSP header — byte-identical to today's static proxy baseline, zero behavior change), **`"report"`** = emit `Content-Security-Policy-Report-Only` with the nonce'd `script-src` while the enforced policy stays the baseline (page never affected), **`"enforce"`** = enforce the nonce'd `Content-Security-Policy`. Case-sensitive; only the exact strings enable it. (Implemented as `CSP_MODE`, not the earlier-drafted `CSP_REPORT_ONLY`.)
 - New helper module `src/lib/csp.ts`: `buildCsp(nonce: string | null): string`.
 
 ### Files touched
@@ -258,7 +258,13 @@ Read `node_modules/next/dist/docs/` for the exact Next 16 nonce contract before 
 - Manual + `npm run preview`: load Studio, confirm no CSP violations in console, hydration succeeds; load `/book/*` twice (cache HIT) and confirm scripts still execute. Extend `scripts/production-smoke.mjs` to assert `script-src` present on a Studio response and that two requests to a non-cached route carry **different** nonces.
 
 ### Rollout / rollback
-1. Ship in **report-only** (`CSP_REPORT_ONLY=1`) — observe violations via `observability` logs. 2. Fix any flagged inline/script. 3. Flip to enforce. Rollback: set `CSP_REPORT_ONLY=1` (or revert proxy to re-apply the old static minimal CSP). Highest hydration-risk item in the phase — keep behind the report-only flag and validate in `preview` first.
+1. Deploy with `CSP_MODE` **unset** (off — no behavior change). 2. Set `CSP_MODE="report"` — observe violations. **Note:** `buildCsp` has no `report-to`/`report-uri` yet, so report-mode violations surface in the **visitor's browser console**, not in Cloudflare observability logs — either add a reporting endpoint before the window or validate via `npm run preview` with the console open. 3. Fix any flagged inline/script. 4. Flip `CSP_MODE="enforce"`. Rollback: set `CSP_MODE` back to unset/`"off"` (or revert proxy). Highest hydration-risk item in the phase — validate in `preview` first.
+
+**Pre-enforce checklist (before `CSP_MODE="enforce"`):**
+- Audit that every nonce-eligible Studio route renders **dynamically** — a static/ISR page serves frozen non-nonced HTML against a per-request enforced CSP → all scripts blocked.
+- Confirm the **final proxied response** in report mode carries the CSP as `Content-Security-Policy-Report-Only` (not enforced) — guards against an adapter echoing the request CSP header into an enforced response header.
+- Add the `scripts/production-smoke.mjs` assertions (script-src present on a Studio response; two non-cached requests carry different nonces).
+- Dev-mode (`NODE_ENV=development`) needs `'unsafe-eval'` in `script-src` to avoid HMR/eval noise; keep it out of production.
 
 ---
 
@@ -356,9 +362,9 @@ Each task is independently shippable; ordering respects dependencies and risk. R
 | 4 | **§1a R2 storage primitives** — `asset_objects` migration + schema; `src/lib/assets.ts` (`putAsset`/`getAssetObject`/`deleteAsset`/`getAssetMeta`); `R2_URL_SIGNING_SECRET` fail-closed; `assets.test.ts`; `cf:typegen`. | — | `src/db/*`, `src/lib/assets.ts` | M | Med |
 | 5 | **§1b R2 serving route + signed URLs + scope mapping** — `/api/assets/[...key]` GET; `signAssetUrl`/`verifyAssetUrl`; portal/proposal scope enforcement; origin-guard + proxy public-path + rate-limit wiring; route test. | 4 | `src/app/api/assets/[...key]/route.ts`, `src/lib/assets.ts`, `src/lib/origin-guard.ts`, `pages-proxy/_worker.js` | M | Med |
 | 6 | **§2 M4 admin proxy proof** — proxy sets host+path-bound `x-reese-admin-proof` after session check + strips inbound (both hosts); WebCrypto verify in async middleware behind `ADMIN_PROOF_ENFORCE` (Worker secret, break-glass = `wrangler secret delete`); **classifier MUST exclude `/portal` + normalize trailing slash + drift test vs proxy predicates** (Fable-blocking); `ADMIN_PROOF_SECRET` in both envs; phased log-only rollout with pre-enforce rollback proof. | 2 (proxy edits) | `pages-proxy/_worker.js`, `src/middleware.ts`, `src/lib/admin-proxy-auth.ts`, `src/lib/origin-guard.ts` | L | Med |
-| 7 | **§4 CSP nonce (L8)** — `src/lib/csp.ts`; nonce in middleware for **dynamic Studio routes only**, keyed off `x-forwarded-host`; **cacheable `/book/*` omits `script-src` entirely** (Fable-blocking — `'self'` would block Next inline bootstrap); proxy stops clobbering app CSP on **both miss and cache-HIT paths**; `preview` hydration = hard gate; `CSP_REPORT_ONLY` first. | 6 (middleware now async) | `src/middleware.ts`, `src/lib/csp.ts`, `src/app/layout.tsx`, `pages-proxy/_worker.js` | L | High |
+| 7 | **§4 CSP nonce (L8)** — `src/lib/csp.ts`; nonce in middleware for **dynamic Studio routes only**, keyed off `x-forwarded-host`; **cacheable `/book/*` omits `script-src` entirely** (Fable-blocking — `'self'` would block Next inline bootstrap); proxy stops clobbering app CSP on **both miss and cache-HIT paths**; `preview` hydration = hard gate; `CSP_MODE="report"` first (default off). | 6 (middleware now async) | `src/middleware.ts`, `src/lib/csp.ts`, `src/app/layout.tsx`, `pages-proxy/_worker.js` | L | High |
 
 **Suggested delivery order:** 1 → 2 → 3 (fast, low-risk, independent) → 4 → 5 (R2 prerequisite for Phase 7) → 6 → 7 (highest hydration/caching risk last, behind report-only). Tasks 6 and 7 both edit `pages-proxy/_worker.js` and `src/middleware.ts`; sequence them to avoid merge churn (6 makes middleware async; 7 builds on that). Every task ends with `npm run lint && npm run build && npm run test`; proxy/app changes additionally validated in `npm run preview` and `npm run smoke:production` after deploy, per the deploy gate in `ops-stabilization-checklist.md`. No merge to `main` / deploy without explicit Tyler approval.
 
 ### Cross-cutting secrets summary (set before enforcement)
-`ADMIN_PROOF_SECRET` (Pages env + Worker), `R2_URL_SIGNING_SECRET` (Worker), plus feature flags `ADMIN_PROOF_ENFORCE` and `CSP_REPORT_ONLY` (Worker vars). Confirm no public domain is attached to R2 bucket `studio-bythereeses`. Run `npm run cf:typegen` after adding the first R2 code use.
+`ADMIN_PROOF_SECRET` (Pages env + Worker), `R2_URL_SIGNING_SECRET` (Worker), plus feature flags `ADMIN_PROOF_ENFORCE` (off/`"log"`/`"1"`) and `CSP_MODE` (off/`"report"`/`"enforce"`) (Worker vars, both default off). Confirm no public domain is attached to R2 bucket `studio-bythereeses`. Run `npm run cf:typegen` after adding the first R2 code use.
