@@ -100,6 +100,7 @@ These routes are non-browser integration surfaces and must remain explicitly gua
 - `/api/google/auth`: starts admin Google OAuth.
 - `/api/google/callback`: completes admin Google OAuth.
 - `/api/cron/scheduler-reminders`: bearer secret required.
+- `/api/inbound/inquiry-email` (Phase 8a): **public-but-bearer-authed.** Dedicated `INBOUND_INTAKE_SECRET` bearer required (fail-closed: `503` when unset, `401` when wrong, `503` when `INQUIRY_INTAKE_ENABLED != "true"`). The `reese-inquiry-intake` Email Routing Worker is the only caller. It is proxy-public (`isStudioPublicPath`) and admin-proof-exempt (`adminProofRequired` → `false`) so the Worker's unauthenticated-to-the-proxy POST is not 303'd to `/admin/login` (which would be a silent lead drop); it is authenticated by its own secret, NOT the admin session. It is deliberately NOT in the origin-guard bypass, so it is reachable only through the proxy (which stamps the origin secret), never directly on `*.workers.dev`. Authority is write-triage-only: it can insert an `inbound_inquiries` staging row + an authority-less review task, and can never create a project, move money, or send email.
 
 ## Static Assets
 

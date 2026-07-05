@@ -534,6 +534,47 @@ export const assetObjects = sqliteTable("asset_objects", {
   deletedAt: text("deleted_at"),
 });
 
+// Phase 8a: pre-canonical staging table for inbound inquiry emails. The entire
+// message is attacker-controlled; rows here NEVER become canonical without an
+// explicit admin approval action. Inbound only ever inserts (create-if-absent
+// by message_id); the drafter writes only the draft_* columns; nothing here
+// mutates projects/clients/communications on its own.
+export const inboundInquiries = sqliteTable("inbound_inquiries", {
+  id: text("id").primaryKey(),
+  status: text("status").notNull().default("new"),
+  // new | proposed | approved | dismissed | spam
+  // --- raw (audit) ---
+  messageId: text("message_id"),
+  inReplyTo: text("in_reply_to"),
+  referencesHeader: text("references_header"),
+  envelopeFrom: text("envelope_from"),
+  headerFrom: text("header_from"),
+  toAddress: text("to_address"),
+  subject: text("subject"),
+  rawStorageKey: text("raw_storage_key"),
+  bodyText: text("body_text"),
+  // --- auth trust signals (display only, never authz) ---
+  spfResult: text("spf_result"),
+  dkimResult: text("dkim_result"),
+  dmarcResult: text("dmarc_result"),
+  // --- parsed guesses (best-effort, low-trust) ---
+  parsedName: text("parsed_name"),
+  parsedEmail: text("parsed_email"),
+  parsedEventDate: text("parsed_event_date"),
+  parsedVenue: text("parsed_venue"),
+  parsedJson: text("parsed_json"),
+  // --- linkage after approval ---
+  agentTaskId: text("agent_task_id").references(() => agentTasks.id, { onDelete: "set null" }),
+  projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
+  proposedProjectJson: text("proposed_project_json"),
+  draftReplySubject: text("draft_reply_subject"),
+  draftReplyBody: text("draft_reply_body"),
+  dismissedReason: text("dismissed_reason"),
+  receivedAt: text("received_at").notNull(),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
 export const activityLogs = sqliteTable("activity_logs", {
   id: text("id").primaryKey(),
   projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
@@ -573,3 +614,4 @@ export type InvoicePayment = typeof invoicePayments.$inferSelect;
 export type PortalAccessToken = typeof portalAccessTokens.$inferSelect;
 export type AssetObject = typeof assetObjects.$inferSelect;
 export type ActivityLog = typeof activityLogs.$inferSelect;
+export type InboundInquiry = typeof inboundInquiries.$inferSelect;

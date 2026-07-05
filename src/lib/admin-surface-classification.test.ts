@@ -19,6 +19,7 @@ const studioPublic = [
   "/portal/login/verify/some-token", // Phase 6.5 magic-link verify (render + consume)
   "/portal/proposals/abc", // Phase-6 fix (a): the whole /portal subtree is public
   "/api/portal/request-link", // Phase 6.5 self-service request endpoint (POST)
+  "/api/inbound/inquiry-email", // Phase 8a inbound intake (self-authed by INBOUND_INTAKE_SECRET bearer)
   "/p/some-token",
   "/proposal/some-token",
   "/api/proposal/some-token/accept",

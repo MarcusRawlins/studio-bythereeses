@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "reese-inquiry-intake",
+  "main": "workers/inquiry-intake.ts",
+  "account_id": "765e233f8635f207a8a3db4847efd3e9",
+  "compatibility_date": "2026-04-28",
+  // No cron trigger. The trigger is the Cloudflare Email Routing rule
+  // (dashboard-configured: inquiries@bythereeses.com → Send to a Worker →
+  // reese-inquiry-intake). Deploy with:
+  //   wrangler deploy --config wrangler.inquiry-intake.jsonc
+  // Set secrets with:
+  //   wrangler secret put INBOUND_INTAKE_SECRET --config wrangler.inquiry-intake.jsonc
+  "vars": {
+    "INTAKE_ENDPOINT": "https://studio.bythereeses.com/api/inbound/inquiry-email",
+    // Flag. Default OFF — flag-off forwards every message to INTAKE_FALLBACK,
+    // never drops (B3a). Flip to "true" only after INTAKE_FALLBACK is verified.
+    "INTAKE_ENABLED": "false",
+    // ROLLOUT GATE (N8): INTAKE_FALLBACK MUST be a VERIFIED Email Routing
+    // destination address on the bythereeses.com zone. Forwarding to an
+    // unverified address does not deliver — that would reintroduce the
+    // silent-drop bug this design forbids. Verify it in the Cloudflare dashboard
+    // before enabling. Placeholder below; set to the real verified inbox.
+    "INTAKE_FALLBACK": "hello@bythereeses.com"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

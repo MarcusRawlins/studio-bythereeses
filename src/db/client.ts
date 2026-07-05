@@ -583,6 +583,52 @@ function migrate(database: LocalDatabase) {
       .replace(/ALTER TABLE portal_access_tokens ADD COLUMN request_batch_id TEXT;\s*/g, ""));
   }
 
+  const inboundInquiriesMigrationPath = path.join(process.cwd(), "migrations", "0085_inbound_inquiries.sql");
+  if (fs.existsSync(inboundInquiriesMigrationPath)) {
+    database.exec(fs.readFileSync(inboundInquiriesMigrationPath, "utf8"));
+  }
+
+  // Phase 8a: inbound inquiry-email triage staging table. Additive, idempotent
+  // create so local dev (better-sqlite3) and any partially-migrated prod D1 both
+  // converge without a blanket `migrations apply`. The UNIQUE index on
+  // message_id is the dedupe key (INSERT-OR-IGNORE, never UPDATE from inbound).
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS inbound_inquiries (
+      id TEXT PRIMARY KEY NOT NULL,
+      status TEXT NOT NULL DEFAULT 'new',
+      message_id TEXT,
+      in_reply_to TEXT,
+      references_header TEXT,
+      envelope_from TEXT,
+      header_from TEXT,
+      to_address TEXT,
+      subject TEXT,
+      raw_storage_key TEXT,
+      body_text TEXT,
+      spf_result TEXT,
+      dkim_result TEXT,
+      dmarc_result TEXT,
+      parsed_name TEXT,
+      parsed_email TEXT,
+      parsed_event_date TEXT,
+      parsed_venue TEXT,
+      parsed_json TEXT,
+      agent_task_id TEXT REFERENCES agent_tasks(id) ON DELETE SET NULL,
+      project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+      proposed_project_json TEXT,
+      draft_reply_subject TEXT,
+      draft_reply_body TEXT,
+      dismissed_reason TEXT,
+      received_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_inquiries_message_id ON inbound_inquiries(message_id);
+    CREATE INDEX IF NOT EXISTS idx_inbound_inquiries_status_created ON inbound_inquiries(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_inbound_inquiries_received ON inbound_inquiries(received_at);
+    CREATE INDEX IF NOT EXISTS idx_inbound_inquiries_parsed_email ON inbound_inquiries(parsed_email);
+  `);
+
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),
   );

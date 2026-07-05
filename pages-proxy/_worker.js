@@ -206,6 +206,14 @@ export function isStudioPublicPath(pathname) {
     // Phase 6.5: the self-service magic-link request endpoint (POST). Client-
     // reachable, so it must not be gated behind the admin Google session.
     pathname === "/api/portal/request-link" ||
+    // Phase 8a: the inbound inquiry-email intake endpoint. Self-authenticated by
+    // the dedicated INBOUND_INTAKE_SECRET bearer (same rationale as /api/mcp), so
+    // it must NOT be gated behind the admin Google session — otherwise the intake
+    // Worker's unauthenticated POST is 303'd to /admin/login (a 200 login PAGE),
+    // the Worker mistakes that for success, and the lead is silently lost. It is
+    // NOT in the origin-guard bypass; it is reachable only through the proxy,
+    // which stamps the origin secret.
+    pathname === "/api/inbound/inquiry-email" ||
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/api/proposal/") ||
     // Private R2 asset serving (Phase 6 §1b): signed-URL / portal / proposal
@@ -258,7 +266,10 @@ export function rateLimitKind(url, request) {
     request.method !== "GET" &&
     (
       pathname.startsWith("/api/scheduler/bookings") ||
-      /^\/api\/questionnaires\/[^/]+\/responses\/?$/.test(pathname)
+      /^\/api\/questionnaires\/[^/]+\/responses\/?$/.test(pathname) ||
+      // Phase 8a: the inbound intake endpoint is now proxy-reachable — give it a
+      // per-IP cap. Belt-and-suspenders alongside the CRM-side rate/volume guard.
+      pathname === "/api/inbound/inquiry-email"
     )
   ) {
     return "publicMutation";

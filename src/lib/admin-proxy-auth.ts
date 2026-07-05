@@ -194,6 +194,11 @@ export function adminProofRequired(pathname: string): boolean {
   if (path === "/api/stripe/webhook") return false;
   if (path.startsWith("/api/google/")) return false;
   if (path.startsWith("/api/cron/")) return false;
+  // Phase 8a: inbound inquiry-email intake — authenticated by its own dedicated
+  // INBOUND_INTAKE_SECRET bearer, not the admin proof. Without this it falls
+  // through to `return true` and ADMIN_PROOF_ENFORCE would 404 the intake
+  // Worker's POST (forcing every lead to the human fallback — no ingest at all).
+  if (path === "/api/inbound/inquiry-email") return false;
 
   // Client portal (public, client-reachable). BLOCKING [B1]: the ENTIRE /portal
   // subtree must stay public — including /portal/login, /portal/login/verify/*,

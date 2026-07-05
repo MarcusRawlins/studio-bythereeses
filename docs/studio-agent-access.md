@@ -132,6 +132,7 @@ Every secret/credential Studio depends on, where it lives, who/what consumes it,
 | `STRIPE_*` | Worker secret | Payments (Checkout, webhooks) | Provider rotation |
 | `RESEND_*` | Worker secret | Email delivery | Provider rotation |
 | `CLOUDFLARE_API_TOKEN` | keychain `reese-crm-cloudflare-api-token` | Deploy, backup/D1 export, `npm run drill:restore` source data | Scheduled |
+| `INBOUND_INTAKE_SECRET` *(Phase 8a — inquiry-email intake)* | `reese-inquiry-intake` Worker secret; app Worker secret | Intake Worker → `POST /api/inbound/inquiry-email` (write-triage-only; cannot create projects, move money, or send email). Dedicated + independently rotatable — NOT the shared agent token. | Suspected exposure; rotate independently of `STUDIO_AGENT_API_TOKEN` |
 
 Ops stabilization checklist cross-reference: `docs/ops-stabilization-checklist.md` "Next Branch Plan" item 6. Security-model cross-reference: `docs/security-model.md` "Remaining Hardening".
 

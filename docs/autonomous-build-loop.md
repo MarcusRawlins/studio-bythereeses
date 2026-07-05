@@ -29,7 +29,7 @@ reviewer prompt is seeded with the **Active-Learning Log** below.
 | --- | --- | --- |
 | 6 | Hardening + R2 private access | ✅ deployed 2026-07-05 (M4/CSP off, R2 dark) |
 | 6.5 | Portal self-service magic-link | ✅ deployed 2026-07-05 (flag off) — Worker `b7c34f40`, proxy `821ed36f`, migration 0084 |
-| 8a | Inquiry-email intake | 🔵 building (spec Fable-revised) |
+| 8a | Inquiry-email intake | 🔵 built + Fable-fixed (REJECT→resolved), deploying dark |
 | 7 | Client galleries (integrate) | ⏭️ spec → build |
 | 8b | SMS (Twilio) | ⏭️ spec → build |
 | 8c | Automated sequences (dunning/nudges/reviews) | ⏭️ spec → build |
@@ -86,3 +86,11 @@ Patterns the Fable gate has caught repeatedly — pre-empt them:
 - **PRG uniform response:** a POST that must not leak (match vs no-match, flag state) can answer with
   a 303 to a neutral confirmation (`?sent=1`) — verify the redirect target is the neutral page, NOT
   `/admin/login` (which would mean the proxy is login-walling a should-be-public endpoint).
+- **Proxy composition (REJECT-class):** any endpoint that must be reachable through the Pages proxy
+  needs BOTH `isStudioPublicPath` (or the right host allowlist) AND an `adminProofRequired` exemption
+  — otherwise the proxy 303s it to `/admin/login`, which returns a **200** login page. A machine client
+  using `redirect: "follow"` + `res.ok` will read that 200 as success → a silent success-that-didn't-happen
+  (e.g. discarded inbound mail). Machine callers MUST use `redirect: "manual"` and treat any
+  redirect/opaqueredirect/3xx as failure. Do NOT scope a build agent away from the proxy when its
+  endpoint depends on the proxy classifier — review the proxy composition explicitly, and Fable-review
+  the new endpoint against the LIVE proxy/origin-guard/admin-proof trust boundary, not just its own files.
