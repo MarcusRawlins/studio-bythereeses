@@ -502,6 +502,16 @@ export const portalAccessTokens = sqliteTable("portal_access_tokens", {
   clientId: text("client_id").references(() => clients.id, { onDelete: "set null" }),
   tokenHash: text("token_hash").notNull().unique(),
   label: text("label"),
+  // Phase 6.5: distinguishes the existing 30-day session token ("session",
+  // default for every pre-6.5 row) from a short-TTL, single-use magic-request
+  // token ("magic_request") minted by the self-service email login.
+  kind: text("kind").notNull().default("session"),
+  // Set once when a magic-request token is redeemed. The single-use claim is an
+  // atomic `UPDATE ... WHERE consumed_at IS NULL RETURNING`.
+  consumedAt: text("consumed_at"),
+  // Shared across every token minted for one request (one per active project),
+  // so the per-email cap counts request-batches, not raw tokens.
+  requestBatchId: text("request_batch_id"),
   expiresAt: text("expires_at").notNull(),
   revokedAt: text("revoked_at"),
   lastUsedAt: text("last_used_at"),

@@ -30,6 +30,15 @@ export default async function PortalPage({
           <p className="mt-3 text-sm leading-6 text-[var(--ink-muted)]">
             Open a secure portal link from Tyler to view your project. Portal links are project-specific and can be revoked at any time.
           </p>
+          {process.env.PORTAL_MAGIC_LINK_ENABLED === "1" && (
+            <p className="mt-4 text-sm leading-6 text-[var(--ink-muted)]">
+              Have a project with us?{" "}
+              <a href="/portal/login" className="font-semibold text-[var(--accent)] underline">
+                Email yourself a sign-in link
+              </a>
+              .
+            </p>
+          )}
           {error && <p className="mt-4 rounded-md border border-[var(--danger)] bg-[#fff4f1] p-3 text-sm text-[var(--danger)]">That portal link is invalid or expired.</p>}
         </div>
       </main>

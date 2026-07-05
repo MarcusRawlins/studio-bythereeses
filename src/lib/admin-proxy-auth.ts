@@ -195,9 +195,15 @@ export function adminProofRequired(pathname: string): boolean {
   if (path.startsWith("/api/google/")) return false;
   if (path.startsWith("/api/cron/")) return false;
 
-  // Client portal (public, client-reachable). BLOCKING: keep `/portal` public.
-  if (path === "/portal" || path.startsWith("/portal/proposals/")) return false;
+  // Client portal (public, client-reachable). BLOCKING [B1]: the ENTIRE /portal
+  // subtree must stay public — including /portal/login, /portal/login/verify/*,
+  // and /portal/proposals/* — or the self-service login flow (and the existing
+  // proposal detail) 404s under ADMIN_PROOF_ENFORCE=1. Kept in lockstep with the
+  // proxy's isPortalPublicPath (drift test).
+  if (path === "/portal" || path.startsWith("/portal/")) return false;
   if (path.startsWith("/p/")) return false;
+  // Phase 6.5 self-service request endpoint (not under /portal/).
+  if (path === "/api/portal/request-link") return false;
 
   // Proposal token surfaces (token in the URL is the credential).
   if (path.startsWith("/proposal/") || path.startsWith("/api/proposal/")) return false;

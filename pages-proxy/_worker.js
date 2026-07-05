@@ -27,6 +27,11 @@ const RATE_LIMITS = {
   assetAccess: { max: 120, windowSeconds: 60 },
   publicMutation: { max: 20, windowSeconds: 300 },
   agentApi: { max: 120, windowSeconds: 60 },
+  // Phase 6.5: per-IP cap on the self-service magic-link request endpoint. This
+  // is the ONLY per-IP limiter for that endpoint (the endpoint is deliberately
+  // NOT origin-bypass-public), so keeping every request behind the proxy is what
+  // prevents email-bombing.
+  requestLink: { max: 5, windowSeconds: 900 },
 };
 
 function base64UrlEncode(input) {
@@ -40,6 +45,20 @@ function base64UrlDecode(value) {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
   const binary = atob(padded);
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+// Constant-time comparison of two equal-length base64url strings. The Worker
+// runtime has no node:crypto.timingSafeEqual, so accumulate the XOR of every
+// byte (mirrors admin-proxy-auth.ts constantTimeEqual / agent-api tokensMatch).
+// Length is not secret (fixed-size SHA-256 HMAC), so an early length mismatch is
+// fine.
+function constantTimeEqual(a, b) {
+  const ab = textEncoder.encode(a);
+  const bb = textEncoder.encode(b);
+  if (ab.length !== bb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ab.length; i += 1) diff |= ab[i] ^ bb[i];
+  return diff === 0;
 }
 
 async function hmac(secret, value) {
@@ -69,14 +88,14 @@ async function createAdminSession(email, env) {
   return `${payload}.${signature}`;
 }
 
-async function verifyAdminSession(request, env) {
+export async function verifyAdminSession(request, env) {
   if (!env.ADMIN_SESSION_SECRET) return false;
   const token = parseCookies(request)[ADMIN_SESSION_COOKIE];
   if (!token) return false;
   const [payload, signature] = token.split(".");
   if (!payload || !signature) return false;
   const expected = await hmac(env.ADMIN_SESSION_SECRET, payload);
-  if (signature !== expected) return false;
+  if (!constantTimeEqual(signature, expected)) return false;
 
   try {
     const decoded = new TextDecoder().decode(base64UrlDecode(payload));
@@ -102,7 +121,12 @@ function clearCookie(name) {
 // there so the token can never leak via the Referer header on outbound navigations.
 // Every other surface keeps the default strict-origin-when-cross-origin policy.
 function referrerPolicyFor(pathname) {
-  return pathname.startsWith("/proposal/") || pathname.startsWith("/api/proposal/")
+  return pathname.startsWith("/proposal/")
+    || pathname.startsWith("/api/proposal/")
+    // Phase 6.5: the magic-link verify URL carries the single-use token in the
+    // path, so force no-referrer here too (the origin route also sets it, but the
+    // proxy re-derives referrer-policy on every response and would clobber it).
+    || pathname.startsWith("/portal/login/verify/")
     ? "no-referrer"
     : SECURITY_HEADERS["referrer-policy"];
 }
@@ -157,8 +181,15 @@ function isPublicAssetPath(pathname) {
 }
 
 export function isPortalPublicPath(pathname) {
-  return pathname === "/portal" || pathname.startsWith("/p/");
+  // Phase 6.5 / Phase-6 fix (a): the ENTIRE /portal subtree is client-facing and
+  // self-protected by the portal session cookie (or public by design), so it
+  // must never be gated behind the admin Google session. This subsumes
+  // /portal/login, /portal/login/verify/*, and fixes the pre-existing
+  // /portal/proposals/:id login-wall bounce to /admin/login.
+  return pathname === "/portal" || pathname.startsWith("/portal/") || pathname.startsWith("/p/");
 }
+
+export { constantTimeEqual };
 
 function isStudioTrustedAgentApiPath(pathname) {
   return pathname === "/api/mcp" || pathname.startsWith("/api/agent/");
@@ -172,6 +203,9 @@ export function isStudioPublicPath(pathname) {
     pathname === "/api/google/callback" ||
     isStudioTrustedAgentApiPath(pathname) ||
     isPortalPublicPath(pathname) ||
+    // Phase 6.5: the self-service magic-link request endpoint (POST). Client-
+    // reachable, so it must not be gated behind the admin Google session.
+    pathname === "/api/portal/request-link" ||
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/api/proposal/") ||
     // Private R2 asset serving (Phase 6 §1b): signed-URL / portal / proposal
@@ -202,15 +236,20 @@ function clientAddress(request) {
     || "unknown";
 }
 
-function rateLimitKind(url, request) {
+export function rateLimitKind(url, request) {
   const pathname = url.pathname;
   if (pathname === "/admin/auth/google" || pathname === "/api/google/callback") return "adminAuth";
   if (pathname === "/api/mcp" || pathname.startsWith("/api/agent/")) return "agentApi";
   if (pathname.startsWith("/api/assets/")) return "assetAccess";
+  // Phase 6.5: the magic-link request endpoint gets its own per-IP cap. Match it
+  // (POST) BEFORE the generic /portal → tokenAccess branch below; the verify GET
+  // route (/portal/login/verify/*) stays under tokenAccess (token consumption).
+  if (request.method !== "GET" && pathname === "/api/portal/request-link") return "requestLink";
   if (
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/p/") ||
     pathname === "/portal" ||
+    pathname.startsWith("/portal/") ||
     pathname.startsWith("/api/proposal/")
   ) {
     return "tokenAccess";

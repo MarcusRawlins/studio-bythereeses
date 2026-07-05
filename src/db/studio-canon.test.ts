@@ -2623,6 +2623,69 @@ async function main() {
     "portal tokens should only target clients linked to the token project",
   );
 
+  // Phase 6.5: kind + consumed_at canon guards on the recreated detail-text
+  // triggers (migration 0084). A valid magic_request row must pass.
+  database.prepare(`
+    INSERT INTO portal_access_tokens (
+      id, project_id, client_id, token_hash, label, kind, request_batch_id, expires_at, created_at
+    ) VALUES (
+      'portal-magic-1', 'project-1', 'client-1',
+      '5123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      'Self-service magic link', 'magic_request', 'batch-1', '2026-07-13T12:00:00.000Z', ?
+    )
+  `).run(now);
+  assert.deepEqual(
+    database.prepare("SELECT kind FROM portal_access_tokens WHERE id = 'portal-magic-1'").get(),
+    { kind: "magic_request" },
+    "a valid magic_request token should insert cleanly",
+  );
+  assert.throws(
+    () => database.prepare(`
+      INSERT INTO portal_access_tokens (
+        id, project_id, client_id, token_hash, kind, expires_at, created_at
+      ) VALUES (
+        'portal-bad-kind', 'project-1', 'client-1',
+        '6123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        'not_a_kind', '2026-07-13T12:00:00.000Z', ?
+      )
+    `).run(now),
+    /kind must be canonical/,
+    "portal token kind must be one of session|magic_request",
+  );
+  assert.throws(
+    () => database.prepare(`
+      INSERT INTO portal_access_tokens (
+        id, project_id, client_id, token_hash, kind, consumed_at, expires_at, created_at
+      ) VALUES (
+        'portal-blank-consumed', 'project-1', 'client-1',
+        '7123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        'magic_request', '   ', '2026-07-13T12:00:00.000Z', ?
+      )
+    `).run(now),
+    /portal access token detail text must be null or trimmed non-empty text/,
+    "portal token consumed_at must be null or trimmed non-empty text on insert",
+  );
+  assert.throws(
+    () => database.prepare(`
+      UPDATE portal_access_tokens
+      SET consumed_at = ' 2026-07-13T12:00:00.000Z '
+      WHERE id = 'portal-magic-1'
+    `).run(),
+    /portal access token detail text must be null or trimmed non-empty text/,
+    "portal token consumed_at must be trimmed on update (guard fires on UPDATE OF consumed_at)",
+  );
+  // A clean single-use claim (the atomic path) must pass the recreated guard.
+  database.prepare(`
+    UPDATE portal_access_tokens
+    SET consumed_at = '2026-07-05T12:00:00.000Z'
+    WHERE id = 'portal-magic-1'
+  `).run();
+  assert.deepEqual(
+    database.prepare("SELECT consumed_at FROM portal_access_tokens WHERE id = 'portal-magic-1'").get(),
+    { consumed_at: "2026-07-05T12:00:00.000Z" },
+    "a trimmed consumed_at update should be accepted",
+  );
+
   database.prepare(`
     INSERT INTO activity_logs (
       id, project_id, client_id, action, actor_type, actor_name, metadata, created_at

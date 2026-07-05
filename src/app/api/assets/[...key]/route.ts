@@ -71,6 +71,11 @@ async function portalSessionAuthorizes(request: Request, projectId: string): Pro
       eq(portalAccessTokens.id, tokenId),
       eq(portalAccessTokens.projectId, projectId),
       isNull(portalAccessTokens.revokedAt),
+      // [N4, extended] Only a kind:"session" token authorizes an asset read. A
+      // cookie pointing at a short-TTL magic_request row (never valid as a
+      // session) must never serve a private asset. Mirrors the same pin in
+      // requirePortalProject / authenticatePortalToken.
+      eq(portalAccessTokens.kind, "session"),
     ),
   });
   if (!token || new Date(token.expiresAt) < new Date()) return false;

@@ -15,6 +15,10 @@ import {
 // --------------------------------------------------------------------------
 const studioPublic = [
   "/portal", // BLOCKING: the client portal must never be 404'd under enforcement
+  "/portal/login", // Phase 6.5 self-service request page
+  "/portal/login/verify/some-token", // Phase 6.5 magic-link verify (render + consume)
+  "/portal/proposals/abc", // Phase-6 fix (a): the whole /portal subtree is public
+  "/api/portal/request-link", // Phase 6.5 self-service request endpoint (POST)
   "/p/some-token",
   "/proposal/some-token",
   "/api/proposal/some-token/accept",
@@ -31,13 +35,18 @@ for (const path of studioPublic) {
   assert.equal(adminProofRequired(path), false, `${path} must be public (no admin proof)`);
   assert.equal(isStudioPublicPath(path), true, `${path} must be proxy-public on the studio host`);
 }
-// /portal is specifically the isPortalPublicPath surface.
+// The proxy's portal predicate now covers the whole /portal subtree (Phase-6 fix
+// (a) + Phase 6.5). Pin it so it stays in lockstep with adminProofRequired.
 assert.equal(isPortalPublicPath("/portal"), true, "/portal is a proxy portal-public path");
+assert.equal(isPortalPublicPath("/portal/login"), true, "/portal/login is a proxy portal-public path");
+assert.equal(isPortalPublicPath("/portal/login/verify/tok"), true, "the verify route is proxy portal-public");
+assert.equal(isPortalPublicPath("/portal/proposals/abc"), true, "/portal/proposals/* is proxy portal-public");
 
-// The client portal proposal detail is kept public by the classifier (client-
-// reachable) even though isPortalPublicPath is an exact `/portal` match — assert
-// the classifier decision directly so /portal/proposals/* is never proof-gated.
+// The client portal proposal detail and the magic-link surfaces are kept public
+// by the classifier (client-reachable) — assert the classifier decisions
+// directly so the /portal subtree is never proof-gated.
 assert.equal(adminProofRequired("/portal/proposals/abc"), false, "/portal/proposals/* must stay public");
+assert.equal(adminProofRequired("/portal/login/verify/tok"), false, "/portal/login/verify/* must stay public");
 
 // --------------------------------------------------------------------------
 // Schedule-host public surfaces: classifier public, proxy isSchedulePublicPath agrees.

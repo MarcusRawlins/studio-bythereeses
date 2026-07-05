@@ -572,6 +572,17 @@ function migrate(database: LocalDatabase) {
     database.exec(fs.readFileSync(assetObjectsMigrationPath, "utf8"));
   }
 
+  const portalMagicRequestTokensMigrationPath = path.join(process.cwd(), "migrations", "0084_portal_magic_request_tokens.sql");
+  if (fs.existsSync(portalMagicRequestTokensMigrationPath)) {
+    addColumnIfMissing(database, "portal_access_tokens", "kind", "TEXT NOT NULL DEFAULT 'session'");
+    addColumnIfMissing(database, "portal_access_tokens", "consumed_at", "TEXT");
+    addColumnIfMissing(database, "portal_access_tokens", "request_batch_id", "TEXT");
+    database.exec(fs.readFileSync(portalMagicRequestTokensMigrationPath, "utf8")
+      .replace(/ALTER TABLE portal_access_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'session';\s*/g, "")
+      .replace(/ALTER TABLE portal_access_tokens ADD COLUMN consumed_at TEXT;\s*/g, "")
+      .replace(/ALTER TABLE portal_access_tokens ADD COLUMN request_batch_id TEXT;\s*/g, ""));
+  }
+
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),
   );

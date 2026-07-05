@@ -44,6 +44,38 @@ async function sendResendEmail(input: {
   return response.ok;
 }
 
+// Phase 6.5: self-service portal magic-link email. One email per request
+// regardless of project count; the body lists a "View {project}" link per
+// active project. Reuses the private Resend sender (returns false, never throws,
+// when RESEND_API_KEY is unset) and is fire-and-forget relative to the HTTP
+// response.
+export async function sendPortalMagicLinkEmail(input: {
+  to: string;
+  clientFirstName: string | null;
+  links: Array<{ projectName: string; url: string }>;
+  ttlMinutes: number;
+}): Promise<boolean> {
+  const greetingName = input.clientFirstName?.trim() || "there";
+  const text = [
+    `Hi ${greetingName},`,
+    "",
+    "Here's your secure sign-in link for The Reeses client portal.",
+    "",
+    ...input.links.map((link) => `  View ${link.projectName}: ${link.url}`),
+    "",
+    `This link expires in ${input.ttlMinutes} minutes and can be used once. If you didn't`,
+    "request it, you can ignore this email — no one can access your portal without it.",
+    "",
+    "The Reeses Studio",
+  ].join("\n");
+
+  return sendResendEmail({
+    to: input.to,
+    subject: "Your Reese Photography portal sign-in link",
+    text,
+  });
+}
+
 export async function sendBookingEmails({ booking, meetingType, manageUrl, rescheduleUrl }: BookingEmailInput) {
   const when = formatDateTime(booking.startAt);
   const location = meetingType.locationLabel || "Zoom";

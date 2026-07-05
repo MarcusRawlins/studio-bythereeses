@@ -181,6 +181,20 @@ async function main() {
     "revoked portal token must 404",
   );
   database.prepare(`UPDATE portal_access_tokens SET revoked_at = NULL WHERE id = 'portal-token-1'`).run();
+  // 7d. A cookie pointing at a magic_request-kind token must NOT authorize an
+  // asset read (N4, extended): only kind:"session" tokens serve assets, even
+  // when the row is live and scoped to the right project.
+  const magicHash = createHash("sha256").update("raw-magic-request-token").digest("hex");
+  database.prepare(`
+    INSERT INTO portal_access_tokens (id, project_id, client_id, token_hash, label, kind, request_batch_id, expires_at, created_at)
+    VALUES ('portal-magic-1', 'project-1', 'client-1', ?, 'Self-service magic link', 'magic_request', 'batch-1', ?, ?)
+  `).run(magicHash, futureIso(), now);
+  const magicCookie = "portal_token_id=portal-magic-1; portal_project_id=project-1";
+  assert.equal(
+    (await get(`/api/assets/${invoice1.key}`, { headers: { cookie: magicCookie } })).status,
+    404,
+    "a magic_request token cookie must not authorize an asset read",
+  );
 
   // 8. Proposal token (?token=), contract_pdf scoped to its proposal only.
   // 8a. Its own contract -> 200, with NO write side effects (N2): the asset GET

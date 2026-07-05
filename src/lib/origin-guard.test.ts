@@ -148,4 +148,51 @@ assert.equal(
   "private API mutations with the shared secret should be allowed",
 );
 
+// --------------------------------------------------------------------------
+// Phase 6.5 [B2] rate-limit-bypass negative test. The self-service request
+// endpoint and the verify page are DELIBERATELY NOT in the origin bypass lists:
+// a direct *.workers.dev request (skipping the proxy, and therefore skipping the
+// only per-IP `requestLink` limiter) must 404, forcing all real traffic through
+// the proxy. Adding them to the bypass lists would enable email-bombing.
+// --------------------------------------------------------------------------
+assert.equal(
+  isPublicOriginBypassApiPath("/api/portal/request-link"),
+  false,
+  "the magic-link request endpoint must NOT bypass the origin guard (per-IP limiter lives at the proxy)",
+);
+assert.equal(
+  isPublicOriginBypassPath("/portal/login/verify/tok"),
+  false,
+  "the magic-link verify page must NOT bypass the origin guard",
+);
+assert.equal(
+  isPublicOriginBypassPath("/portal/login"),
+  false,
+  "the magic-link request page must NOT bypass the origin guard",
+);
+assert.equal(
+  guardDirectWorkerApiRequest(
+    new Request("https://reese-photography-crm.solitary-flower-c3ab.workers.dev/api/portal/request-link", {
+      method: "POST",
+    }),
+  )?.status,
+  404,
+  "direct workers.dev POST to the request endpoint (no origin secret) must be 404'd",
+);
+assert.equal(
+  guardDirectWorkerPageRequest(
+    new Request("https://reese-photography-crm.solitary-flower-c3ab.workers.dev/portal/login/verify/tok"),
+  )?.status,
+  404,
+  "direct workers.dev GET to the verify page (no origin secret) must be 404'd",
+);
+// /p/ stays origin-bypass-public (a browser can legitimately hit the worker
+// origin directly for those) — the asymmetry with the request endpoint is
+// intentional.
+assert.equal(
+  isPublicOriginBypassPath("/p/some-token"),
+  true,
+  "direct /p/ token links stay origin-bypass-public (unchanged)",
+);
+
 console.log("origin guard tests passed");
