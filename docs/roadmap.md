@@ -34,17 +34,19 @@
 
 ---
 
-## Delivery status (as of 2026-07-04)
+## Delivery status (as of 2026-07-05)
 
-Phases 1–5 are **built and in production**. See [`qa-production-workflows-2026-07-04.md`](qa-production-workflows-2026-07-04.md) for the latest QA + security pass (0 critical/0 high; medium/low booking-hardening fixes landed on branch `claude/reese-crm-production-qa-4caxz0`).
+Phases 1–5 are **built and in production**. See [`qa-production-workflows-2026-07-04.md`](qa-production-workflows-2026-07-04.md) for the latest QA + security pass (0 critical/0 high; medium/low booking-hardening fixes).
 
-Phases 6–10 below are **planned, not yet built**. They are sequenced by client-facing value × revenue proximity and by dependency order (Phase 6 unblocks Phase 7). Each phase is independently shippable and builds on existing modules (portal, `project-workflow-automation`, agent/MCP, finance ledger) — none is a rewrite. No Phase 6–10 work merges to `main` or deploys without explicit human (Tyler) approval; AI review runs on Fable before any phase branch is proposed.
+**Phase 6 is DEPLOYED to production (2026-07-05)** on branch `claude/reese-crm-production-qa-4caxz0`. See [`deploy-record-2026-07-05.md`](deploy-record-2026-07-05.md). All 7 tasks Fable-gated; Worker `d1cd7b34` (rollback `b9751424`), Pages-proxy `6d6df58a`, real D1 backup taken pre-deploy, `asset_objects` table applied. **M4 and CSP ship OFF** (`ADMIN_PROOF_ENFORCE`/`CSP_MODE` unset) — zero behavior change until deliberately enabled; R2 storage/serving is live but dark (no consumer mints assets yet). Enable runbook is in the deploy record.
 
-## Phase 6: Hardening + R2 private access (prerequisite)
+Phases 6.5–10 below are **planned**; 6.5 + 8a specs written and Fable-reviewed (revising per feedback). Sequenced by client-facing value × revenue proximity and dependency order. Each phase is independently shippable and builds on existing modules — none is a rewrite. AI review runs on Fable before merge; enforcement flags (M4/CSP) flip only after observation windows.
 
-- Close deferred security items: signed proxy header for in-app admin authz (M4), `Referrer-Policy` on `/proposal/**` (L7), CSP `script-src` via Next.js nonce (L8), finance dead-code cleanup.
-- Ops drills: D1 restore drill, agent-token rotation + "who has access" inventory.
-- **R2 private object access** for files and generated PDFs — prerequisite for galleries.
+## Phase 6: Hardening + R2 private access (prerequisite) — ✅ DEPLOYED 2026-07-05
+
+- ✅ Deferred security items closed: signed proxy header for in-app admin authz (M4, off), `Referrer-Policy` on `/proposal/**` (L7, live), CSP `script-src` via nonce (L8, off/report-capable), finance dead-code cleanup (live).
+- ✅ Ops drills: D1 restore-verify (`drill:restore`), agent-token rotation runbook + "who has access" inventory.
+- ✅ **R2 private object access** for files and generated PDFs — live (dark), prerequisite for galleries.
 
 ## Phase 7: Client galleries + image delivery (integration-first)
 
