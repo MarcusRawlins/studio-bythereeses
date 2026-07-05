@@ -28,8 +28,8 @@ reviewer prompt is seeded with the **Active-Learning Log** below.
 | # | Phase / module | Status |
 | --- | --- | --- |
 | 6 | Hardening + R2 private access | ✅ deployed 2026-07-05 (M4/CSP off, R2 dark) |
-| 6.5 | Portal self-service magic-link | 🔵 building (spec Fable-approved) |
-| 8a | Inquiry-email intake | ⏭️ spec Fable-approved; build queued |
+| 6.5 | Portal self-service magic-link | ✅ deployed 2026-07-05 (flag off) — Worker `b7c34f40`, proxy `821ed36f`, migration 0084 |
+| 8a | Inquiry-email intake | 🔵 building (spec Fable-revised) |
 | 7 | Client galleries (integrate) | ⏭️ spec → build |
 | 8b | SMS (Twilio) | ⏭️ spec → build |
 | 8c | Automated sequences (dunning/nudges/reviews) | ⏭️ spec → build |
@@ -79,3 +79,10 @@ Patterns the Fable gate has caught repeatedly — pre-empt them:
   `migrations apply --remote` (would error on already-existing tables). Reconcile the tracker separately.
 - **Deploy rails:** real D1 backup → capture Worker rollback version → deploy → health-check
   (redirects, 401/405, security headers, referrer-policy) → rollback on failure.
+- **Migration ordering:** a schema-dependent change that is NOT flag-gated (e.g. an always-on
+  column filter) requires its migration applied to prod **before** the Worker deploy, or existing
+  flows 500 on the missing column. Apply the migration first, verify the column + row sanity, then
+  deploy the Worker. Flag-gated features can migrate anytime (dark).
+- **PRG uniform response:** a POST that must not leak (match vs no-match, flag state) can answer with
+  a 303 to a neutral confirmation (`?sent=1`) — verify the redirect target is the neutral page, NOT
+  `/admin/login` (which would mean the proxy is login-walling a should-be-public endpoint).
