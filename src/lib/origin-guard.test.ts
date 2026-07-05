@@ -103,6 +103,21 @@ assert.equal(
   "Stripe webhook API should bypass the proxy-level origin guard and rely on Stripe signatures",
 );
 
+// Phase 8c: the sequence-runner cron reaches the origin directly, bearer-authed
+// (identical trust shape to /api/cron/scheduler-reminders). Pin the bypass so a
+// future edit that drops it (silently login-walling every run) fails loudly. The
+// unsubscribe endpoint is DELIBERATELY not here (it belongs on the proxy path).
+assert.equal(
+  isPublicOriginBypassApiPath("/api/cron/sequences"),
+  true,
+  "the sequence-runner cron endpoint must bypass the origin guard (bearer secret is the trust boundary)",
+);
+assert.equal(
+  isPublicOriginBypassApiPath("/api/email/unsubscribe"),
+  false,
+  "the client-facing unsubscribe endpoint must NOT bypass the origin guard (it belongs on the proxy path)",
+);
+
 assert.equal(
   isPublicOriginBypassApiPath("/api/scheduler/meeting-types"),
   false,

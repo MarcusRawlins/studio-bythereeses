@@ -677,6 +677,64 @@ function migrate(database: LocalDatabase) {
       ON project_communications(provider_message_id);
   `);
 
+  const automatedSequencesMigrationPath = path.join(process.cwd(), "migrations", "0088_automated_sequences.sql");
+  if (fs.existsSync(automatedSequencesMigrationPath)) {
+    database.exec(fs.readFileSync(automatedSequencesMigrationPath, "utf8"));
+  }
+
+  // Phase 8c: additive + dark automated-sequence tables. Idempotent create so
+  // local dev (better-sqlite3) and any partially-migrated prod D1 converge
+  // without a blanket `migrations apply`. email_suppressions is the compliance
+  // suppression list; sequence_sends is the at-most-once ledger (UNIQUE dedupe).
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS email_suppressions (
+      email TEXT PRIMARY KEY NOT NULL,
+      suppressed_at TEXT NOT NULL,
+      source TEXT,
+      note TEXT
+    );
+    CREATE TABLE IF NOT EXISTS sequence_enrollments (
+      id TEXT PRIMARY KEY NOT NULL,
+      project_id TEXT NOT NULL,
+      client_id TEXT,
+      sequence_key TEXT NOT NULL,
+      anchor_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      enrolled_by TEXT NOT NULL DEFAULT 'system',
+      enrolled_at TEXT NOT NULL,
+      stopped_at TEXT,
+      stop_reason TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_sequence_enrollment
+      ON sequence_enrollments(sequence_key, anchor_key);
+    CREATE INDEX IF NOT EXISTS idx_sequence_enrollments_status
+      ON sequence_enrollments(status, sequence_key);
+    CREATE INDEX IF NOT EXISTS idx_sequence_enrollments_project
+      ON sequence_enrollments(project_id, status);
+    CREATE TABLE IF NOT EXISTS sequence_sends (
+      id TEXT PRIMARY KEY NOT NULL,
+      project_id TEXT NOT NULL,
+      client_id TEXT,
+      enrollment_id TEXT,
+      sequence_key TEXT NOT NULL,
+      step_key TEXT NOT NULL,
+      dedupe_key TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'claimed',
+      communication_id TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      fired_at TEXT NOT NULL,
+      note TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_sequence_sends_dedupe
+      ON sequence_sends(dedupe_key);
+    CREATE INDEX IF NOT EXISTS idx_sequence_sends_client_fired
+      ON sequence_sends(client_id, fired_at);
+    CREATE INDEX IF NOT EXISTS idx_sequence_sends_status
+      ON sequence_sends(status, fired_at);
+  `);
+
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),
   );

@@ -231,6 +231,14 @@ export function isStudioPublicPath(pathname) {
     // reachable only through the proxy (which stamps the origin secret).
     pathname === "/api/twilio/inbound" ||
     pathname === "/api/twilio/status" ||
+    // Phase 8c: the client-facing one-click email unsubscribe (RFC 8058). Real
+    // browsers/mail-scanners hit the public studio host, so it must NOT be gated
+    // behind the admin Google session — otherwise the unsubscribe GET/POST is
+    // 303'd to /admin/login and silently dropped (a compliance failure). The
+    // token in the URL is the credential; the route verifies it constant-time.
+    // NOT in the origin-guard bypass — it belongs on the proxy path (POST is a
+    // public unauthenticated mutation → publicMutation rate-limit kind).
+    pathname === "/api/email/unsubscribe" ||
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/api/proposal/") ||
     // Private R2 asset serving (Phase 6 §1b): signed-URL / portal / proposal
@@ -295,7 +303,11 @@ export function rateLimitKind(url, request) {
       /^\/api\/questionnaires\/[^/]+\/responses\/?$/.test(pathname) ||
       // Phase 8a: the inbound intake endpoint is now proxy-reachable — give it a
       // per-IP cap. Belt-and-suspenders alongside the CRM-side rate/volume guard.
-      pathname === "/api/inbound/inquiry-email"
+      pathname === "/api/inbound/inquiry-email" ||
+      // Phase 8c: the one-click unsubscribe POST is a public unauthenticated
+      // mutation. Low volume → the standard publicMutation bucket (unlike Twilio,
+      // which needed a dedicated generous kind).
+      pathname === "/api/email/unsubscribe"
     )
   ) {
     return "publicMutation";

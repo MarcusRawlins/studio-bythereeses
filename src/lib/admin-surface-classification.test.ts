@@ -22,6 +22,7 @@ const studioPublic = [
   "/api/inbound/inquiry-email", // Phase 8a inbound intake (self-authed by INBOUND_INTAKE_SECRET bearer)
   "/api/twilio/inbound", // Phase 8b Twilio inbound webhook (self-authed by X-Twilio-Signature)
   "/api/twilio/status", // Phase 8b Twilio status callback (self-authed by X-Twilio-Signature)
+  "/api/email/unsubscribe", // Phase 8c one-click email unsubscribe (self-authed by signed token in URL)
   "/p/some-token",
   "/proposal/some-token",
   "/api/proposal/some-token/accept",
@@ -53,6 +54,12 @@ assert.equal(adminProofRequired("/api/twilio/status"), false, "/api/twilio/statu
 assert.equal(isStudioPublicPath("/api/twilio/inbound"), true, "/api/twilio/inbound must be proxy-public");
 assert.equal(isStudioPublicPath("/api/twilio/status"), true, "/api/twilio/status must be proxy-public");
 
+// Phase 8c: pin the one-click unsubscribe — admin-proof-exempt AND proxy-public —
+// so a future edit that drops either (silently login-walling a client's
+// unsubscribe, a compliance failure) fails loudly.
+assert.equal(adminProofRequired("/api/email/unsubscribe"), false, "/api/email/unsubscribe must be admin-proof-exempt");
+assert.equal(isStudioPublicPath("/api/email/unsubscribe"), true, "/api/email/unsubscribe must be proxy-public");
+
 // The client portal proposal detail and the magic-link surfaces are kept public
 // by the classifier (client-reachable) — assert the classifier decisions
 // directly so the /portal subtree is never proof-gated.
@@ -81,6 +88,7 @@ for (const path of [
   "/api/stripe/webhook",
   "/api/google/auth",
   "/api/cron/scheduler-reminders",
+  "/api/cron/sequences",
 ]) {
   assert.equal(adminProofRequired(path), false, `${path} must be public (no admin proof)`);
 }

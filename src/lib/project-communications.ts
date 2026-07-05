@@ -63,6 +63,19 @@ const studioActor: CommunicationActor = {
   actorName: "The Reeses Studio",
 };
 
+// Phase 8c: the sequence runner is trusted, config-driven CODE (not untrusted
+// agent input), so it gets its own actor. It is NOT subject to the agent sms
+// clamp (§1.5) — but by POLICY the runner only ever passes status:"draft" for
+// drafts and only the auto-send path marks a row "sent". No widening of the
+// agent's authority: we ADD an actor, we do not relax the existing clamp.
+const systemActor: CommunicationActor = {
+  createdBy: "system",
+  createAction: "project.communication.created_by_sequence",
+  updateAction: "project.communication.updated_by_sequence",
+  actorType: "system",
+  actorName: "The Reeses Studio Automation",
+};
+
 function cleanText(value: string | null | undefined) {
   return value?.trim() || null;
 }
@@ -257,6 +270,13 @@ async function updateProjectCommunication(
 
 export async function createProjectCommunicationFromAgent(projectId: string, input: CreateProjectCommunicationInput) {
   return createProjectCommunication(projectId, input, agentActor);
+}
+
+// Phase 8c: the ONLY entry the flag-gated sequence runner uses to materialize a
+// communication row (draft for review, or a sent record for an auto-send email).
+// Not exported to any agent/MCP surface.
+export async function createProjectCommunicationFromSystem(projectId: string, input: CreateProjectCommunicationInput) {
+  return createProjectCommunication(projectId, input, systemActor);
 }
 
 export async function createProjectCommunicationFromForm(projectId: string, formData: FormData) {

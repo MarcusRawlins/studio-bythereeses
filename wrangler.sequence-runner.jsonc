@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "reese-sequence-runner",
+  "main": "workers/sequence-runner.ts",
+  "account_id": "765e233f8635f207a8a3db4847efd3e9",
+  "compatibility_date": "2026-04-28",
+  // Daily at 14:00 UTC = 10am ET (a quiet hour): sequence granularity is DAYS,
+  // so hourly is unnecessary; a 10am ET run naturally satisfies the auto-send
+  // business-hours guard and day-offset schedules.
+  "triggers": {
+    "crons": ["0 14 * * *"]
+  },
+  "vars": {
+    // The workers.dev ORIGIN, NOT the studio.bythereeses.com proxy host. The
+    // proxy login-walls /api/cron/* (303 -> /admin/login 200); pointing here
+    // would silently drop every run. The origin accepts the bearer-authed POST
+    // directly (origin-guard PUBLIC_API_PREFIXES bypass).
+    "SEQUENCES_ENDPOINT": "https://reese-photography-crm.solitary-flower-c3ab.workers.dev/api/cron/sequences"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

@@ -205,6 +205,13 @@ export function adminProofRequired(pathname: string): boolean {
   // ADMIN_PROOF_ENFORCE would 404 Twilio's POST (silently losing every STOP/
   // status). NOT in the origin-guard bypass — reachable only through the proxy.
   if (path === "/api/twilio/inbound" || path === "/api/twilio/status") return false;
+  // Phase 8c: the client-facing one-click email unsubscribe (RFC 8058). The
+  // signed token in the URL is the credential (verified constant-time in the
+  // route), not the admin proof. Without this exemption it falls through to
+  // `return true` and ADMIN_PROOF_ENFORCE would 404 a client's unsubscribe — a
+  // compliance failure. Proxy-public + admin-proof-exempt; NOT in the
+  // origin-guard bypass (reachable only through the proxy).
+  if (path === "/api/email/unsubscribe") return false;
 
   // Client portal (public, client-reachable). BLOCKING [B1]: the ENTIRE /portal
   // subtree must stay public — including /portal/login, /portal/login/verify/*,

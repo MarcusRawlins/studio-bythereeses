@@ -12,6 +12,13 @@ const PUBLIC_API_PREFIXES = [
   "/api/google/auth",
   "/api/google/callback",
   "/api/cron/scheduler-reminders",
+  // Phase 8c: the sequence-runner cron reaches the app Worker origin DIRECTLY
+  // over *.workers.dev, bearer-authed (fail-closed 503 unset / 401 wrong,
+  // constant-time), so the Pages proxy's /api/cron/* login-wall (303 ->
+  // /admin/login 200) can't silently drop it. NOT an unauthenticated mutation
+  // endpoint — the bearer secret at the origin is the trust boundary (identical
+  // shape to /api/cron/scheduler-reminders).
+  "/api/cron/sequences",
   "/api/proposal/",
   "/api/scheduler/bookings",
   "/api/stripe/webhook",

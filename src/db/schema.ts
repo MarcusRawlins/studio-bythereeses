@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const timestamps = {
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
@@ -630,6 +630,73 @@ export const activityLogs = sqliteTable("activity_logs", {
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
 });
 
+// ---------------------------------------------------------------------------
+// Phase 8c — Automated communication sequences (dunning / pre-event / review).
+// All THREE tables are additive + dark: read/written ONLY by the flag-gated
+// sequence runner (`src/lib/sequences.ts`) and the public unsubscribe endpoint.
+// Not an always-on read surface, so (unlike 0087) 0088 is NOT deploy-order
+// critical. email_suppressions must SURVIVE a feature rollback (a client's
+// unsubscribe is permanent) — same rule as sms_suppressions.
+// ---------------------------------------------------------------------------
+
+// Consent/compliance: an email one-click-unsubscribe suppression list. Checked
+// before EVERY sequence email draft AND send. email is the PRIMARY KEY (dedupe);
+// writes are always INSERT ON CONFLICT DO NOTHING (attacker-chosen input →
+// insert-not-update). Suppression is fail-safe: the only thing an unsubscribe
+// POST can ever do is ADD a row (never remove).
+export const emailSuppressions = sqliteTable("email_suppressions", {
+  email: text("email").primaryKey(), // lowercased; PRIMARY KEY = dedupe
+  suppressedAt: text("suppressed_at").notNull(),
+  source: text("source"), // "unsubscribe_link" | "admin" | "bounce"
+  note: text("note"),
+});
+
+// Enrollment state: what anchor (invoice / event date / workflow step) a project
+// is enrolled against for a given sequence. UNIQUE(sequenceKey, anchorKey) makes
+// re-enrollment idempotent (ON CONFLICT DO NOTHING).
+export const sequenceEnrollments = sqliteTable("sequence_enrollments", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  clientId: text("client_id"),
+  sequenceKey: text("sequence_key").notNull(),
+  anchorKey: text("anchor_key").notNull(), // invoiceId | eventDateISO | workflowStepId
+  status: text("status").notNull().default("active"), // "active" | "stopped" | "completed"
+  enrolledBy: text("enrolled_by").notNull().default("system"), // "system" | "Tyler"
+  enrolledAt: text("enrolled_at").notNull(),
+  stoppedAt: text("stopped_at"),
+  stopReason: text("stop_reason"),
+}, (t) => ({ uq: uniqueIndex("uq_sequence_enrollment").on(t.sequenceKey, t.anchorKey) }));
+
+// The AT-MOST-ONCE ledger. UNIQUE(dedupeKey) makes a double-fire a DB-level
+// impossibility. status semantics:
+//   "claimed"    — TERMINAL-UNKNOWN. A send may or may not have happened; NEVER
+//                  auto-retried (retrying could double-send). Surfaced for manual
+//                  review via a sequence.send_stuck activity.
+//   "done"       — draft written, or auto-send accepted by Resend.
+//   "failed"     — PROVABLY-not-sent (suppression refusal / definitive
+//                  pre-acceptance 4xx). The ONLY retryable class.
+//   "superseded" — a due step skipped because a later-due step fired this run
+//                  (one-step-per-enrollment-per-run). Never emits a message.
+export const sequenceSends = sqliteTable("sequence_sends", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  clientId: text("client_id"),
+  // Binds the ledger row to its OWN enrollment so a retry renders from the
+  // correct invoice/anchor (never another client's) and re-checks stop-on-paid
+  // against the right invoice.
+  enrollmentId: text("enrollment_id"),
+  sequenceKey: text("sequence_key").notNull(),
+  stepKey: text("step_key").notNull(),
+  dedupeKey: text("dedupe_key").notNull(),
+  channel: text("channel").notNull(), // "email" | "sms"
+  mode: text("mode").notNull(), // "draft" | "auto_send"
+  status: text("status").notNull().default("claimed"),
+  communicationId: text("communication_id"),
+  attempts: integer("attempts").notNull().default(0),
+  firedAt: text("fired_at").notNull(),
+  note: text("note"),
+}, (t) => ({ dedupe: uniqueIndex("uq_sequence_sends_dedupe").on(t.dedupeKey) }));
+
 export type Client = typeof clients.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type ProjectEvent = typeof projectEvents.$inferSelect;
@@ -660,3 +727,6 @@ export type AssetObject = typeof assetObjects.$inferSelect;
 export type ActivityLog = typeof activityLogs.$inferSelect;
 export type InboundInquiry = typeof inboundInquiries.$inferSelect;
 export type ProjectGallery = typeof projectGalleries.$inferSelect;
+export type EmailSuppression = typeof emailSuppressions.$inferSelect;
+export type SequenceEnrollment = typeof sequenceEnrollments.$inferSelect;
+export type SequenceSend = typeof sequenceSends.$inferSelect;

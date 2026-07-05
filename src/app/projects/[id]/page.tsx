@@ -11,6 +11,7 @@ import { getProjectFinancialSummary } from "@/lib/project-finance";
 import { listProjectWorkflowRuns, sixFigureAutomationSteps } from "@/lib/project-workflow-automation";
 import { listProjectQuestionnaireResponses, listQuestionnaires, questionnaireResponseStatus } from "@/lib/questionnaires";
 import { listProjectBookingLinks } from "@/lib/scheduler";
+import { listProjectSequenceEnrollments } from "@/lib/sequences";
 import { Bot, CalendarCheck, CalendarPlus, CheckCircle2, ClipboardEdit, ClipboardList, Copy, ExternalLink, Eye, FileQuestion, FileSignature, Images, Landmark, Mail, MapPin, NotebookPen, Pencil, ReceiptText, Send, Sparkles, UsersRound } from "lucide-react";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
@@ -153,6 +154,7 @@ export default async function ProjectDetailPage({
   const workflowRuns = await listProjectWorkflowRuns(data.project.id);
   const sixFigureRun = workflowRuns.find((workflow) => workflow.run.workflowKey === "six-figure-maximized-workflow");
   const selectedWorkflowStepKeys = new Set(sixFigureRun?.steps.map(({ step }) => step.stepKey) ?? []);
+  const sequenceEnrollments = await listProjectSequenceEnrollments(data.project.id);
 
   const sectionNavItems = [
     { id: "overview", label: "Overview", icon: UsersRound },
@@ -897,6 +899,43 @@ export default async function ProjectDetailPage({
                   </div>
                 </form>
               </details>
+            )}
+          </section>
+
+          <section id="sequences" className="studio-section-card">
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Send className="h-4 w-4 text-[var(--ink-3)]" />
+                  <h2 className="studio-serif text-2xl">Automated sequences</h2>
+                </div>
+                <p className="mt-1 text-sm text-[var(--ink-3)]">
+                  Dunning, pre-event nudges, and review requests. Drafts appear in Communications for approval unless auto-send is enabled.
+                </p>
+              </div>
+              <span className="studio-chip">{sequenceEnrollments.filter(({ enrollment }) => enrollment.status === "active").length} active</span>
+            </div>
+            {sequenceEnrollments.length === 0 ? (
+              <p className="mt-4 text-sm text-[var(--ink-3)]">No sequence enrollments for this project.</p>
+            ) : (
+              <ul className="mt-4 divide-y divide-[var(--line)] rounded-md border border-[var(--line)] bg-white">
+                {sequenceEnrollments.map(({ enrollment, lastStep }) => (
+                  <li key={enrollment.id} className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <span className="text-sm font-semibold">{enrollment.sequenceKey}</span>
+                      <span className="ml-2 text-xs uppercase tracking-[0.12em] text-[var(--ink-3)]">{enrollment.status}</span>
+                      {lastStep && <span className="ml-2 text-xs text-[var(--ink-3)]">last: {lastStep}</span>}
+                    </div>
+                    <form action={`/api/projects/${data.project.id}/sequences`} method="post" className="flex items-center gap-2">
+                      <input type="hidden" name="sequenceKey" value={enrollment.sequenceKey} />
+                      <input type="hidden" name="_action" value={enrollment.status === "active" ? "stop" : "activate"} />
+                      <button type="submit" className="studio-button-ghost text-xs">
+                        {enrollment.status === "active" ? "Unenroll" : "Reactivate"}
+                      </button>
+                    </form>
+                  </li>
+                ))}
+              </ul>
             )}
           </section>
 

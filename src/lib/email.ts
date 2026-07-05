@@ -1,4 +1,8 @@
+import { db } from "@/db/client";
+import { emailSuppressions } from "@/db/schema";
 import type { SchedulerBooking, SchedulerMeetingType } from "@/db/schema";
+import { signUnsubscribeToken, unsubscribeBaseUrl } from "@/lib/unsubscribe-token";
+import { eq } from "drizzle-orm";
 
 type BookingEmailInput = {
   booking: SchedulerBooking;
@@ -19,13 +23,20 @@ function formatDateTime(value: string, timeZone = "America/New_York") {
   }).format(new Date(value));
 }
 
-async function sendResendEmail(input: {
+// Low-level Resend request. Returns the delivery flag AND the HTTP status so
+// callers that need to CLASSIFY a failure (sequence auto-send: provably-not-sent
+// 4xx vs ambiguous 5xx/network) can do so. A network error THROWS (the caller
+// treats a throw as terminal-unknown). No API key → not delivered, status null.
+// The optional `headers` map is forwarded to Resend's `headers` field (used for
+// RFC 8058 List-Unsubscribe on sequence email).
+async function resendRequest(input: {
   to: string | string[];
   subject: string;
   text: string;
-}) {
+  headers?: Record<string, string>;
+}): Promise<{ delivered: boolean; status: number | null }> {
   const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) return false;
+  if (!apiKey) return { delivered: false, status: null };
 
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -38,10 +49,86 @@ async function sendResendEmail(input: {
       to: input.to,
       subject: input.subject,
       text: input.text,
+      ...(input.headers ? { headers: input.headers } : {}),
     }),
   });
 
-  return response.ok;
+  return { delivered: response.ok, status: response.status };
+}
+
+async function sendResendEmail(input: {
+  to: string | string[];
+  subject: string;
+  text: string;
+  headers?: Record<string, string>;
+}) {
+  const result = await resendRequest(input);
+  return result.delivered;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8c — consent-gated sequence email sender (the ONLY email path that
+// carries a one-click unsubscribe). Transactional booking mail is unchanged.
+//
+// Ordering: (1) lowercase recipient + consult email_suppressions — a suppressed
+// address REFUSES with no Resend call and no false success; (2) attach RFC 8058
+// List-Unsubscribe + List-Unsubscribe-Post headers (signed stateless token) plus
+// a visible footer; (3) send and classify the outcome so the sequence runner's
+// crash-safe ledger stays strictly toward under-send:
+//   ok        → Resend accepted → ledger "done".
+//   suppressed→ provably not sent → ledger "failed" (retryable).
+//   rejected  → definitive pre-acceptance 4xx → provably not sent → "failed".
+//   unknown   → thrown/network/5xx AFTER dispatch → Resend MAY have accepted →
+//               ledger stays "claimed" (terminal-unknown, never auto-retried).
+// ---------------------------------------------------------------------------
+export type SequenceEmailResult =
+  | { ok: true }
+  | { ok: false; reason: "suppressed" }
+  | { ok: false; reason: "rejected" }
+  | { ok: false; reason: "unknown" };
+
+export async function isEmailSuppressed(email: string): Promise<boolean> {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return false;
+  const row = await db.query.emailSuppressions.findFirst({ where: eq(emailSuppressions.email, normalized) });
+  return Boolean(row);
+}
+
+export async function sendSequenceEmail(input: {
+  to: string;
+  subject: string;
+  text: string;
+  purpose?: string;
+}): Promise<SequenceEmailResult> {
+  const to = input.to.trim().toLowerCase();
+  if (!to) return { ok: false, reason: "rejected" };
+
+  // 1. Suppression gate — before any Resend call, no false success.
+  if (await isEmailSuppressed(to)) return { ok: false, reason: "suppressed" };
+
+  // 2. RFC 8058 one-click unsubscribe headers + visible footer.
+  const purpose = input.purpose ?? "sequences";
+  const token = signUnsubscribeToken(to, purpose);
+  const link = `${unsubscribeBaseUrl()}/api/email/unsubscribe?t=${encodeURIComponent(token)}`;
+  const mailto = `mailto:${process.env.RESEND_UNSUBSCRIBE_MAILBOX || "unsubscribe@bythereeses.com"}?subject=unsubscribe`;
+  const headers: Record<string, string> = {
+    "List-Unsubscribe": `<${link}>, <${mailto}>`,
+    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+  };
+  const text = `${input.text}\n\n—\nTo stop these automated emails, unsubscribe here: ${link}`;
+
+  // 3. Send + classify.
+  let result: { delivered: boolean; status: number | null };
+  try {
+    result = await resendRequest({ to, subject: input.subject, text, headers });
+  } catch {
+    return { ok: false, reason: "unknown" }; // thrown after dispatch — terminal unknown
+  }
+  if (result.delivered) return { ok: true };
+  if (result.status !== null && result.status >= 400 && result.status < 500) {
+    return { ok: false, reason: "rejected" }; // provably not accepted
+  }
+  return { ok: false, reason: "unknown" }; // 5xx or no-key — ambiguous, never auto-retry
 }
 
 // Phase 6.5: self-service portal magic-link email. One email per request
