@@ -308,23 +308,6 @@ function defaultPaymentNotes(methods: ReturnType<typeof enabledPaymentMethods>) 
     .join("\n");
 }
 
-function parseAcceptedPaymentMethodKeys(value: string | null): PaymentMethodKey[] {
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((item) => {
-        if (typeof item === "string") return item;
-        if (item && typeof item === "object" && "key" in item && typeof item.key === "string") return item.key;
-        return null;
-      })
-      .filter((key): key is PaymentMethodKey => Boolean(key) && isPaymentMethodKey(key));
-  } catch {
-    return [];
-  }
-}
-
 export const proposalStatusOptions = [
   { value: "draft", label: "Draft" },
   { value: "ready", label: "Ready" },
@@ -732,10 +715,6 @@ async function assertAgentProjectSource(projectId: string, sourceType: string | 
   }
 }
 
-function centsToFormMoney(value: number) {
-  return (value / 100).toFixed(2);
-}
-
 function safeRevalidatePath(path: string) {
   try {
     revalidatePath(path);
@@ -764,27 +743,6 @@ function agentIncludedPackageTotalCents(items: ReturnType<typeof normalizedAgent
 
 function agentPackageHasIncludedPricedItem(items: ReturnType<typeof normalizedAgentLineItems>) {
   return items.some((item) => !item.isOptional && item.quantity > 0 && item.unitPriceCents > 0);
-}
-
-async function agentInvoicePaymentSettings(acceptedPaymentMethods?: PaymentMethodKey[] | null) {
-  const settings = await getAppSettings();
-  const enabledMethods = enabledPaymentMethods(settings.paymentMethods);
-  const enabledKeys = new Set(enabledMethods.map((method) => method.key));
-  const selectedKeys = (acceptedPaymentMethods ?? []).filter((key) => enabledKeys.has(key));
-  const acceptedKeys = selectedKeys.length ? selectedKeys : enabledMethods.map((method) => method.key);
-  const acceptedMethods = acceptedKeys
-    .map((key) => ({ key, ...settings.paymentMethods[key] }))
-    .filter((method) => method.enabled);
-  const clientPaysCardFees = acceptedKeys.includes("stripe") && settings.paymentMethods.stripe.passFees;
-
-  return {
-    settings,
-    acceptedKeys,
-    acceptedMethods,
-    cardFeePolicy: clientPaysCardFees ? "client_pays" : "studio_absorbs",
-    cardFeePercentBps: clientPaysCardFees ? DEFAULT_CARD_FEE_PERCENT_BPS : 0,
-    cardFeeFixedCents: clientPaysCardFees ? DEFAULT_CARD_FEE_FIXED_CENTS : 0,
-  };
 }
 
 function normalizedInvoiceScheduleRows({
@@ -852,18 +810,6 @@ function normalizedInvoiceScheduleRows({
   }
 
   return rows;
-}
-
-async function replacePendingInvoiceSchedule(args: Parameters<typeof normalizedInvoiceScheduleRows>[0]) {
-  await db.delete(invoicePayments).where(eq(invoicePayments.invoiceId, args.invoiceId));
-
-  const rows = normalizedInvoiceScheduleRows(args);
-  if (rows.length) {
-    await db.insert(invoicePayments).values(rows.map((row) => ({
-      id: crypto.randomUUID(),
-      ...row,
-    })));
-  }
 }
 
 async function replaceAgentProposalLineItems(proposalId: string, lineItems: ReturnType<typeof normalizedAgentLineItems>, now: string) {
@@ -2619,203 +2565,10 @@ export async function createInvoiceFromForm(formData: FormData) {
 
 export async function createInvoiceFromAgent(projectId: string, input: AgentInvoiceInput) {
   return requireTylerApprovalForAgentFinance("Invoices and payment schedules require Tyler approval before creation or changes. Agents may draft invoice recommendations as tasks, but cannot create invoices directly.");
-
-  const sourceType = cleanAgentText(input.sourceType);
-  const sourceId = cleanAgentText(input.sourceId);
-  await assertAgentProjectSource(projectId, sourceType, sourceId);
-
-  const formData = new FormData();
-  formData.set("projectId", projectId);
-  if (input.proposalId) formData.set("proposalId", String(input.proposalId));
-  if (input.invoiceNumber) formData.set("invoiceNumber", String(input.invoiceNumber));
-  if (input.status) formData.set("status", String(input.status));
-  const agentInvoiceTotalCents = input.totalCents ?? 0;
-  const agentInvoiceRetainerAmountCents = input.retainerAmountCents ?? 0;
-  if (agentInvoiceTotalCents > 0) formData.set("total", centsToFormMoney(agentInvoiceTotalCents));
-  if (agentInvoiceRetainerAmountCents > 0) {
-    formData.set("retainerAmount", centsToFormMoney(agentInvoiceRetainerAmountCents));
-  }
-  if (typeof input.retainerPercent === "number") formData.set("retainerPercent", String(input.retainerPercent));
-  if (typeof input.installmentCount === "number") formData.set("installmentCount", String(input.installmentCount));
-  if (input.dueDate) formData.set("dueDate", String(input.dueDate));
-  if (input.paymentNotes) formData.set("paymentNotes", String(input.paymentNotes));
-  if (input.stripePaymentLink) formData.set("stripePaymentLink", String(input.stripePaymentLink));
-  for (const method of input.acceptedPaymentMethods ?? []) {
-    formData.append("acceptedPaymentMethod", method);
-  }
-
-  const result = await createInvoiceFromForm(formData);
-  const invoice = await db.query.invoices.findFirst({ where: eq(invoices.id, result.invoiceId) });
-  if (!invoice) throw new Error("Invoice creation failed.");
-  const createdInvoice = invoice!;
-
-  await db.update(invoices).set({
-    sourceType,
-    sourceId,
-    updatedAt: new Date().toISOString(),
-  }).where(eq(invoices.id, result.invoiceId));
-
-  await db.update(activityLogs).set({
-    action: "invoice.created_by_agent",
-    actorType: "agent",
-    actorName: "The Reeses Studio Agent",
-    metadata: JSON.stringify({
-      invoiceId: result.invoiceId,
-      invoiceNumber: createdInvoice.invoiceNumber,
-      totalCents: createdInvoice.totalCents,
-      proposalId: result.proposalId,
-      cardFeePolicy: createdInvoice.cardFeePolicy,
-      cardFeeAmountCents: createdInvoice.cardFeeAmountCents,
-      clientPayableCents: createdInvoice.totalCents + createdInvoice.cardFeeAmountCents,
-      stripePaymentLink: createdInvoice.stripePaymentLink,
-      sourceType,
-      sourceId,
-    }),
-  }).where(and(
-    eq(activityLogs.projectId, result.projectId),
-    eq(activityLogs.action, "invoice.created"),
-    like(activityLogs.metadata, `%${createdInvoice.invoiceNumber}%`),
-  ));
-
-  return {
-    invoiceId: result.invoiceId,
-    projectId: result.projectId,
-    proposalId: result.proposalId,
-    invoiceNumber: createdInvoice.invoiceNumber,
-    status: createdInvoice.status,
-    totalCents: createdInvoice.totalCents,
-    cardFeePolicy: createdInvoice.cardFeePolicy,
-    cardFeeAmountCents: createdInvoice.cardFeeAmountCents,
-    clientPayableCents: createdInvoice.totalCents + createdInvoice.cardFeeAmountCents,
-    stripePaymentLink: createdInvoice.stripePaymentLink,
-    sourceType,
-    sourceId,
-  };
 }
 
 export async function updateInvoiceFromAgent(projectId: string, invoiceId: string, input: AgentInvoiceUpdateInput) {
   return requireTylerApprovalForAgentFinance("Invoices and payment schedules require Tyler approval before creation or changes. Agents may draft invoice recommendations as tasks, but cannot update invoices directly.");
-
-  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
-  if (!project) throw new Error("Project not found.");
-
-  const invoice = (await db.query.invoices.findFirst({
-    where: and(eq(invoices.id, invoiceId), eq(invoices.projectId, projectId)),
-  }))!;
-  if (!invoice) throw new Error("Invoice not found for this project.");
-
-  const payments = await db.query.invoicePayments.findMany({ where: eq(invoicePayments.invoiceId, invoiceId) });
-  if (invoice.amountPaidCents > 0 || payments.some((payment) => payment.status === "paid" || payment.paidAmountCents > 0)) {
-    throw new Error("Invoices with recorded payments cannot be updated by agent.");
-  }
-
-  const nextStatus = cleanAgentText(input.status) ?? invoice.status;
-  if (nextStatus === "paid" || nextStatus === "partially_paid") {
-    throw new Error("Use the invoice payment endpoint to record paid invoice state.");
-  }
-
-  const sourceType = cleanAgentText(input.sourceType) ?? invoice.sourceType;
-  const sourceId = cleanAgentText(input.sourceId) ?? invoice.sourceId;
-  await assertAgentProjectSource(projectId, sourceType, sourceId);
-
-  const agentUpdatedInvoiceTotalCents = input.totalCents ?? 0;
-  const totalCents = agentUpdatedInvoiceTotalCents > 0 ? Math.round(agentUpdatedInvoiceTotalCents) : invoice.totalCents;
-  if (totalCents <= 0) throw new Error("Invoice total is required.");
-
-  const agentAcceptedPaymentMethods = input.acceptedPaymentMethods ?? [];
-  const acceptedPaymentMethods = Array.isArray(agentAcceptedPaymentMethods) && agentAcceptedPaymentMethods.length
-    ? agentAcceptedPaymentMethods
-    : parseAcceptedPaymentMethodKeys(invoice.acceptedPaymentMethodsJson);
-  const paymentSettings = await agentInvoicePaymentSettings(acceptedPaymentMethods);
-  const cardFeeAmountCents = calculateCardFeeAmountCents({
-    subtotalCents: totalCents,
-    percentBps: paymentSettings.cardFeePercentBps,
-    fixedCents: paymentSettings.cardFeeFixedCents,
-  });
-  const dueDate = Object.prototype.hasOwnProperty.call(input, "dueDate") ? cleanAgentText(input.dueDate) : invoice.dueDate;
-  const now = new Date().toISOString();
-  const shouldRebuildSchedule = (
-    Object.prototype.hasOwnProperty.call(input, "totalCents")
-    || Object.prototype.hasOwnProperty.call(input, "retainerAmountCents")
-    || Object.prototype.hasOwnProperty.call(input, "retainerPercent")
-    || Object.prototype.hasOwnProperty.call(input, "installmentCount")
-    || Object.prototype.hasOwnProperty.call(input, "dueDate")
-  );
-
-  await db.update(invoices).set({
-    status: nextStatus,
-    totalCents,
-    dueDate,
-    paymentNotes: Object.prototype.hasOwnProperty.call(input, "paymentNotes") ? cleanAgentText(input.paymentNotes) : invoice.paymentNotes,
-    acceptedPaymentMethodsJson: JSON.stringify(paymentSettings.acceptedMethods),
-    cardFeePolicy: paymentSettings.cardFeePolicy,
-    cardFeePercentBps: paymentSettings.cardFeePercentBps,
-    cardFeeFixedCents: paymentSettings.cardFeeFixedCents,
-    cardFeeAmountCents,
-    stripePaymentLink: Object.prototype.hasOwnProperty.call(input, "stripePaymentLink") ? cleanAgentText(input.stripePaymentLink) : invoice.stripePaymentLink,
-    zelleInfo: paymentSettings.acceptedKeys.includes("zelle") ? paymentSettings.settings.paymentMethods.zelle.instructions || null : null,
-    venmoInfo: paymentSettings.acceptedKeys.includes("venmo") ? paymentSettings.settings.paymentMethods.venmo.instructions || null : null,
-    sourceType,
-    sourceId,
-    sentAt: nextStatus === "sent" ? invoice.sentAt ?? now : nextStatus === "draft" ? null : invoice.sentAt,
-    paidAt: null,
-    updatedAt: now,
-  }).where(eq(invoices.id, invoiceId));
-
-  if (shouldRebuildSchedule) {
-    await replacePendingInvoiceSchedule({
-      invoiceId,
-      totalCents,
-      retainerAmountCents: input.retainerAmountCents,
-      retainerPercent: input.retainerPercent,
-      installmentCount: input.installmentCount,
-      dueDate,
-      now,
-    });
-  }
-
-  await logActivity({
-    projectId,
-    action: "invoice.updated_by_agent",
-    actorType: "agent",
-    actorName: "The Reeses Studio Agent",
-    metadata: {
-      invoiceId,
-      invoiceNumber: invoice.invoiceNumber,
-      status: nextStatus,
-      totalCents,
-      proposalId: invoice.proposalId,
-      cardFeePolicy: paymentSettings.cardFeePolicy,
-      cardFeeAmountCents,
-      clientPayableCents: totalCents + cardFeeAmountCents,
-      stripePaymentLink: Object.prototype.hasOwnProperty.call(input, "stripePaymentLink") ? cleanAgentText(input.stripePaymentLink) : invoice.stripePaymentLink,
-      sourceType,
-      sourceId,
-    },
-  });
-
-  safeRevalidatePath("/invoices");
-  safeRevalidatePath(`/invoices/${invoiceId}`);
-  safeRevalidatePath(`/projects/${projectId}`);
-  if (invoice.proposalId) safeRevalidatePath(`/proposals/${invoice.proposalId}`);
-
-  const updatedInvoice = (await db.query.invoices.findFirst({ where: eq(invoices.id, invoiceId) }))!;
-  if (!updatedInvoice) throw new Error("Invoice update failed.");
-
-  return {
-    invoiceId,
-    projectId,
-    proposalId: updatedInvoice.proposalId,
-    invoiceNumber: updatedInvoice.invoiceNumber,
-    status: updatedInvoice.status,
-    totalCents: updatedInvoice.totalCents,
-    cardFeePolicy: updatedInvoice.cardFeePolicy,
-    cardFeeAmountCents: updatedInvoice.cardFeeAmountCents,
-    clientPayableCents: updatedInvoice.totalCents + updatedInvoice.cardFeeAmountCents,
-    stripePaymentLink: updatedInvoice.stripePaymentLink,
-    sourceType: updatedInvoice.sourceType,
-    sourceId: updatedInvoice.sourceId,
-  };
 }
 
 export async function createInvoiceAction(formData: FormData) {
@@ -3097,87 +2850,10 @@ export async function updateInvoicePaymentFromForm(
 
 export async function recordInvoicePaymentFromAgent(invoiceId: string, input: AgentInvoicePaymentInput) {
   return requireTylerApprovalForAgentFinance("Payments require Tyler approval before creation or changes. Agents may draft payment reconciliation recommendations as tasks, but cannot record payments directly.");
-
-  return writeInvoicePaymentFromAgent(invoiceId, input, {
-    action: "invoice.payment_recorded_by_agent",
-    preserveExistingSource: false,
-  });
 }
 
 export async function updateInvoicePaymentFromAgent(invoiceId: string, input: AgentInvoicePaymentInput) {
   return requireTylerApprovalForAgentFinance("Payments require Tyler approval before creation or changes. Agents may draft payment reconciliation recommendations as tasks, but cannot update payments directly.");
-
-  return writeInvoicePaymentFromAgent(invoiceId, input, {
-    action: "invoice.payment_updated_by_agent",
-    preserveExistingSource: true,
-  });
-}
-
-async function writeInvoicePaymentFromAgent(
-  invoiceId: string,
-  input: AgentInvoicePaymentInput,
-  options: { action: string; preserveExistingSource: boolean },
-) {
-  const invoice = await db.query.invoices.findFirst({ where: eq(invoices.id, invoiceId) });
-  if (!invoice) throw new Error("Invoice not found.");
-  const existingPayment = await db.query.invoicePayments.findFirst({
-    where: and(eq(invoicePayments.id, cleanAgentText(input.paymentId) ?? ""), eq(invoicePayments.invoiceId, invoiceId)),
-  });
-  const sourceType = cleanAgentText(input.sourceType) ?? (options.preserveExistingSource ? existingPayment?.sourceType ?? null : null);
-  const sourceId = cleanAgentText(input.sourceId) ?? (options.preserveExistingSource ? existingPayment?.sourceId ?? null : null);
-  await assertAgentProjectSource(invoice.projectId, sourceType, sourceId);
-
-  const formData = new FormData();
-  formData.set("invoiceId", invoiceId);
-  formData.set("projectId", invoice.projectId);
-  formData.set("paymentId", cleanAgentText(input.paymentId) ?? "");
-  formData.set("status", cleanAgentText(input.status) ?? "paid");
-  if (input.paymentMethod) formData.set("paymentMethod", input.paymentMethod);
-  if (input.paidAmountCents && input.paidAmountCents > 0) formData.set("paidAmount", centsToFormMoney(input.paidAmountCents));
-  if (input.paidAt) formData.set("paidAt", input.paidAt);
-  if (input.externalPaymentId) formData.set("externalPaymentId", input.externalPaymentId);
-  if (input.stripeCheckoutUrl) formData.set("stripeCheckoutUrl", input.stripeCheckoutUrl);
-  if (input.stripeCheckoutSessionId) formData.set("stripeCheckoutSessionId", input.stripeCheckoutSessionId);
-  if (input.stripeCheckoutStatus) formData.set("stripeCheckoutStatus", input.stripeCheckoutStatus);
-  if (input.notes) formData.set("notes", input.notes);
-
-  const result = await updateInvoicePaymentFromForm(formData, {
-    action: options.action,
-    actorType: "agent",
-    actorName: "The Reeses Studio Agent",
-    metadata: {
-      sourceType,
-      sourceId,
-    },
-  });
-  const payment = (await db.query.invoicePayments.findFirst({ where: eq(invoicePayments.id, result.paymentId) }))!;
-  if (!payment) throw new Error("Payment not found.");
-
-  await db.update(invoicePayments).set({
-    sourceType,
-    sourceId,
-    updatedAt: new Date().toISOString(),
-  }).where(eq(invoicePayments.id, result.paymentId));
-
-  return {
-    invoiceId,
-    projectId: invoice.projectId,
-    paymentId: payment.id,
-    status: payment.status,
-    paymentMethod: payment.paymentMethod,
-    paidAt: payment.paidAt,
-    paidAmountCents: payment.paidAmountCents,
-    clientFeeCents: payment.clientFeeCents,
-    processingFeeCents: payment.processingFeeCents,
-    grossCollectedCents: payment.grossCollectedCents,
-    netDepositCents: payment.netDepositCents,
-    externalPaymentId: payment.externalPaymentId,
-    stripeCheckoutUrl: payment.stripeCheckoutUrl,
-    stripeCheckoutSessionId: payment.stripeCheckoutSessionId,
-    stripeCheckoutStatus: payment.stripeCheckoutStatus,
-    sourceType,
-    sourceId,
-  };
 }
 
 export async function updateInvoicePaymentAction(formData: FormData) {

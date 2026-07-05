@@ -1038,27 +1038,10 @@ export async function getSchedulerBookingDetail(id: string) {
 
 export async function recordSchedulerBookingPaymentFromAgent(bookingId: string, input: SchedulerBookingPaymentInput) {
   return requireTylerApprovalForAgentSchedulerPayment("Payments require Tyler approval before creation or changes. Agents may draft payment reconciliation recommendations as tasks, but cannot record scheduler payments directly.");
-
-  return recordSchedulerBookingPayment(bookingId, input, {
-    action: "scheduler.booking_payment_recorded_by_agent",
-    actorType: "agent",
-    actorName: "The Reeses Studio Agent",
-    sourceType: cleanText(input.sourceType),
-    sourceId: cleanText(input.sourceId),
-  });
 }
 
 export async function updateSchedulerBookingPaymentFromAgent(bookingId: string, input: SchedulerBookingPaymentInput) {
   return requireTylerApprovalForAgentSchedulerPayment("Payments require Tyler approval before creation or changes. Agents may draft payment reconciliation recommendations as tasks, but cannot update scheduler payments directly.");
-
-  return recordSchedulerBookingPayment(bookingId, input, {
-    action: "scheduler.booking_payment_updated_by_agent",
-    actorType: "agent",
-    actorName: "The Reeses Studio Agent",
-    sourceType: cleanText(input.sourceType),
-    sourceId: cleanText(input.sourceId),
-    preserveExistingSource: true,
-  });
 }
 
 async function recordSchedulerBookingPayment(
