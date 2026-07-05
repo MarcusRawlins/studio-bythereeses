@@ -61,6 +61,10 @@ npm run dev:studio
 
 It fails if `localhost:3000` is already serving another repo, or if local SQLite only has seed data while the D1 backup has imported project data.
 
+## Quarterly Restore-Verification Drill
+
+`npm run db:restore-local:d1` restores local dev on demand; `npm run drill:restore` (`scripts/restore-verify-d1.mjs`) is a separate, evidence-producing rehearsal that the drill actually works. It wraps the same restore script but always targets a throwaway database (`/tmp/d1-restore-drill.db` by default, never `data/local.db`), then asserts project/client row-count thresholds and that key Studio tables exist, writing a stamped JSON report under `.../logs`. No production side effects. See the runbook and drill log in [`ops-stabilization-checklist.md`](ops-stabilization-checklist.md#quarterly-restore-verification-drill-npm-run-drillrestore).
+
 ## Cloudflare Token
 
 The D1 export needs a Cloudflare API token. Do not commit it to the repo or write it into Obsidian.

@@ -96,10 +96,44 @@ Before treating production as fully operational for client-facing flows:
 - [ ] Custom domains attached and DNS stable (`studio.bythereeses.com`, `schedule.bythereeses.com` → Pages front door).
 - [ ] Remote D1 schema current (`npm run db:migrate` against production before deploy).
 - [ ] First live scheduler test completed (booking, client record, Google Calendar event, Resend confirmations).
-- [ ] Token rotation drill + "who has the token" inventory documented (keychain, CF secrets, launchd) — see ops checklist item 6.
+- [x] Token rotation drill + "who has the token" inventory documented (keychain, CF secrets, launchd) — see ops checklist item 6, and "STUDIO_AGENT_API_TOKEN Rotation Runbook" + "Who Has Access — Credential Inventory" below.
 - [ ] Backup freshness and MCP assertions in deploy gate where cheap — see ops checklist item 5.
 
 Agent/MCP surface is live today; finance mutations remain approval-gated until Tyler explicitly opens them.
+
+## STUDIO_AGENT_API_TOKEN Rotation Runbook
+
+`STUDIO_AGENT_API_TOKEN` is a single shared bearer credential — rotation means generating a new value and overwriting it everywhere it is configured. Run this drill on suspected exposure, or on a scheduled cadence (recommended: quarterly, alongside the [restore-verification drill](ops-stabilization-checklist.md#quarterly-restore-verification-drill-npm-run-drillrestore)).
+
+1. **Generate** a new 256-bit token, e.g. `openssl rand -hex 32`.
+2. **Set the Worker secret** (production): `wrangler secret put STUDIO_AGENT_API_TOKEN`. This is the cutover step — the old value stops working the moment the new Worker version is live.
+3. **Update local/dev copies:**
+   - macOS Keychain service `reese-studio-agent-api-token` (account `studio.bythereeses.com`) — the value `npm run smoke:production` and other scripts read by default.
+   - `.env.local` for local dev (`STUDIO_AGENT_API_TOKEN=...`) — never commit.
+4. **Update agent clients** that hold the old token: Marcus, Brunel, and any other MCP/REST client configs (MCP server config, REST `Authorization: Bearer` headers). There is no per-client scoping today, so every holder needs the new value before the old one is retired.
+5. **Confirm the cutover:** `npm run smoke:production` (reads the token from env or keychain) must pass end-to-end against the new value.
+6. **Revoke old:** because the token is single-value, step 2 (setting the new Worker secret) is itself the revocation of the old token — there is nothing else to disable. Confirm no stale value remains in any client config from step 4.
+
+**Accepted residual risk:** one shared bearer token for all trusted agents means there is no per-agent revocation or scoping today — compromising or leaking the token to one client exposes the full agent surface. This is an accepted, documented risk for the current single-tenant-agent stage (see `docs/route-access-audit.md` follow-up on scoped credentials). Upgrade path before onboarding any external/untrusted agent: move to per-client scoped tokens or signed short-lived credentials instead of one shared static bearer value.
+
+## Who Has Access — Credential Inventory
+
+Every secret/credential Studio depends on, where it lives, who/what consumes it, and what should trigger rotation. Keep this table current whenever a new secret is introduced (see `docs/specs/phase-6-hardening-r2.md` for `ADMIN_PROOF_SECRET` and `R2_URL_SIGNING_SECRET`, added below as planned/in-flight entries).
+
+| Credential | Store(s) | Holder / consumer | Rotation trigger |
+| --- | --- | --- | --- |
+| `STUDIO_AGENT_API_TOKEN` | Worker secret; keychain `reese-studio-agent-api-token`; `.env.local` | Trusted agents (MCP/REST) — Marcus, Brunel, and future trusted agents; `npm run smoke:production` | Suspected exposure; scheduled (see rotation runbook above) |
+| `ORIGIN_PROXY_SECRET` | Pages env; Worker secret | Pages proxy → Worker origin trust (`x-reese-origin-secret`) | Proxy/origin compromise |
+| `ADMIN_PROOF_SECRET` *(planned — Phase 6 §2, not yet shipped)* | Pages env; Worker secret | In-app admin authorization proof (`x-reese-admin-proof`), verified independently of the proxy Google session | Admin-path compromise |
+| `R2_URL_SIGNING_SECRET` *(planned — Phase 6 §1, not yet shipped)* | Worker secret; `.env.local` | Signed, time-limited asset URLs (contract/invoice PDFs, gallery files served from R2) | Asset-link leak; rotating invalidates all outstanding signed URLs |
+| `ADMIN_SESSION_SECRET` | Pages env | Admin Google session HMAC | Session-forgery risk |
+| `GOOGLE_CLIENT_SECRET` | Pages env | Admin OAuth | Google console rotation |
+| `SCHEDULER_LINK_SECRET` / `AUTH_SECRET` | Worker secret | Scheduler/questionnaire link HMAC | Link-forgery risk |
+| `STRIPE_*` | Worker secret | Payments (Checkout, webhooks) | Provider rotation |
+| `RESEND_*` | Worker secret | Email delivery | Provider rotation |
+| `CLOUDFLARE_API_TOKEN` | keychain `reese-crm-cloudflare-api-token` | Deploy, backup/D1 export, `npm run drill:restore` source data | Scheduled |
+
+Ops stabilization checklist cross-reference: `docs/ops-stabilization-checklist.md` "Next Branch Plan" item 6. Security-model cross-reference: `docs/security-model.md` "Remaining Hardening".
 
 ## Authentication
 

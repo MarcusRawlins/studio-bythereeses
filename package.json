@@ -23,6 +23,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "db:restore-local:d1": "node scripts/restore-local-from-d1-backup.mjs",
+    "drill:restore": "node scripts/restore-verify-d1.mjs",
     "import:honeybook:projects": "tsx scripts/import-honeybook-projects.ts",
     "import:six-figure-workflows": "tsx scripts/import-six-figure-workflows.ts",
     "backup": "npm run backup:daily",

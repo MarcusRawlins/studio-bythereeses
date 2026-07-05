@@ -18,6 +18,8 @@ const requiredSections = [
   "## Authentication",
   "## MCP Endpoint",
   "## REST Agent Endpoints",
+  "## STUDIO_AGENT_API_TOKEN Rotation Runbook",
+  "## Who Has Access — Credential Inventory",
 ];
 
 for (const section of requiredSections) {
@@ -53,6 +55,26 @@ assert.match(doc, /requireTylerApprovalForAgentFinance/, "Doc should reference s
 assert.match(doc, /ops-stabilization-checklist\.md/, "Doc should link ops stabilization checklist");
 assert.match(doc, /deployment-live-testing\.md/, "Doc should link deployment live testing");
 assert.match(doc, /Obsidian/, "Doc should reference Obsidian source of truth");
+
+// Rotation runbook must cover the actual rotation steps, not just mention the token.
+assert.match(doc, /wrangler secret put STUDIO_AGENT_API_TOKEN/, "Rotation runbook should give the Worker secret command");
+assert.match(doc, /reese-studio-agent-api-token/, "Rotation runbook should reference the keychain service");
+assert.match(doc, /smoke:production/, "Rotation runbook should confirm cutover via production smoke");
+
+// "Who has access" inventory must enumerate the existing credentials plus the
+// two new Phase 6 secrets (admin proxy proof + R2 signed asset URLs).
+const inventoryCredentials = [
+  "STUDIO_AGENT_API_TOKEN",
+  "ORIGIN_PROXY_SECRET",
+  "ADMIN_PROOF_SECRET",
+  "R2_URL_SIGNING_SECRET",
+  "ADMIN_SESSION_SECRET",
+  "GOOGLE_CLIENT_SECRET",
+  "CLOUDFLARE_API_TOKEN",
+];
+for (const credential of inventoryCredentials) {
+  assert.match(doc, new RegExp(`\\| \`${credential}\``), `Credential inventory table missing row for ${credential}`);
+}
 
 const crossLinks = [
   "docs/ops-stabilization-checklist.md",

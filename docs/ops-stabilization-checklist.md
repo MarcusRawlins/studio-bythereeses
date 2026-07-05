@@ -80,6 +80,22 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
 - Cloudflare token for D1 export: prefer macOS keychain `reese-crm-cloudflare-api-token` (never commit; see backups.md for env/file fallbacks).
 - Reconciliation expectations: mirror HEAD match, recent D1 export (<36h or warn), manifests, etc. Non-zero on critical fail.
 
+### Quarterly Restore-Verification Drill (`npm run drill:restore`)
+Evidence-producing rehearsal that the latest D1 backup SQL actually restores into a usable database — not just that the manual `db:restore-local:d1` commands *can* be run. Cadence: quarterly, or immediately after any backup-pipeline change (`scripts/backup.mjs`, `scripts/reconcile-backups.mjs`, migration additions).
+
+1. Confirm backup freshness first (do not duplicate the check — it already runs in `deploy:preflight`): the D1 export at `.../d1/latest.sql` must be `<=36h` old. If stale, run `npm run backup:data` (or wait for the nightly `npm run backup:daily`) before drilling.
+2. Run the drill against a throwaway database — never `data/local.db`, never a remote/production database:
+   ```bash
+   npm run drill:restore
+   ```
+   This wraps `scripts/restore-local-from-d1-backup.mjs` (`scripts/restore-verify-d1.mjs`), restoring into `/tmp/d1-restore-drill.db` by default. It asserts `projects`/`clients` row counts are present and above threshold (override with `--min-projects` / `--min-clients` for a stricter quarterly baseline pinned to the latest `smoke:production` counts) and that key Studio tables (`projects`, `clients`, `scheduler_bookings`, `invoices`, `proposals`, `activity_logs`) exist in the restored database. Exits non-zero on any failure.
+3. Confirm the stamped JSON report was written to `.../logs/restore-verify-d1-<timestamp>.json` and that `ok: true`.
+4. Record pass/date in this checklist (below) and in the Obsidian source-of-truth note (`Reese Photography CRM - Source of Truth and Backups.md`).
+5. If the drill fails: do not treat the backup pipeline as trustworthy. Investigate `scripts/backup.mjs` / the D1 export step before relying on it for a real recovery.
+
+**Drill log:**
+- (none recorded yet — run `npm run drill:restore` and add an entry here: `YYYY-MM-DD: pass, projects=N, clients=N`)
+
 ## MCP / Token Scopes
 - Token secret: `STUDIO_AGENT_API_TOKEN` (never in repo/Obsidian; keychain service `reese-studio-agent-api-token` or `CLOUDFLARE_API_TOKEN` style).
 - Protected surfaces (pass-through Pages front door, no Google OAuth for agents):
@@ -110,7 +126,7 @@ Minimal mapping for photography CRM/scheduler stabilization work (baseline after
   - [x] 11. Agent/MCP access docs (`docs/studio-agent-access.md`) reconciled with finance approval guard + smoke surface.
   - [ ] 4. Expand with Obsidian priorities + `docs/superpowers/plans/2026-05-20-project-reliability-efficiency.md` items in scope.
   - [x] 5. Add backup freshness + MCP tool surface assertions into deploy gate where cheap.
-  - [ ] 6. Document token rotation drill + "who has the token" inventory (keychain + CF secrets + launchd).
+  - [x] 6. Document token rotation drill + "who has the token" inventory (keychain + CF secrets + launchd) — see `docs/studio-agent-access.md` "STUDIO_AGENT_API_TOKEN Rotation Runbook" and "Who Has Access — Credential Inventory". Restore-verification drill (`scripts/restore-verify-d1.mjs`, `npm run drill:restore`) landed alongside as the companion ops-drill item (phase-6-hardening-r2.md §5).
   - [x] 7. Run non-destructive verification (`lint`, `build`, `deploy:preflight` if token present, `deploy:capture-versions`, smoke against prod with token).
   - [ ] 8. PR back to main only after checklist items pass review + no feature deltas in stabilization slices.
 - Do not deploy from stabilization work until explicit sign-off.
@@ -124,7 +140,8 @@ See package.json scripts, `docs/backups.md`, `docs/deployment-live-testing.md`, 
 - CI/dev gate: `npm test && npm run lint && npm run build`
 - Preflight+smoke loop: `npm run deploy:preflight && npm run smoke:production`
 - Backup drill: `npm run backup:reconcile`
-- Restore drill: `npm run db:restore-local:d1 -- --dry-run`
+- Restore drill (manual, local dev): `npm run db:restore-local:d1 -- --dry-run`
+- Restore-verification drill (throwaway db, quarterly evidence): `npm run drill:restore`
 - Dev gate: `npm run dev:studio -- --check`
 - Drift guard: `npm run check:source-drift`
 
