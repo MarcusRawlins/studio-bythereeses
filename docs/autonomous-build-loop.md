@@ -32,8 +32,8 @@ reviewer prompt is seeded with the **Active-Learning Log** below.
 | 8a | Inquiry-email intake | ✅ deployed 2026-07-05 (dark) — Worker `53ad5abc`, proxy `a7619737`, migration 0085 |
 | 7a | Gallery delivery-link (provider-agnostic MVP) | ✅ deployed 2026-07-05 (dark) — Worker `0f7beefb`, migration 0086, `PORTAL_GALLERY_ENABLED` off |
 | 7b | Deep gallery provider integration (Pixieset/Pic-Time API) | 🅣 needs Tyler's provider choice + API credentials |
-| 8b | SMS (Twilio) | 🔵 speccing — build dark (needs Tyler's Twilio credentials to enable) |
-| 8c | Automated sequences (dunning/nudges/reviews) | ⏭️ spec → build |
+| 8b | SMS (Twilio) | ✅ deployed 2026-07-05 (dark) — Worker `7ca815bf`, proxy `df082f06`, migration 0087; send-UI wiring = follow-up |
+| 8c | Automated sequences (dunning/nudges/reviews) | 🔵 speccing |
 | 9 | Financial completeness (refunds/disputes, QBO/Xero, tax/1099) | ⏭️ spec → build — money-movement pause |
 | 10 | Intelligence + forecasting | ⏭️ spec → build |
 | 11 | Multi-user + RBAC | ⏭️ deferred until a real 2nd user |
