@@ -53,10 +53,14 @@ Each is addressed by design here so the builder does not re-discover them:
 - **Migration ordering.** The client-portal read is **flag-gated**, so the feature migrates
   **dark** and the migration may be applied anytime relative to the Worker deploy — but do
   NOT ship an *always-on* unflagged query against `project_galleries` before the table
-  exists. The one always-on reader is `studio_get_project_context` (§5); its gallery query
-  MUST be resilient to a missing table (the inline-ensure in `client.ts` creates it locally;
-  prod applies the migration first). Recommended order regardless: apply 0086 to prod → verify
-  table + sanity → deploy Worker. Flag-gated portal read can flip later.
+  exists. The one always-on reader is `studio_get_project_context` (§5.2); it is a *working
+  production tool today*, so a Worker deploy that landed before migration 0086 would make
+  EVERY project-context call throw — a regression. **Two defenses, both required:** (a) the
+  gallery query in the always-on reader is wrapped in `try/catch` and returns `[]` on any
+  error, so a missing table degrades to "no galleries" instead of a 500 (test in §8); AND
+  (b) applying 0086 to prod **before** the Worker deploy is a **HARD deploy-ordering gate**,
+  not a recommendation (§6). The flag-gated portal reader (§5.1) is naturally dark and needs
+  neither, but the always-on agent reader needs both.
 - **Prod D1 migrations.** Additive only. Apply via idempotent `CREATE TABLE IF NOT EXISTS`
   direct `d1 execute --file`; do NOT `migrations apply --remote` (tracker is out of sync).
 - **Build gate.** Verify `npm run build` **exit code**, not a phrase. Avoid
@@ -208,9 +212,12 @@ Rules (reject ⇒ throw a user-facing `Error`, caught by the admin action and re
 
 1. Trim; cap length at **2048** chars (reject longer — a pasted URL over 2KB is abuse/garbage).
 2. Parse with the WHATWG `URL` constructor. Reject on parse failure.
-3. **Protocol allowlist: `https:` only.** Reject `http:`, `javascript:`, `data:`, `vbscript:`,
-   `file:`, `blob:`, and everything else. This single check is the primary XSS defense — a
-   `javascript:` URL can never be stored, so it can never be rendered into an `href`.
+3. **Protocol allowlist: `https:` only.** Check the parsed value precisely —
+   `parsed.protocol === "https:"` — **never** a raw-string prefix like `raw.startsWith("https")`.
+   The `URL` parser canonicalizes scheme casing and strips leading/embedded whitespace and tabs,
+   so `JaVaScRiPt:…`, `  javascript:…`, and `java\tscript:…` all normalize and are correctly
+   rejected by the `protocol` comparison but would slip past a naive string prefix. This is the
+   primary XSS defense — a non-https URL can never be stored, so it can never reach an `href`.
 4. Require a non-empty host with a dot (reject `https://localhost`, bare hostnames, IP-literal
    optional-reject). Reject credentials in the URL (`url.username`/`url.password` non-empty).
 5. Return the normalized `url.toString()` (canonical form; strips nothing sensitive, just
@@ -245,12 +252,18 @@ policy decision once Tyler picks a provider.
 - Portal (`src/app/portal/page.tsx`) and admin render the URL only inside JSX `{gallery.url}` and
   `href={gallery.url}` — **React escapes both by default**. No `dangerouslySetInnerHTML`, no
   string-built HTML.
-- External links use `target="_blank" rel="noopener noreferrer"` (matches existing portal
-  external links, e.g. proposal/stripe links).
-- Since only `https:` URLs can be persisted (§4.1 step 3), the rendered `href` can never carry a
-  script scheme even if a row were somehow written directly. Defense-in-depth: the portal context
-  shaper (`getPortalProjectContext`) re-checks `url.startsWith("https://")` before including a
-  gallery and drops any row that fails (a belt-and-suspenders guard against a hand-edited D1 row).
+- **The gallery anchor MUST explicitly set `target="_blank" rel="noopener noreferrer"`.** Note:
+  the existing portal external anchors (`src/app/portal/page.tsx` lines ~237, 245, 293, 326) use
+  `target="_blank"` with **no `rel`** — do **not** cite them as precedent; they point at
+  hardcoded/trusted destinations (Stripe checkout, questionnaire, booking-manage). The gallery URL
+  is **semi-trusted** (admin-pasted, provider-chosen), so it must carry `rel="noopener noreferrer"`
+  to deny the destination `window.opener` access and referrer leakage. A §8 render test asserts the
+  `rel` attribute is present on the gallery anchor.
+- Defense-in-depth: since only `https:` URLs can be persisted (§4.1 step 3), the rendered `href`
+  can never carry a script scheme even if a row were written directly. The portal context shaper
+  (`getPortalProjectContext`) still re-validates each gallery `url` (parse + `protocol === "https:"`,
+  same check as §4.1) before including it and drops any row that fails — a belt-and-suspenders guard
+  against a hand-edited D1 row.
 
 ## 5. Surfaces
 
@@ -268,7 +281,7 @@ const galleries = galleryPortalEnabled()
         eq(projectGalleries.projectId, projectId),
         eq(projectGalleries.status, "delivered"), // delivered-only for clients
       ),
-      orderBy: desc(projectGalleries.deliveredAt),
+      orderBy: [desc(projectGalleries.deliveredAt), desc(projectGalleries.createdAt)],
     })
   : [];
 ```
@@ -280,7 +293,8 @@ const galleries = galleryPortalEnabled()
   resolved from the session cookie/token — same scoping as every other portal child. No
   cross-project read is possible because `projectId` is not client-supplied.
 - Map to a minimal client-safe shape (drop `createdBy`, keep `id`, `title`, `provider`, `url`,
-  `passcode`, `deliveredAt`, `expiresAt`), re-validating `https://` per §4.3.
+  `passcode`, `deliveredAt`, `expiresAt`), re-validating each `url` (parse + `protocol === "https:"`)
+  per §4.3 and dropping any row that fails.
 
 Return it on the context object as `galleries: [...]`.
 
@@ -301,16 +315,29 @@ project shows no empty card). Each row: title, provider label, optional "availab
 Extend the read-only context so an agent can reference/hand off the link. In
 `projectContextResult()` (`src/lib/studio-mcp.ts`, ~line 1550), add a query and include it on the
 returned object as `galleries`. **This reader is always-on (not flag-gated)** — the agent surface
-is a trusted backoffice tool and needs to see drafts too — so it must tolerate the table being
-absent in a not-yet-migrated environment (see §2 migration-ordering; the recommended deploy order
-applies 0086 before the Worker). Return **all statuses** with the status field so the agent knows
-what is client-visible vs. draft:
+is a trusted backoffice tool and needs to see drafts too. Because it is a working production tool,
+a Worker deploy that landed before migration 0086 must NOT throw: **the gallery query is wrapped in
+`try/catch` and returns `[]` on any error** (see §2; the HARD deploy-ordering gate in §6 makes the
+missing-table case impossible in practice, and the `try/catch` is defense-in-depth so a stale/racey
+deploy degrades to "no galleries" instead of regressing every project-context call). Return **all
+statuses** with the status field so the agent knows what is client-visible vs. draft.
+
+Do **not** order by `status` — it is lexicographic (`archived` < `delivered` < `draft`), which would
+surface drafts oddly; order by delivery/creation recency instead:
 
 ```ts
-const galleries = await db.query.projectGalleries.findMany({
-  where: eq(projectGalleries.projectId, project.id),
-  orderBy: [desc(projectGalleries.status), desc(projectGalleries.createdAt)],
-});
+let galleries: Array<typeof projectGalleries.$inferSelect> = [];
+try {
+  galleries = await db.query.projectGalleries.findMany({
+    where: eq(projectGalleries.projectId, project.id),
+    orderBy: [desc(projectGalleries.deliveredAt), desc(projectGalleries.createdAt)],
+  });
+} catch (error) {
+  // Missing table (pre-0086 deploy) or any read error → degrade to no galleries
+  // rather than throwing and 500-ing a working always-on tool.
+  console.error("project_galleries read failed; returning []", error);
+  galleries = [];
+}
 // included on the return object:
 galleries: galleries.map((g) => ({
   id: g.id, title: g.title, provider: g.provider, url: g.url,
@@ -352,8 +379,18 @@ export async function deleteProjectGallery(input: {
 Behavior:
 - Validate `projectId` exists; validate `url` via `normalizeGalleryUrl`; cap `title` (200),
   `provider` (80), `passcode` (200); validate `status` against the domain set.
-- **`deliveredAt` transition:** set `deliveredAt = now` the first time `status` becomes
-  `"delivered"` and it is currently null; leave it stable afterward (do not bump on later edits).
+- **Timestamps set explicitly as ISO strings.** Do not rely on the SQL `CURRENT_TIMESTAMP` default
+  (it produces a non-ISO `"YYYY-MM-DD HH:MM:SS"` string, inconsistent with the rest of the codebase,
+  which writes `new Date().toISOString()` — see `logActivity`, `updateProjectFromForm`). `create`
+  sets `createdAt` and `updatedAt` to `new Date().toISOString()`; `update` sets `updatedAt` to a
+  fresh ISO string.
+- **`expiresAt` input sanity:** `expiresAt` is admin/provider-supplied free text. Cap length (40)
+  and validate it parses as a date (`!Number.isNaN(Date.parse(value))`); normalize to an ISO string
+  before storing, or reject with a user-facing error. Do not persist arbitrary unparseable text into
+  a field the portal renders as "available until {expiresAt}".
+- **`deliveredAt` transition:** `deliveredAt` is server-controlled, never taken from client/form
+  input. Set `deliveredAt = new Date().toISOString()` the first time `status` becomes `"delivered"`
+  and it is currently null; leave it stable afterward (do not bump on later edits).
 - **Activity logging** via `logActivity` (`src/lib/activity.ts`) — new actions:
   `gallery.created`, `gallery.updated`, `gallery.deleted`, with metadata
   `{ galleryId, status, provider }`. Add human labels to `formatActivityAction`
@@ -400,9 +437,16 @@ If the review prefers minimal surface, ship 7a **without** the write tool — th
 - **Rollback:** **flag-only** for the client surface (unset `PORTAL_GALLERY_ENABLED`). The table and
   admin/agent read can remain — they are inert without client exposure. Full code rollback = Worker
   version rollback per the standard deploy rails; the additive table is harmless if left in place.
-- **Deploy order:** apply 0086 to prod D1 (`d1 execute --file`) → verify table + a sanity
-  `SELECT count(*)` → deploy Worker + Pages-proxy → health-check. Flag stays OFF at deploy; Tyler
-  flips after populating + observing (enablement flip is **not** autonomous — guardrail 2).
+- **Deploy order — HARD GATE (not a recommendation).** Migration 0086 MUST be applied to prod D1
+  **before** the Worker deploy, because `studio_get_project_context` is an **always-on** (non-flag-
+  gated) reader of `project_galleries` — per the Active-Learning Log, a non-flag-gated schema read
+  requires its migration applied to prod first, or the working tool 500s on the missing table. The
+  §5.2 `try/catch` is defense-in-depth against a race, **not** a license to reorder. Sequence:
+  apply 0086 (`d1 execute --file`) → verify the table exists + a sanity `SELECT count(*)` →
+  **then** deploy Worker + Pages-proxy → health-check (include a `studio_get_project_context` call in
+  the smoke to confirm it still returns 200 with `galleries: []`). Flag stays OFF at deploy; Tyler
+  flips `PORTAL_GALLERY_ENABLED` after populating + observing (enablement flip is **not**
+  autonomous — guardrail 2).
 
 ## 7. R2 note (Phase 6) — available, not required here
 
@@ -418,12 +462,21 @@ models N galleries per project with a provider label.
 
 - **`src/lib/gallery.test.ts` — validation/XSS (highest priority):**
   - `normalizeGalleryUrl` accepts a normal `https://…pixieset.com/…` URL and returns canonical form.
-  - **Rejects** `javascript:alert(1)`, `data:text/html,…`, `vbscript:…`, `http://…` (non-TLS),
-    `file://…`, a `>2048`-char string, credentials-in-URL, and an unparseable string.
+  - **Rejects** `javascript:alert(1)`, **`JaVaScRiPt:alert(1)`** (mixed-case — proves the precise
+    `protocol` check, not a string prefix), `  javascript:…` (leading-whitespace) and a tab-embedded
+    `java\tscript:…`, `data:text/html,…`, `vbscript:…`, `http://…` (non-TLS),
+    **`https://user:pass@host.com/g`** (credentials-in-URL), `file://…`, a `>2048`-char string, and
+    an unparseable string.
   - `inferProviderLabel` maps known hosts and returns `null` (does **not** throw/reject) for an
     unknown/custom host.
+  - `createProjectGallery`/`updateProjectGallery` write `createdAt`/`updatedAt` as ISO strings
+    (assert the value round-trips through `Date.parse` and matches the `…T…Z` ISO shape, not the SQL
+    `CURRENT_TIMESTAMP` space-separated form).
+  - `expiresAt`: a parseable date normalizes to ISO and stores; an unparseable string is rejected; an
+    over-length string is rejected.
   - `createProjectGallery` sets `deliveredAt` when status starts as `delivered`, and leaves it
-    stable across a later `updateProjectGallery` edit; leaves it null for `draft`.
+    stable across a later `updateProjectGallery` edit; leaves it null for `draft`. `deliveredAt` is
+    never taken from input (a caller-supplied `deliveredAt` is ignored).
   - Field length caps enforced (title/provider/passcode).
 - **`src/lib/portal.test.ts` (or the existing portal test) — scoping + delivered-only + flag:**
   - With flag ON: a `delivered` gallery on project A appears in A's context; a `draft` and an
@@ -432,10 +485,17 @@ models N galleries per project with a provider label.
     `getPortalProjectContext(A, …)`.
   - With flag OFF (`PORTAL_GALLERY_ENABLED` unset): `galleries` is empty even when a delivered
     gallery exists (dark).
-  - Portal shaper drops a row whose `url` does not start with `https://` (defense-in-depth §4.3).
+  - Portal shaper drops a row whose `url` fails the `protocol === "https:"` re-check (§4.3).
+- **Portal render test (`src/app/portal` component test) — rel attribute (§4.3):** the "Your Gallery"
+  anchor for a delivered gallery renders with **both** `target="_blank"` **and**
+  `rel="noopener noreferrer"` present. (Guards the semi-trusted-link hardening B2.)
 - **`src/lib/studio-mcp.test.ts` — agent read:** `studio_get_project_context` includes `galleries`
-  with all statuses + the `status` field; ordering is stable; excludes nothing client-safe but does
-  surface `draft` to the agent.
+  with all statuses + the `status` field, ordered by `deliveredAt`/`createdAt` (a `draft` is not
+  forced to the top); surfaces `draft` to the agent.
+  - **Missing-table resilience (B1):** with `project_galleries` absent (drop it, or a fresh DB
+    without the inline-ensure), `getStudioProjectContext` returns successfully with `galleries: []`
+    and does **not** throw — proving the §5.2 `try/catch` protects the always-on tool from a
+    pre-0086 deploy.
 - **Admin mutation test (crm/gallery-actions):** create → update (flip to delivered, `deliveredAt`
   set) → delete round-trip; each logs the matching `gallery.*` activity with correct `actorType`.
 - **Agent-authority guard test (only if §5.4 is built):** an agent `POST …/galleries` body with
