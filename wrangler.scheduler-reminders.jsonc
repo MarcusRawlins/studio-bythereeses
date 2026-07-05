@@ -8,7 +8,7 @@
     "crons": ["0 * * * *"]
   },
   "vars": {
-    "REMINDER_ENDPOINT": "https://studio.bythereeses.com/api/cron/scheduler-reminders"
+    "REMINDER_ENDPOINT": "https://reese-photography-crm.solitary-flower-c3ab.workers.dev/api/cron/scheduler-reminders"
   },
   "observability": {
     "enabled": true
