@@ -567,6 +567,11 @@ function migrate(database: LocalDatabase) {
     database.exec(fs.readFileSync(shootingLocationsMigrationPath, "utf8"));
   }
 
+  const assetObjectsMigrationPath = path.join(process.cwd(), "migrations", "0083_asset_objects.sql");
+  if (fs.existsSync(assetObjectsMigrationPath)) {
+    database.exec(fs.readFileSync(assetObjectsMigrationPath, "utf8"));
+  }
+
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),
   );

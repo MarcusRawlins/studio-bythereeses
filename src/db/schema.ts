@@ -509,6 +509,21 @@ export const portalAccessTokens = sqliteTable("portal_access_tokens", {
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
 });
 
+export const assetObjects = sqliteTable("asset_objects", {
+  id: text("id").primaryKey(),
+  key: text("key").notNull().unique(),
+  kind: text("kind").notNull(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  proposalId: text("proposal_id").references(() => proposals.id, { onDelete: "set null" }),
+  invoiceId: text("invoice_id").references(() => invoices.id, { onDelete: "set null" }),
+  contentType: text("content_type").notNull(),
+  sizeBytes: integer("size_bytes").notNull(),
+  sha256: text("sha256").notNull(),
+  createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
+  createdBy: text("created_by").notNull(),
+  deletedAt: text("deleted_at"),
+});
+
 export const activityLogs = sqliteTable("activity_logs", {
   id: text("id").primaryKey(),
   projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
@@ -546,4 +561,5 @@ export type ProposalAccessToken = typeof proposalAccessTokens.$inferSelect;
 export type Invoice = typeof invoices.$inferSelect;
 export type InvoicePayment = typeof invoicePayments.$inferSelect;
 export type PortalAccessToken = typeof portalAccessTokens.$inferSelect;
+export type AssetObject = typeof assetObjects.$inferSelect;
 export type ActivityLog = typeof activityLogs.$inferSelect;
