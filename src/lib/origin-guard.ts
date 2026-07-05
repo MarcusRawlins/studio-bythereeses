@@ -15,6 +15,10 @@ const PUBLIC_API_PREFIXES = [
   "/api/proposal/",
   "/api/scheduler/bookings",
   "/api/stripe/webhook",
+  // Private R2 asset serving (Phase 6 §1b): the signed-URL signature or a
+  // portal/proposal token is the credential, not the origin secret. The GET
+  // route itself rejects any unsigned/unauthenticated request with a 404.
+  "/api/assets/",
 ] as const;
 
 function isWorkersDevHost(hostname: string) {

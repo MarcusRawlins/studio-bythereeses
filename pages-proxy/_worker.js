@@ -21,6 +21,10 @@ const SECURITY_HEADERS = {
 const RATE_LIMITS = {
   adminAuth: { max: 20, windowSeconds: 300 },
   tokenAccess: { max: 60, windowSeconds: 60 },
+  // Private R2 asset serving (Phase 6 §1b). A single portal page can embed many
+  // signed/token asset URLs (PDFs + gallery images), so allow more headroom than
+  // tokenAccess while still bounding abuse of the public serving path.
+  assetAccess: { max: 120, windowSeconds: 60 },
   publicMutation: { max: 20, windowSeconds: 300 },
   agentApi: { max: 120, windowSeconds: 60 },
 };
@@ -153,6 +157,10 @@ function isStudioPublicPath(pathname) {
     isPortalPublicPath(pathname) ||
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/api/proposal/") ||
+    // Private R2 asset serving (Phase 6 §1b): signed-URL / portal / proposal
+    // token is the credential; the origin route enforces it. Never gate this
+    // behind the admin Google session.
+    pathname.startsWith("/api/assets/") ||
     isPublicAssetPath(pathname)
   );
 }
@@ -181,6 +189,7 @@ function rateLimitKind(url, request) {
   const pathname = url.pathname;
   if (pathname === "/admin/auth/google" || pathname === "/api/google/callback") return "adminAuth";
   if (pathname === "/api/mcp" || pathname.startsWith("/api/agent/")) return "agentApi";
+  if (pathname.startsWith("/api/assets/")) return "assetAccess";
   if (
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/p/") ||

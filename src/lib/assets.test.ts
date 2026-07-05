@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -254,6 +254,92 @@ async function main() {
   }
   assert.equal(bucket.objects.size, bucketSizeBefore, "no R2 object may be written for a bad assetId");
 
+  // --- signAssetUrl / verifyAssetUrl round-trip ---
+  const {
+    signAssetUrl,
+    verifyAssetUrl,
+    assetKeyFromPathname,
+    ASSET_URL_MAX_TTL_SECONDS,
+  } = await import("./assets");
+
+  const signed = await signAssetUrl(contractResult.assetId, {
+    ttlSeconds: 900,
+    scope: "portal",
+    scopeRef: "project-1",
+  });
+  assert.ok(signed.startsWith(`/api/assets/${contractResult.key}?`), `unexpected signed path: ${signed}`);
+  const signedUrl = new URL(`https://studio.test${signed}`);
+  assert.equal(assetKeyFromPathname(signedUrl.pathname), contractResult.key);
+  const roundTrip = verifyAssetUrl(signedUrl);
+  assert.equal(roundTrip.ok, true);
+  assert.equal(roundTrip.key, contractResult.key);
+  assert.equal(roundTrip.scope, "portal");
+  assert.equal(roundTrip.scopeRef, "project-1");
+
+  // --- TTL cap: a caller asking for more than 7 days is clamped to 7 days ---
+  const cappedSigned = await signAssetUrl(contractResult.assetId, {
+    ttlSeconds: 30 * 24 * 60 * 60, // 30 days requested
+    scope: "admin",
+  });
+  const cappedExp = Number(new URL(`https://studio.test${cappedSigned}`).searchParams.get("exp"));
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  assert.ok(
+    cappedExp - nowSeconds <= ASSET_URL_MAX_TTL_SECONDS + 5,
+    `ttl must be capped at 7 days, got ${cappedExp - nowSeconds}s`,
+  );
+  assert.ok(cappedExp - nowSeconds > ASSET_URL_MAX_TTL_SECONDS - 60, "capped ttl should still be near 7 days");
+
+  // --- tamper: flipping a byte of the signature fails verification ---
+  const tampered = new URL(signedUrl.toString());
+  const originalSig = tampered.searchParams.get("sig");
+  const flipped = originalSig.slice(0, -1) + (originalSig.endsWith("A") ? "B" : "A");
+  tampered.searchParams.set("sig", flipped);
+  assert.equal(verifyAssetUrl(tampered).ok, false, "tampered signature must not verify");
+
+  // --- tamper: changing scopeRef (covered by the HMAC) fails verification ---
+  const scopeRefTampered = new URL(signedUrl.toString());
+  scopeRefTampered.searchParams.set("ref", "project-2");
+  assert.equal(verifyAssetUrl(scopeRefTampered).ok, false, "scopeRef is bound into the signature");
+
+  // --- expiry: a past `exp` with an otherwise-valid signature is rejected ---
+  const expiredExp = Math.floor(Date.now() / 1000) - 60;
+  const expiredSig = createHmac(
+    "sha256",
+    process.env.R2_URL_SIGNING_SECRET || "local-development-r2-url-signing-secret",
+  ).update(`${contractResult.key}\n${expiredExp}\nportal\nproject-1`).digest("base64url");
+  const expiredUrl = new URL(
+    `https://studio.test/api/assets/${contractResult.key}?exp=${expiredExp}&sc=portal&ref=project-1&sig=${expiredSig}`,
+  );
+  assert.equal(verifyAssetUrl(expiredUrl).ok, false, "expired signed URL must not verify");
+
+  // --- wrong-secret: a URL signed under a different secret fails verification ---
+  const previousSecret = process.env.R2_URL_SIGNING_SECRET;
+  process.env.R2_URL_SIGNING_SECRET = "secret-A";
+  const wrongSecretUrl = new URL(`https://studio.test${await signAssetUrl(contractResult.assetId, { ttlSeconds: 900, scope: "portal", scopeRef: "project-1" })}`);
+  process.env.R2_URL_SIGNING_SECRET = "secret-B";
+  assert.equal(verifyAssetUrl(wrongSecretUrl).ok, false, "URL signed with a different secret must not verify");
+  if (previousSecret === undefined) delete process.env.R2_URL_SIGNING_SECRET;
+  else process.env.R2_URL_SIGNING_SECRET = previousSecret;
+
+  // --- non-assets path / missing params -> ok:false ---
+  assert.equal(verifyAssetUrl(new URL("https://studio.test/not/assets?sig=x")).ok, false);
+  assert.equal(verifyAssetUrl(new URL(`https://studio.test/api/assets/${contractResult.key}`)).ok, false);
+  assert.equal(assetKeyFromPathname("/somewhere/else"), null);
+
+  // --- fail CLOSED in production when the secret is unset ---
+  const savedNodeEnv = process.env.NODE_ENV;
+  const savedSecret = process.env.R2_URL_SIGNING_SECRET;
+  process.env.NODE_ENV = "production";
+  delete process.env.R2_URL_SIGNING_SECRET;
+  await assert.rejects(
+    () => signAssetUrl(contractResult.assetId, { ttlSeconds: 900, scope: "admin" }),
+    /R2_URL_SIGNING_SECRET/,
+  );
+  if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = savedNodeEnv;
+  if (savedSecret === undefined) delete process.env.R2_URL_SIGNING_SECRET;
+  else process.env.R2_URL_SIGNING_SECRET = savedSecret;
+
   // --- deleteAsset: soft-deletes the row and removes the R2 object ---
   await deleteAsset(contractResult.assetId);
   const afterDeleteMeta = await getAssetMeta(contractResult.assetId);
@@ -275,6 +361,12 @@ async function main() {
   assert.equal(invoiceMetaAfter?.deletedAt, null);
   const invoiceObjectAfter = await getAssetObject(invoiceResult.key);
   assert.ok(invoiceObjectAfter, "unrelated asset object must remain in R2");
+
+  // --- signAssetUrl refuses to vend a link for a soft-deleted asset ---
+  await assert.rejects(
+    () => signAssetUrl(contractResult.assetId, { ttlSeconds: 900, scope: "portal", scopeRef: "project-1" }),
+    /missing or deleted/,
+  );
 
   console.log("assets storage tests passed");
 }

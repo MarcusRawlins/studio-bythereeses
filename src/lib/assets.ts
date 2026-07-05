@@ -1,7 +1,7 @@
 import type { R2Bucket, R2ObjectBody } from "@cloudflare/workers-types";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { eq } from "drizzle-orm";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 import { db } from "@/db/client";
 import { assetObjects } from "@/db/schema";
@@ -264,4 +264,138 @@ export async function deleteAsset(assetId: string): Promise<void> {
   }
 
   await assetsBucket().delete(row.key);
+}
+
+// --------------------------------------------------------------------------
+// Signed, time-limited asset URLs (serving path (b))
+//
+// Used for links embedded in Resend emails and inside generated PDFs, where no
+// live portal/proposal session exists. The credential is the HMAC signature
+// itself — the server-side code that mints the URL has already authorized the
+// caller for `scope`/`scopeRef`, and the signature vouches for that decision.
+// --------------------------------------------------------------------------
+
+export type AssetUrlScope = "admin" | "portal" | "proposal";
+
+/** The public GET serving route these signed URLs point at. */
+export const ASSETS_PATH_PREFIX = "/api/assets/";
+
+/** Hard maximum TTL for any signed asset URL: 7 days, regardless of caller input. */
+export const ASSET_URL_MAX_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * Resolves the HMAC secret for signed asset URLs. Fails CLOSED in production if
+ * unset (throws) — mirroring the L5 `schedulerLinkSecret` pattern — so a
+ * misconfigured deploy can never mint or accept unsigned-in-effect URLs. A
+ * fixed dev fallback is used only outside production so local/test runs work.
+ */
+function r2UrlSigningSecret(): string {
+  const configured = process.env.R2_URL_SIGNING_SECRET?.trim();
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("R2_URL_SIGNING_SECRET must be set in production.");
+  }
+  return "local-development-r2-url-signing-secret";
+}
+
+/** HMAC-SHA256 over `key\nexp\nscope\nscopeRef` -> base64url. */
+function signAssetPayload(key: string, exp: number, scope: AssetUrlScope, scopeRef: string): string {
+  const payload = `${key}\n${exp}\n${scope}\n${scopeRef}`;
+  return createHmac("sha256", r2UrlSigningSecret()).update(payload).digest("base64url");
+}
+
+/**
+ * Reconstructs the canonical R2 object key from a serving-route pathname
+ * (`/api/assets/<key...>`). The key can contain slashes; each segment is
+ * percent-decoded. Returns null for a pathname that is not an assets path or
+ * that carries no key. Both `signAssetUrl` (which signs the exact key bytes)
+ * and the serving route derive the key through this single function so their
+ * HMAC inputs and DB lookups can never disagree.
+ */
+export function assetKeyFromPathname(pathname: string): string | null {
+  if (!pathname.startsWith(ASSETS_PATH_PREFIX)) return null;
+  const raw = pathname.slice(ASSETS_PATH_PREFIX.length);
+  if (!raw) return null;
+  try {
+    return raw.split("/").map((segment) => decodeURIComponent(segment)).join("/");
+  } catch {
+    return null;
+  }
+}
+
+export type SignAssetUrlOptions = {
+  /** Requested lifetime in seconds. Floored to >= 1s and CAPPED at 7 days. */
+  ttlSeconds: number;
+  scope: AssetUrlScope;
+  /** projectId or proposalId the caller was already authorized for. */
+  scopeRef?: string | null;
+};
+
+/**
+ * Mints a signed, time-limited relative URL for an existing (non-deleted)
+ * asset: `/api/assets/{key}?exp={unix}&sc={scope}&ref={scopeRef}&sig={hmac}`.
+ *
+ * Throws if the asset is missing or soft-deleted (you cannot vend a link to an
+ * object the serving route would 404 anyway). `ttlSeconds` is clamped to
+ * [1, 7 days] so no caller — including a future email path passing a larger
+ * value — can outlive the hard revocation window.
+ */
+export async function signAssetUrl(assetId: string, opts: SignAssetUrlOptions): Promise<string> {
+  const meta = await getAssetMeta(assetId);
+  if (!meta || meta.deletedAt) {
+    throw new Error("Cannot sign a URL for a missing or deleted asset.");
+  }
+
+  const requestedTtl = Number.isFinite(opts.ttlSeconds) ? Math.floor(opts.ttlSeconds) : 0;
+  const ttlSeconds = Math.min(Math.max(requestedTtl, 1), ASSET_URL_MAX_TTL_SECONDS);
+  const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const scope = opts.scope;
+  const scopeRef = opts.scopeRef?.trim() ?? "";
+  const sig = signAssetPayload(meta.key, exp, scope, scopeRef);
+
+  const encodedKey = meta.key.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  const params = new URLSearchParams({ exp: String(exp), sc: scope, ref: scopeRef, sig });
+  return `${ASSETS_PATH_PREFIX}${encodedKey}?${params.toString()}`;
+}
+
+export type VerifyAssetUrlResult = {
+  ok: boolean;
+  key?: string;
+  scope?: AssetUrlScope;
+  scopeRef?: string;
+};
+
+/**
+ * Verifies a signed asset URL: reconstructs the key from the pathname,
+ * recomputes the HMAC over `key\nexp\nscope\nscopeRef`, and compares it to the
+ * provided `sig` in constant time (mirrors `src/lib/agent-api.ts`). Rejects
+ * (returns `{ ok: false }`) on a non-assets path, missing/garbage params, an
+ * unknown scope, an expired `exp`, or any signature mismatch. The assetId is
+ * intentionally NOT resolved here — the serving route performs the mandatory
+ * key -> row lookup (row exists AND not soft-deleted) itself, so a valid
+ * signature never bypasses that check.
+ */
+export function verifyAssetUrl(url: URL): VerifyAssetUrlResult {
+  const key = assetKeyFromPathname(url.pathname);
+  if (!key) return { ok: false };
+
+  const expRaw = url.searchParams.get("exp");
+  const scope = url.searchParams.get("sc");
+  const scopeRef = url.searchParams.get("ref") ?? "";
+  const sig = url.searchParams.get("sig");
+  if (!expRaw || !scope || !sig) return { ok: false };
+  if (scope !== "admin" && scope !== "portal" && scope !== "proposal") return { ok: false };
+
+  const exp = Number(expRaw);
+  if (!Number.isFinite(exp) || exp <= 0) return { ok: false };
+  if (exp * 1000 < Date.now()) return { ok: false };
+
+  const expected = signAssetPayload(key, exp, scope, scopeRef);
+  const provided = Buffer.from(sig);
+  const expectedBuffer = Buffer.from(expected);
+  if (provided.length !== expectedBuffer.length || !timingSafeEqual(provided, expectedBuffer)) {
+    return { ok: false };
+  }
+
+  return { ok: true, key, scope, scopeRef };
 }

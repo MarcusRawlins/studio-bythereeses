@@ -73,7 +73,7 @@ function addTokenDays(days: number) {
   return date.toISOString();
 }
 
-function hashProposalToken(token: string) {
+export function hashProposalToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
