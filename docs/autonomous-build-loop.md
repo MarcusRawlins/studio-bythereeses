@@ -32,7 +32,7 @@ reviewer prompt is seeded with the **Active-Learning Log** below.
 | 8a | Inquiry-email intake | ✅ deployed 2026-07-05 (dark) — Worker `53ad5abc`, proxy `a7619737`, migration 0085 |
 | 7a | Gallery delivery-link (provider-agnostic MVP) | ✅ deployed 2026-07-05 (dark) — Worker `0f7beefb`, migration 0086, `PORTAL_GALLERY_ENABLED` off |
 | 7b | Deep gallery provider integration (Pixieset/Pic-Time API) | 🅣 needs Tyler's provider choice + API credentials |
-| 8b | SMS (Twilio) | ✅ deployed 2026-07-05 (dark) — Worker `7ca815bf`, proxy `df082f06`, migration 0087; send-UI wiring = follow-up |
+| 8b | SMS (Twilio) | ✅ deployed 2026-07-05 (dark) — Worker `7ca815bf`, proxy `df082f06`, migration 0087. Admin send-UI wired + deployed dark 2026-07-06 (Worker `3fa37e5a`), Fable-gated (APPROVE), reuses the consent/suppression/flag/content-hash gate; admin-only, no agent surface. Follow-up: channel-aware compose-textarea cap. |
 | 8c | Automated sequences (dunning/nudges/reviews) | ✅ deployed 2026-07-05 (dark) — Worker `3b78372e`, proxy `2913d3b4`, migration 0088 |
 | 9a | Finance completeness — refund/dispute WEBHOOK recording + QBO/Xero export + tax/1099 (NO money moved) | ✅ deployed 2026-07-06 (dark) — Worker `d29fe5c6` (rollback `3b78372e`), migration 0089, `FINANCE_REFUND_RECORDING` default `record_only` (status-flip off). Spec Fable-gated ×2, code Fable-gated ×1. |
 | 9b | Refund INITIATION (admin-triggered Stripe refund — MOVES money) | 🅣 MONEY-MOVEMENT PAUSE — build allowed, deploy needs Tyler's explicit go |
