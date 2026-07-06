@@ -46,12 +46,13 @@ Stripe reachability. Routes are admin-only + origin-guarded (execute 404s on `*.
 (the new table is unused by the prior Worker), so rollback is clean.
 
 ## ⚠️ ENABLE checklist (Tyler-only — do ALL before flipping `REFUND_INITIATION_ENABLED=1`)
-1. **Admin refund UI** (deferred in the build): a control on the invoice/payment view with amount
-   prefill, typed-amount confirmation, the "service not rendered" checkbox, and retainer rows
-   disabled. (Server rails are all in place; do NOT first-refund via curl.)
-2. **Wire reconciliation**: surface `getRefundInitiationReconciliation()` (both tripwires: succeeded
-   >24h with no `payment_refunds` match; `submitting` >~1h stuck) into the finance needs-reconciliation
-   view or a scheduled check. Until wired, a stuck refund has no visible alarm.
+1. ✅ **Admin refund UI** — BUILT + deployed dark 2026-07-06 (Worker `5c7d3047`, `RefundControl.tsx`
+   on the invoice/payment view): amount prefill, typed-amount confirmation, "service not rendered"
+   checkbox + required reason, retainer/disputed rows pre-disabled (reusing the server predicates),
+   refund history shown. Renders NOTHING while the flag is off. Fable-approved.
+2. ✅ **Reconciliation wired** — `getRefundInitiationReconciliation()` (both tripwires: succeeded
+   >24h with no `payment_refunds` match; `submitting` >~1h stuck) surfaced read-only in the `/finance`
+   needs-reconciliation view; inert with zero initiations.
 3. **PRECONDITION auth-armed**: run `scripts/production-smoke.mjs` against prod and confirm the
    `refund/execute` direct-worker 404 (proves `ORIGIN_PROXY_SECRET` set at the Worker AND
    `ADMIN_PROOF_ENFORCE=1`).
