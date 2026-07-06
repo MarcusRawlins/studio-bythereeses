@@ -29,6 +29,17 @@ function positiveCents(value: number | null | undefined) {
   return Math.max(value ?? 0, 0);
 }
 
+// Phase 9a: "refunded" is a SETTLED terminal status, not an open one — a refunded
+// payment is NOT re-owed/re-billable (Fable finding #2/#3). Every openCents copy
+// (this shared helper + project-finance.ts + studio-mcp.ts) must agree, or a
+// refunded payment resurfaces as owed money somewhere. This is the single source
+// of truth those copies import.
+export const SETTLED_INVOICE_PAYMENT_STATUSES = new Set(["paid", "waived", "refunded"]);
+
+export function isSettledInvoicePaymentStatus(status: string | null | undefined) {
+  return status != null && SETTLED_INVOICE_PAYMENT_STATUSES.has(status);
+}
+
 export function invoiceClientPayableCents(invoice: InvoiceClientPayableLike) {
   return positiveCents(invoice.totalCents ?? invoice.total_cents)
     + positiveCents(invoice.cardFeeAmountCents ?? invoice.card_fee_amount_cents);
@@ -53,7 +64,7 @@ export function invoiceClientPayableBalanceCents(
 }
 
 export function invoicePaymentOpenCents(payment: InvoicePaymentOpenLike) {
-  if (payment.status === "paid" || payment.status === "waived") return 0;
+  if (isSettledInvoicePaymentStatus(payment.status)) return 0;
   return Math.max(
     positiveCents(payment.amountCents ?? payment.amount_cents)
       - positiveCents(payment.paidAmountCents ?? payment.paid_amount_cents),

@@ -126,6 +126,40 @@ async function main() {
     SELECT status, paid_amount_cents FROM invoice_payments WHERE id = 'payment-finance-guard-1'
   `).get(), { status: "pending", paid_amount_cents: 0 });
 
+  // Phase 9a — NO agent-callable path may write the new finance-adjacent surfaces:
+  // payment_refunds / payment_disputes / mileage_logs / the new invoice_payments summary
+  // columns / vendors W-9 columns. The recording of refunds/disputes is system-from-webhook
+  // ONLY (src/lib/stripe-refunds.ts) — there is no agent entry point. Assert the spy caught
+  // zero writes during the hostile agent calls AND the new tables/columns stay pristine.
+  assert.equal(database.prepare("SELECT COUNT(*) FROM payment_refunds").pluck().get(), 0, "no agent path writes payment_refunds");
+  assert.equal(database.prepare("SELECT COUNT(*) FROM payment_disputes").pluck().get(), 0, "no agent path writes payment_disputes");
+  assert.equal(database.prepare("SELECT COUNT(*) FROM mileage_logs").pluck().get(), 0, "no agent path writes mileage_logs");
+  assert.equal(database.prepare("SELECT COUNT(*) FROM stripe_webhook_events").pluck().get(), 0, "no agent path writes stripe_webhook_events");
+  assert.deepEqual(database.prepare(`
+    SELECT refunded_amount_cents, dispute_status, disputed_amount_cents, last_refund_at
+    FROM invoice_payments WHERE id = 'payment-finance-guard-1'
+  `).get(), { refunded_amount_cents: 0, dispute_status: null, disputed_amount_cents: 0, last_refund_at: null });
+  assert.equal(
+    database.prepare("SELECT COUNT(*) FROM vendors WHERE tax_id_last4 IS NOT NULL OR is_1099_tracked = 1 OR legal_name IS NOT NULL OR tax_address IS NOT NULL").pluck().get(),
+    0,
+    "no agent path writes vendor W-9 tax columns",
+  );
+
+  // Also assert the exported studio-mcp agent surface does not re-export any refund/dispute
+  // or W-9/mileage WRITE function (recording is system-from-webhook only; agents read via
+  // the finance report). getAgentFinanceReport (read) is allowed; write helpers are not.
+  const stripeRefunds = await import("./stripe-refunds");
+  for (const name of ["recordStripeChargeRefunded", "recordStripeRefund", "recordStripeDispute", "dispatchStripeRefundOrDisputeEvent"]) {
+    assert.ok(typeof (stripeRefunds as Record<string, unknown>)[name] === "function", `${name} exists as a system-only recorder`);
+  }
+  const mcp = await import("./studio-mcp");
+  for (const name of Object.keys(mcp)) {
+    assert.ok(
+      !/refund|dispute|mileage|w9|taxId|updateVendorTax/i.test(name),
+      `studio-mcp must not export a refund/dispute/mileage/W-9 write surface (found ${name})`,
+    );
+  }
+
   console.log("agent finance guard tests passed");
 }
 

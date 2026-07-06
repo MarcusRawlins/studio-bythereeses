@@ -735,6 +735,86 @@ function migrate(database: LocalDatabase) {
       ON sequence_sends(status, fired_at);
   `);
 
+  // Phase 9a: refund/dispute WEBHOOK recording + tax/1099 + mileage. Additive +
+  // idempotent so local dev (better-sqlite3) and any partially-migrated prod D1
+  // converge without a blanket `migrations apply`. The invoice_payments summary
+  // columns are read on always-on paths, so these must exist before /finance loads.
+  addColumnIfMissing(database, "invoice_payments", "refunded_amount_cents", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(database, "invoice_payments", "dispute_status", "TEXT");
+  addColumnIfMissing(database, "invoice_payments", "disputed_amount_cents", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(database, "invoice_payments", "last_refund_at", "TEXT");
+  addColumnIfMissing(database, "app_settings", "tax_set_aside_rate_percent", "INTEGER");
+  addColumnIfMissing(database, "app_settings", "mileage_rate_cents", "INTEGER");
+  addColumnIfMissing(database, "app_settings", "form_1099_threshold_cents", "INTEGER");
+  addColumnIfMissing(database, "vendors", "tax_id_last4", "TEXT");
+  addColumnIfMissing(database, "vendors", "is_1099_tracked", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(database, "vendors", "legal_name", "TEXT");
+  addColumnIfMissing(database, "vendors", "tax_address", "TEXT");
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+      event_id          TEXT PRIMARY KEY NOT NULL,
+      event_type        TEXT NOT NULL,
+      created_at        TEXT NOT NULL,
+      stripe_created_at TEXT,
+      result            TEXT
+    );
+    CREATE TABLE IF NOT EXISTS payment_refunds (
+      id                       TEXT PRIMARY KEY NOT NULL,
+      stripe_refund_id         TEXT NOT NULL,
+      stripe_charge_id         TEXT,
+      stripe_payment_intent_id TEXT,
+      invoice_payment_id       TEXT REFERENCES invoice_payments(id) ON DELETE SET NULL,
+      scheduler_booking_id     TEXT REFERENCES scheduler_bookings(id) ON DELETE SET NULL,
+      amount_cents             INTEGER NOT NULL DEFAULT 0,
+      currency                 TEXT NOT NULL DEFAULT 'usd',
+      reason                   TEXT,
+      status                   TEXT,
+      stripe_created_at        TEXT,
+      created_at               TEXT NOT NULL,
+      updated_at               TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS payment_disputes (
+      id                       TEXT PRIMARY KEY NOT NULL,
+      stripe_dispute_id        TEXT NOT NULL,
+      stripe_charge_id         TEXT,
+      stripe_payment_intent_id TEXT,
+      invoice_payment_id       TEXT REFERENCES invoice_payments(id) ON DELETE SET NULL,
+      scheduler_booking_id     TEXT REFERENCES scheduler_bookings(id) ON DELETE SET NULL,
+      amount_cents             INTEGER NOT NULL DEFAULT 0,
+      currency                 TEXT NOT NULL DEFAULT 'usd',
+      reason                   TEXT,
+      status                   TEXT,
+      funds_reinstated         INTEGER NOT NULL DEFAULT 0,
+      opened_at                TEXT,
+      closed_at                TEXT,
+      stripe_created_at        TEXT,
+      created_at               TEXT NOT NULL,
+      updated_at               TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS mileage_logs (
+      id            TEXT PRIMARY KEY NOT NULL,
+      project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+      trip_date     TEXT NOT NULL,
+      miles         REAL NOT NULL,
+      purpose       TEXT,
+      from_location TEXT,
+      to_location   TEXT,
+      notes         TEXT,
+      created_at    TEXT NOT NULL,
+      updated_at    TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_refunds_stripe_refund_id_unique ON payment_refunds(stripe_refund_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_disputes_stripe_dispute_id_unique ON payment_disputes(stripe_dispute_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_refunds_pi   ON payment_refunds(stripe_payment_intent_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_refunds_ip   ON payment_refunds(invoice_payment_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_refunds_created ON payment_refunds(created_at);
+    CREATE INDEX IF NOT EXISTS idx_payment_disputes_pi  ON payment_disputes(stripe_payment_intent_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_disputes_ip  ON payment_disputes(invoice_payment_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_disputes_created ON payment_disputes(created_at);
+    CREATE INDEX IF NOT EXISTS idx_mileage_logs_trip_date ON mileage_logs(trip_date);
+    CREATE INDEX IF NOT EXISTS idx_mileage_logs_project ON mileage_logs(project_id);
+  `);
+
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),
   );

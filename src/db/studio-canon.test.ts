@@ -886,6 +886,73 @@ async function main() {
     "project upstream source ids should be uniquely indexed per project",
   );
 
+  // Phase 9a — refund/dispute recording + tax/1099 + mileage (migration 0089).
+  assert.ok(
+    columnNames("invoice_payments").has("refunded_amount_cents"),
+    "invoice payments should track cumulative refunded amount for net-collected math",
+  );
+  assert.ok(
+    columnNames("invoice_payments").has("dispute_status")
+      && columnNames("invoice_payments").has("disputed_amount_cents")
+      && columnNames("invoice_payments").has("last_refund_at"),
+    "invoice payments should carry the dispute/refund summary columns read on the always-on finance path",
+  );
+  assert.ok(
+    columnNames("vendors").has("tax_id_last4")
+      && columnNames("vendors").has("is_1099_tracked")
+      && columnNames("vendors").has("legal_name")
+      && columnNames("vendors").has("tax_address"),
+    "vendors should carry admin-entered W-9 columns (TIN last4 only)",
+  );
+  assert.ok(
+    columnNames("stripe_webhook_events").has("event_id"),
+    "stripe webhook events dedupe table should exist keyed on the Stripe event id",
+  );
+  assert.ok(
+    indexNames("payment_refunds").has("idx_payment_refunds_stripe_refund_id_unique"),
+    "payment refund Stripe ids should be uniquely indexed for at-least-once webhook dedupe",
+  );
+  assert.ok(
+    indexNames("payment_disputes").has("idx_payment_disputes_stripe_dispute_id_unique"),
+    "payment dispute Stripe ids should be uniquely indexed for at-least-once webhook dedupe",
+  );
+  assert.ok(
+    indexNames("payment_refunds").has("idx_payment_refunds_pi")
+      && indexNames("payment_refunds").has("idx_payment_refunds_ip")
+      && indexNames("payment_refunds").has("idx_payment_refunds_created"),
+    "payment refunds should be indexed by payment-intent, linked payment, and money-event date",
+  );
+  assert.ok(
+    indexNames("payment_disputes").has("idx_payment_disputes_pi")
+      && indexNames("payment_disputes").has("idx_payment_disputes_ip"),
+    "payment disputes should be indexed by payment-intent and linked payment",
+  );
+  assert.ok(
+    columnNames("payment_refunds").has("stripe_created_at")
+      && columnNames("payment_disputes").has("stripe_created_at"),
+    "child refund/dispute rows should store the Stripe event time for out-of-order monotonic guards",
+  );
+  assert.ok(
+    columnNames("mileage_logs").has("trip_date") && columnNames("mileage_logs").has("miles"),
+    "mileage logs table should exist for the tax deduction report",
+  );
+
+  // The refund dedupe write is INSERT ... ON CONFLICT DO NOTHING — the UNIQUE index is
+  // what makes a redelivered webhook converge instead of double-recording.
+  const refundCanonNow = new Date("2026-07-01T12:00:00.000Z").toISOString();
+  database.prepare(`
+    INSERT INTO payment_refunds (id, stripe_refund_id, amount_cents, currency, status, created_at, updated_at)
+    VALUES ('refund-canon-1', 're_canon', 5000, 'usd', 'succeeded', ?, ?)
+  `).run(refundCanonNow, refundCanonNow);
+  assert.throws(
+    () => database.prepare(`
+      INSERT INTO payment_refunds (id, stripe_refund_id, amount_cents, currency, status, created_at, updated_at)
+      VALUES ('refund-canon-2', 're_canon', 9999, 'usd', 'succeeded', ?, ?)
+    `).run(refundCanonNow, refundCanonNow),
+    /UNIQUE constraint failed/,
+    "a replayed refund id must not create a second payment_refunds row",
+  );
+
   const now = new Date("2026-05-29T12:00:00.000Z").toISOString();
   database.prepare(`
     INSERT INTO app_settings (

@@ -1,6 +1,6 @@
 import { db } from "@/db/client";
-import { activityLogs, expenses, invoicePayments, projects, schedulerBookings, vendors } from "@/db/schema";
-import { and, asc, eq, gte, isNull, lte, or, type SQL } from "drizzle-orm";
+import { activityLogs, expenses, invoicePayments, paymentDisputes, paymentRefunds, projects, schedulerBookings, vendors } from "@/db/schema";
+import { and, asc, eq, gte, inArray, isNull, lte, or, type SQL } from "drizzle-orm";
 
 export type CreateExpenseInput = {
   projectId?: string | null;
@@ -62,6 +62,15 @@ export type BookkeepingReport = {
     taxDeductibleExpenseCents: number;
     nonDeductibleExpenseCents: number;
     netIncomeCents: number;
+    // Phase 9a — additive net-of-refunds figures. Gross fields above are UNCHANGED so a
+    // later refund never removes revenue from the original paid period (Fable finding #2);
+    // the refund appears only here as a period-scoped subtraction on its own money-event
+    // date. netRevenueCents / netDepositAfterRefundsCents net across periods to the truth.
+    refundedCents: number;
+    disputeLostCents: number;
+    netRevenueCents: number;
+    netDepositAfterRefundsCents: number;
+    netIncomeAfterRefundsCents: number;
   };
 };
 
@@ -144,6 +153,15 @@ function paidRevenueConditions(column: typeof invoicePayments.paidAt | typeof sc
   return conditions;
 }
 
+// Phase 9a: period-scope refund/dispute subtractions on the money-event date (our
+// receive time, stored in created_at) rather than the original paidAt.
+function moneyEventPeriodConditions(column: typeof paymentRefunds.createdAt | typeof paymentDisputes.createdAt, input: BookkeepingReportInput) {
+  const conditions: SQL[] = [];
+  if (input.fromDate) conditions.push(gte(column, isoFloorForDate(input.fromDate)));
+  if (input.toDate) conditions.push(lte(column, isoCeilingForDate(input.toDate)));
+  return conditions;
+}
+
 async function findOrCreateVendor(vendorName: string) {
   const name = cleanText(vendorName);
   if (!name) throw new Error("Vendor name is required.");
@@ -162,6 +180,10 @@ async function findOrCreateVendor(vendorName: string) {
     email: null,
     websiteUrl: null,
     notes: null,
+    taxIdLast4: null,
+    is1099Tracked: false,
+    legalName: null,
+    taxAddress: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -512,11 +534,14 @@ export async function getBookkeepingReport(input: BookkeepingReportInput = {}): 
     .where(expenseReportConditions(input))
     .orderBy(asc(expenses.paidAt), asc(expenses.createdAt)) as ExpenseLedgerRow[];
 
+  // Phase 9a: "refunded" is a SETTLED status — include it (scoped by paidAt) so the
+  // ORIGINAL period's gross revenue stays immutable when a later refund lands. The refund
+  // itself is subtracted separately below (net figures), scoped by its own money-event date.
   const paidRows = await db
     .select({ payment: invoicePayments })
     .from(invoicePayments)
     .where(and(
-      eq(invoicePayments.status, "paid"),
+      inArray(invoicePayments.status, ["paid", "refunded"]),
       ...paidRevenueConditions(invoicePayments.paidAt, input),
     )) as Array<{ payment: typeof invoicePayments.$inferSelect }>;
   const paidBookingRows = await db
@@ -530,6 +555,29 @@ export async function getBookkeepingReport(input: BookkeepingReportInput = {}): 
     .select({ expense: expenses })
     .from(expenses)
     .where(payableExpenseConditions(input)) as Array<{ expense: typeof expenses.$inferSelect }>;
+
+  // Phase 9a net-of-refunds subtraction. Subtract ONLY succeeded child refunds
+  // (pending/failed/canceled have not moved money — Fable finding #6), plus
+  // lost-not-reinstated disputes. Period-scope on the money-event date (created_at),
+  // consistent with how revenue is scoped on paidAt — so no period double-removes the
+  // same dollars.
+  const refundRows = await db
+    .select({ amountCents: paymentRefunds.amountCents })
+    .from(paymentRefunds)
+    .where(and(
+      eq(paymentRefunds.status, "succeeded"),
+      ...moneyEventPeriodConditions(paymentRefunds.createdAt, input),
+    )) as Array<{ amountCents: number }>;
+  const lostDisputeRows = await db
+    .select({ amountCents: paymentDisputes.amountCents })
+    .from(paymentDisputes)
+    .where(and(
+      eq(paymentDisputes.status, "lost"),
+      eq(paymentDisputes.fundsReinstated, 0),
+      ...moneyEventPeriodConditions(paymentDisputes.createdAt, input),
+    )) as Array<{ amountCents: number }>;
+  const refundedCents = refundRows.reduce((sum, row) => sum + Math.max(row.amountCents, 0), 0);
+  const disputeLostCents = lostDisputeRows.reduce((sum, row) => sum + Math.max(row.amountCents, 0), 0);
 
   const invoiceRevenueCents = paidRows.reduce((sum, row) => sum + row.payment.paidAmountCents, 0);
   const schedulerRevenueCents = paidBookingRows.reduce((sum, row) => sum + row.booking.paidAmountCents, 0);
@@ -606,6 +654,11 @@ export async function getBookkeepingReport(input: BookkeepingReportInput = {}): 
       taxDeductibleExpenseCents,
       nonDeductibleExpenseCents: expenseCents - taxDeductibleExpenseCents,
       netIncomeCents: netDepositCents - paidExpenseCents,
+      refundedCents,
+      disputeLostCents,
+      netRevenueCents: revenueCents - refundedCents - disputeLostCents,
+      netDepositAfterRefundsCents: netDepositCents - refundedCents - disputeLostCents,
+      netIncomeAfterRefundsCents: netDepositCents - refundedCents - disputeLostCents - paidExpenseCents,
     },
   };
 }
@@ -693,6 +746,11 @@ export function bookkeepingSummaryCsv(report: BookkeepingReport, options: {
     ["Totals", "Tax deductible expenses", null, centsCsv(report.totals.taxDeductibleExpenseCents), null, "Expenses marked deductible"],
     ["Totals", "Non-deductible expenses", null, centsCsv(report.totals.nonDeductibleExpenseCents), null, "Expenses not marked deductible"],
     ["Totals", "Net income", null, centsCsv(report.totals.netIncomeCents), null, "Net deposits minus paid expenses"],
+    ["Totals", "Refunds (succeeded)", null, centsCsv(report.totals.refundedCents), null, "Succeeded Stripe refunds in this period (money-event date)"],
+    ["Totals", "Lost disputes", null, centsCsv(report.totals.disputeLostCents), null, "Lost, not-reinstated disputes in this period"],
+    ["Totals", "Net revenue (after refunds)", null, centsCsv(report.totals.netRevenueCents), null, "Service revenue minus refunds and lost disputes"],
+    ["Totals", "Net deposits (after refunds)", null, centsCsv(report.totals.netDepositAfterRefundsCents), null, "Cash after processor fees, refunds, and lost disputes"],
+    ["Totals", "Net income (after refunds)", null, centsCsv(report.totals.netIncomeAfterRefundsCents), null, "Net deposits after refunds minus paid expenses"],
     ...report.expensesByCategory.map((row) => [
       "Expense category",
       row.category,

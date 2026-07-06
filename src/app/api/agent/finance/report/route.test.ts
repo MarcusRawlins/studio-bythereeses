@@ -141,6 +141,9 @@ async function main() {
     netDepositCents: 50000,
     openCents: 0,
     clientPayableOpenCents: 0,
+    refundedCents: 0,
+    disputedOpenCents: 0,
+    netCollectedCents: 51190,
   });
   assert.deepEqual(body.financeReport.paymentLedger.rows.map((row: {
     recordType: string;
@@ -366,6 +369,11 @@ async function main() {
     taxDeductibleExpenseCents: 15000,
     nonDeductibleExpenseCents: 0,
     netIncomeCents: 35000,
+    refundedCents: 0,
+    disputeLostCents: 0,
+    netRevenueCents: 50000,
+    netDepositAfterRefundsCents: 50000,
+    netIncomeAfterRefundsCents: 35000,
   });
   assert.deepEqual(body.financeReport.bookkeeping.expensesByCategory, [
     {

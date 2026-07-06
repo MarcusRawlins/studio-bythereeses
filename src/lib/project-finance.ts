@@ -1,6 +1,6 @@
 import { db } from "@/db/client";
 import { expenses, invoicePayments, invoices, schedulerBookings, schedulerMeetingTypes } from "@/db/schema";
-import { invoiceClientPayableBalanceCents } from "@/lib/invoice-balances";
+import { invoiceClientPayableBalanceCents, isSettledInvoicePaymentStatus } from "@/lib/invoice-balances";
 import { asc, eq, inArray } from "drizzle-orm";
 
 type InvoicePaymentLike = {
@@ -64,7 +64,8 @@ export type ProjectFinancialSummary = {
 };
 
 function invoicePaymentOpenCents(payment: InvoicePaymentLike) {
-  if (payment.status === "paid" || payment.status === "waived") return 0;
+  // Phase 9a: "refunded" reads as settled (0 open) everywhere — see invoice-balances.ts.
+  if (isSettledInvoicePaymentStatus(payment.status)) return 0;
   return Math.max(payment.amountCents - payment.paidAmountCents, 0);
 }
 

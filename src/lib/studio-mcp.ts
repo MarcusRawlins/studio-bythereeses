@@ -10,7 +10,7 @@ import { listStudioActivityLog } from "./activity";
 import { createExpenseFromAgent, updateExpenseFromAgent, type AgentExpenseInput, type AgentExpenseUpdateInput } from "./bookkeeping";
 import { createProjectEventFromAgent, createProjectFromAgent, createProjectLocationFromAgent, getClientWithProjects, getProject, linkClientToProject, listProjectIndex, mergeClients, updateClientFromAgent, updateProjectEventFromAgent, updateProjectFromAgent, updateProjectLocationFromAgent, type AgentClientUpdateInput, type AgentProjectCreateInput, type AgentProjectEventInput, type AgentProjectLocationInput, type AgentProjectUpdateInput, type ProjectIndexSort } from "./crm";
 import { listStudioDataHealth } from "./data-health";
-import { invoiceClientPayableBalanceCents, invoiceClientPayableCents } from "./invoice-balances";
+import { invoiceClientPayableBalanceCents, invoiceClientPayableCents, isSettledInvoicePaymentStatus } from "./invoice-balances";
 import { createProjectCommunicationFromAgent, updateProjectCommunicationFromAgent } from "./project-communications";
 import { summarizeProjectFinancials } from "./project-finance";
 import { createProjectTimelineItem, createProjectTimelineItemsFromAgent, updateProjectTimelineItem } from "./project-timeline";
@@ -1434,7 +1434,9 @@ export async function searchStudioProjects(input: { query?: string | null; page?
 type ProjectContextRecord = Awaited<ReturnType<typeof getProject>>;
 
 function paymentOpenCents(payment: typeof invoicePayments.$inferSelect) {
-  if (payment.status === "paid" || payment.status === "waived") return 0;
+  // Phase 9a: "refunded" reads as settled (0 open) on the agent MCP surface too —
+  // else the agent reports refunded money as still open. See invoice-balances.ts.
+  if (isSettledInvoicePaymentStatus(payment.status)) return 0;
   return Math.max(payment.amountCents - payment.paidAmountCents, 0);
 }
 

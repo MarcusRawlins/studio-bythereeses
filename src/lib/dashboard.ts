@@ -50,7 +50,10 @@ function addDaysKey(value: Date, days: number) {
 export function summarizeInvoicePaymentMetrics(rows: InvoicePaymentMetricRow[], now = new Date()) {
   const today = dateKey(now);
   const dueSoonEnd = addDaysKey(now, 14);
-  const unpaidRows = rows.filter((row) => row.status !== "paid" && row.status !== "waived");
+  // Phase 9a: a "refunded" payment is settled — never chase it (the exact "follow up
+  // on money that was refunded" failure). Exclude it from unpaid rows, metrics, and
+  // the next-payment-due / overdue action items.
+  const unpaidRows = rows.filter((row) => row.status !== "paid" && row.status !== "waived" && row.status !== "refunded");
   const datedRows = unpaidRows
     .filter((row): row is InvoicePaymentMetricRow & { dueDate: string } => Boolean(row.dueDate))
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
@@ -265,7 +268,7 @@ export async function listDashboardActionItems(now = new Date(), limit = 8): Pro
       dueDate: session.weddingDate,
     })),
     ...invoicePaymentRows
-      .filter((row) => row.status !== "paid" && row.status !== "waived")
+      .filter((row) => row.status !== "paid" && row.status !== "waived" && row.status !== "refunded")
       .map((row) => ({
         id: row.paymentId,
         kind: "invoice_payment" as const,

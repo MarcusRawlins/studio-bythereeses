@@ -98,6 +98,9 @@ async function main() {
     netDepositCents: 55000,
     openCents: 70000,
     clientPayableOpenCents: 72030,
+    refundedCents: 0,
+    disputedOpenCents: 0,
+    netCollectedCents: 56655,
   });
   assert.deepEqual(report.rows.map((row) => ({
     sourceType: row.sourceType,

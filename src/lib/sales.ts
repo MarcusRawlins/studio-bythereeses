@@ -1,9 +1,9 @@
 import { db } from "@/db/client";
-import { activityLogs, clients, invoicePayments, invoices, projectParticipants, projects, proposalAccessTokens, proposalLineItems, proposals, schedulerBookings, schedulerMeetingTypes, templates } from "@/db/schema";
+import { activityLogs, clients, invoicePayments, invoices, paymentDisputes, paymentRefunds, projectParticipants, projects, proposalAccessTokens, proposalLineItems, proposals, schedulerBookings, schedulerMeetingTypes, templates } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { ensureEngagementPlaceholder } from "@/lib/crm";
 import { formatMoney } from "@/lib/format";
-import { invoiceClientPayableBalanceCents as calculateInvoiceClientPayableBalanceCents, invoiceClientPayableCents as calculateInvoiceClientPayableCents } from "@/lib/invoice-balances";
+import { invoiceClientPayableBalanceCents as calculateInvoiceClientPayableBalanceCents, invoiceClientPayableCents as calculateInvoiceClientPayableCents, isSettledInvoicePaymentStatus } from "@/lib/invoice-balances";
 import { canSignProposalContract, nextProposalStatus } from "@/lib/proposal-readiness";
 import { enabledPaymentMethods, getAppSettings, type PaymentMethodKey } from "@/lib/settings";
 import { createHash, randomBytes } from "node:crypto";
@@ -885,6 +885,31 @@ export type PaymentLedgerRow = {
   clientName: string;
   openCents: number;
   clientPayableOpenCents: number;
+  // Phase 9a — refund/dispute surfacing (additive; gross fields above unchanged).
+  refundedAmountCents: number;
+  disputeStatus: string | null;
+  disputedAmountCents: number;
+  // Sum of succeeded child refunds linked to this payment. Used to compute the
+  // divergence/over-cap reconciliation flag at READ time (never persisted).
+  succeededRefundCents: number;
+  // netCollectedCents = grossCollected − refunded − (dispute lost & not reinstated ? disputed : 0).
+  netCollectedCents: number;
+};
+
+// A refund/dispute recorded from Stripe that matched no invoice_payment row (§1.4
+// case 3) — surfaced as its own "Unlinked money events" section, never as a ledger row.
+export type UnlinkedMoneyEvent = {
+  kind: "refund" | "dispute";
+  id: string;
+  stripeId: string;
+  stripePaymentIntentId: string | null;
+  stripeChargeId: string | null;
+  schedulerBookingId: string | null;
+  amountCents: number;
+  currency: string;
+  status: string | null;
+  reason: string | null;
+  createdAt: string;
 };
 
 export type AccountsReceivableAgingBucket = "current" | "1_30" | "31_60" | "61_90" | "90_plus";
@@ -917,7 +942,13 @@ export type PaymentLedgerReport = {
     netDepositCents: number;
     openCents: number;
     clientPayableOpenCents: number;
+    // Phase 9a — additive net-of-refunds figures (gross fields above unchanged).
+    refundedCents: number;
+    disputedOpenCents: number;
+    netCollectedCents: number;
   };
+  // Refunds/disputes that matched no invoice payment (orphaned/unlinked).
+  unlinkedMoneyEvents: UnlinkedMoneyEvent[];
   aging: {
     asOfDate: string;
     buckets: Array<{
@@ -1523,12 +1554,36 @@ function paymentLedgerStatusFilter(status: string | null | undefined) {
   return !cleanStatus || cleanStatus === "all" ? null : cleanStatus;
 }
 
+// Phase 9a: a refund whose recorded child amount exceeds what we collected (over-cap),
+// or a summary-vs-children divergence, is a reconciliation item (Fable finding #6). The
+// divergence flag is computed HERE at read time — never persisted — so it self-heals when
+// a reordered charge.refunded / refund.created pair settles.
+export function paymentRefundNeedsReconciliation(row: Pick<PaymentLedgerRow, "payment" | "succeededRefundCents" | "disputeStatus">) {
+  const gross = Math.max(row.payment.grossCollectedCents, 0);
+  const overCap = row.succeededRefundCents > gross;
+  const divergence = row.payment.refundedAmountCents !== row.succeededRefundCents;
+  const openDispute = row.disputeStatus === "open";
+  return overCap || divergence || openDispute;
+}
+
+function ledgerNetCollectedCents(payment: typeof invoicePayments.$inferSelect) {
+  const gross = Math.max(payment.grossCollectedCents, 0);
+  const refunded = Math.max(payment.refundedAmountCents, 0);
+  // A lost dispute whose funds were NOT reinstated is treated like a refund for net.
+  // ("reinstated"/"won"/"open" summary states do not subtract.)
+  const disputeLost = payment.disputeStatus === "lost" ? Math.max(payment.disputedAmountCents, 0) : 0;
+  return gross - refunded - disputeLost;
+}
+
 function paymentLedgerNeedsReconciliation(row: PaymentLedgerRow) {
-  return row.payment.status === "paid" && (
+  // Original evidence rule (paid rows missing external id / source) PLUS the Phase 9a
+  // refund/dispute flags. "refunded" is settled but can still carry a divergence/over-cap.
+  const missingEvidence = (row.payment.status === "paid" || row.payment.status === "refunded") && (
     !row.payment.externalPaymentId
     || !row.paymentSourceType
     || !row.paymentSourceId
   );
+  return missingEvidence || paymentRefundNeedsReconciliation(row);
 }
 
 function paymentLedgerSortValue(row: PaymentLedgerRow) {
@@ -1626,12 +1681,28 @@ function buildAccountsReceivableAging(rows: PaymentLedgerRow[], asOfDate: string
 export async function getPaymentLedgerReport(input: PaymentLedgerReportInput = {}): Promise<PaymentLedgerReport> {
   const cleanStatus = paymentLedgerStatusFilter(input.status);
   const needsReconciliation = cleanStatus === "needs_reconciliation";
+  // Phase 9a (Fable N2): widen the reconciliation view to include "refunded" rows so a
+  // refunded payment carrying a divergence/over-cap flag stays visible (a refunded row is
+  // otherwise settled and would be filtered out).
   const invoiceStatusFilter = cleanStatus
-    ? eq(invoicePayments.status, needsReconciliation ? "paid" : cleanStatus)
+    ? (needsReconciliation ? inArray(invoicePayments.status, ["paid", "refunded"]) : eq(invoicePayments.status, cleanStatus))
     : undefined;
   const schedulerStatusFilter = cleanStatus
     ? eq(schedulerBookings.paymentStatus, needsReconciliation ? "paid" : cleanStatus)
     : undefined;
+
+  // Sum of SUCCEEDED child refunds per invoice payment — the read-time input to the
+  // divergence/over-cap flag (§2.2) and the per-row net figure.
+  const succeededRefundRows = await db
+    .select({ invoicePaymentId: paymentRefunds.invoicePaymentId, amountCents: paymentRefunds.amountCents })
+    .from(paymentRefunds)
+    .where(eq(paymentRefunds.status, "succeeded"));
+  const succeededRefundByPayment = new Map<string, number>();
+  for (const refund of succeededRefundRows) {
+    if (!refund.invoicePaymentId) continue;
+    succeededRefundByPayment.set(refund.invoicePaymentId, (succeededRefundByPayment.get(refund.invoicePaymentId) ?? 0) + (refund.amountCents ?? 0));
+  }
+
   const rows = await db
     .select({
       payment: invoicePayments,
@@ -1658,7 +1729,10 @@ export async function getPaymentLedgerReport(input: PaymentLedgerReportInput = {
   for (const row of rows) {
     if (seenPayments.has(row.payment.id)) continue;
     seenPayments.add(row.payment.id);
-    const paidCents = row.payment.status === "paid" ? row.payment.paidAmountCents : 0;
+    // Phase 9a: "refunded" reflects the ORIGINAL gross collection (paidCents), reads as
+    // settled (openCents 0), and is not re-owed. Net is derived separately.
+    const paidCents = (row.payment.status === "paid" || row.payment.status === "refunded") ? row.payment.paidAmountCents : 0;
+    const succeededRefundCents = succeededRefundByPayment.get(row.payment.id) ?? 0;
     ledgerRows.push({
       sourceType: "invoice",
       sourceId: row.payment.id,
@@ -1667,10 +1741,15 @@ export async function getPaymentLedgerReport(input: PaymentLedgerReportInput = {
       paymentSourceId: row.payment.sourceId,
       ...row,
       clientName: ledgerClientName(row.client),
-      openCents: row.payment.status === "paid" || row.payment.status === "waived"
+      openCents: isSettledInvoicePaymentStatus(row.payment.status)
         ? 0
         : Math.max(row.payment.amountCents - paidCents, 0),
       clientPayableOpenCents: 0,
+      refundedAmountCents: Math.max(row.payment.refundedAmountCents, 0),
+      disputeStatus: row.payment.disputeStatus,
+      disputedAmountCents: Math.max(row.payment.disputedAmountCents, 0),
+      succeededRefundCents,
+      netCollectedCents: ledgerNetCollectedCents(row.payment),
     });
   }
 
@@ -1739,6 +1818,13 @@ export async function getPaymentLedgerReport(input: PaymentLedgerReportInput = {
       grossCollectedCents: row.booking.grossCollectedCents,
       netDepositCents: row.booking.netDepositCents,
       externalPaymentId: row.booking.externalPaymentId,
+      // Phase 9a: bookings carry no refund/dispute summary (not flipped from a webhook),
+      // but the synthetic payment must expose the fields explicitly (undefined would trip
+      // the divergence flag: undefined !== 0).
+      refundedAmountCents: 0,
+      disputeStatus: null,
+      disputedAmountCents: 0,
+      lastRefundAt: null,
       notes: row.booking.paymentNotes,
       sourceType: row.booking.paymentSourceType,
       sourceId: row.booking.paymentSourceId,
@@ -1763,6 +1849,14 @@ export async function getPaymentLedgerReport(input: PaymentLedgerReportInput = {
       clientPayableOpenCents: row.booking.paymentStatus === "paid" || row.booking.paymentStatus === "waived"
         ? 0
         : Math.max(amountCents - row.booking.paidAmountCents, 0),
+      // Bookings are NOT flipped/summarized from a webhook in 9a. Booking-linked refunds
+      // are recorded as child rows (with scheduler_booking_id) and surface in the
+      // unlinked-money-events section + period net figures, never on this row.
+      refundedAmountCents: 0,
+      disputeStatus: null,
+      disputedAmountCents: 0,
+      succeededRefundCents: 0,
+      netCollectedCents: Math.max(row.booking.grossCollectedCents, 0),
     });
   }
 
@@ -1799,6 +1893,9 @@ export async function getPaymentLedgerReport(input: PaymentLedgerReportInput = {
     netDepositCents: sum.netDepositCents + row.payment.netDepositCents,
     openCents: sum.openCents + row.openCents,
     clientPayableOpenCents: sum.clientPayableOpenCents + row.openCents,
+    refundedCents: sum.refundedCents + row.refundedAmountCents,
+    disputedOpenCents: sum.disputedOpenCents + (row.disputeStatus === "open" ? row.disputedAmountCents : 0),
+    netCollectedCents: sum.netCollectedCents + row.netCollectedCents,
   }), {
     scheduledCents: 0,
     paidCents: 0,
@@ -1808,6 +1905,9 @@ export async function getPaymentLedgerReport(input: PaymentLedgerReportInput = {
     netDepositCents: 0,
     openCents: 0,
     clientPayableOpenCents: 0,
+    refundedCents: 0,
+    disputedOpenCents: 0,
+    netCollectedCents: 0,
   });
 
   if (!cleanStatus) {
@@ -1823,7 +1923,47 @@ export async function getPaymentLedgerReport(input: PaymentLedgerReportInput = {
     rows: filteredRows,
     totals,
     aging: buildAccountsReceivableAging(filteredRows, input.asOfDate?.slice(0, 10) || defaultAsOfDate()),
+    unlinkedMoneyEvents: await getUnlinkedMoneyEvents(),
   };
+}
+
+// Orphaned refunds/disputes (invoice_payment_id IS NULL) — Stripe money events that
+// matched no invoice payment row. Surfaced as their own section (§2.1 N2), never as
+// PaymentLedgerRows (they have no payment/invoice to attach to).
+async function getUnlinkedMoneyEvents(): Promise<UnlinkedMoneyEvent[]> {
+  const [refundRows, disputeRows] = await Promise.all([
+    db.select().from(paymentRefunds).where(isNull(paymentRefunds.invoicePaymentId)),
+    db.select().from(paymentDisputes).where(isNull(paymentDisputes.invoicePaymentId)),
+  ]);
+  const events: UnlinkedMoneyEvent[] = [
+    ...refundRows.map((row) => ({
+      kind: "refund" as const,
+      id: row.id,
+      stripeId: row.stripeRefundId,
+      stripePaymentIntentId: row.stripePaymentIntentId,
+      stripeChargeId: row.stripeChargeId,
+      schedulerBookingId: row.schedulerBookingId,
+      amountCents: row.amountCents,
+      currency: row.currency,
+      status: row.status,
+      reason: row.reason,
+      createdAt: row.createdAt,
+    })),
+    ...disputeRows.map((row) => ({
+      kind: "dispute" as const,
+      id: row.id,
+      stripeId: row.stripeDisputeId,
+      stripePaymentIntentId: row.stripePaymentIntentId,
+      stripeChargeId: row.stripeChargeId,
+      schedulerBookingId: row.schedulerBookingId,
+      amountCents: row.amountCents,
+      currency: row.currency,
+      status: row.status,
+      reason: row.reason,
+      createdAt: row.createdAt,
+    })),
+  ];
+  return events.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 function csvCell(value: string | number | null | undefined) {

@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const timestamps = {
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
@@ -213,6 +213,10 @@ export const appSettings = sqliteTable("app_settings", {
   instagramUrl: text("instagram_url"),
   timezone: text("timezone").notNull().default("America/New_York"),
   paymentMethodsJson: text("payment_methods_json").notNull(),
+  // Phase 9a — finance rate settings (reports only; safe code defaults when NULL).
+  taxSetAsideRatePercent: integer("tax_set_aside_rate_percent"),
+  mileageRateCents: integer("mileage_rate_cents"),
+  form1099ThresholdCents: integer("form_1099_threshold_cents"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -384,6 +388,13 @@ export const vendors = sqliteTable("vendors", {
   email: text("email"),
   websiteUrl: text("website_url"),
   notes: text("notes"),
+  // Phase 9a (1099/W-9): admin-entered vendor tax data. Store ONLY the last 4 of
+  // the TIN — never the full SSN/EIN (PII minimization). Agents cannot write these
+  // (finance-adjacent) — see agent-finance-guard.test.ts.
+  taxIdLast4: text("tax_id_last4"),
+  is1099Tracked: integer("is_1099_tracked", { mode: "boolean" }).notNull().default(false),
+  legalName: text("legal_name"),
+  taxAddress: text("tax_address"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -512,10 +523,82 @@ export const invoicePayments = sqliteTable("invoice_payments", {
   stripeCheckoutSessionId: text("stripe_checkout_session_id"),
   stripeCheckoutStatus: text("stripe_checkout_status").notNull().default("not_created"),
   notes: text("notes"),
+  // Phase 9a: refund/dispute summary columns (always-on read path — finance report +
+  // reconcile status). `refunded_amount_cents` is set-to-authoritative (clamped to
+  // grossCollected, never decreased); `dispute_status` ∈ NULL|open|won|lost|reinstated.
+  refundedAmountCents: integer("refunded_amount_cents").notNull().default(0),
+  disputeStatus: text("dispute_status"),
+  disputedAmountCents: integer("disputed_amount_cents").notNull().default(0),
+  lastRefundAt: text("last_refund_at"),
   sourceType: text("source_type"),
   sourceId: text("source_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
+});
+
+// ---------------------------------------------------------------------------
+// Phase 9a — Refund / dispute WEBHOOK recording (Stripe is source of truth; we
+// mirror inbound signature-verified events into our ledger). NO money moved.
+// Every write is idempotent-by-construction: UNIQUE stripe id + set-to-authoritative,
+// so a redelivered/replayed event converges to the same row state (no db.transaction —
+// D1 rejects it). The event-id dedupe row is written LAST, after processing succeeds.
+// ---------------------------------------------------------------------------
+
+export const stripeWebhookEvents = sqliteTable("stripe_webhook_events", {
+  eventId: text("event_id").primaryKey(), // Stripe event.id (evt_...); dedupe key
+  eventType: text("event_type").notNull(),
+  createdAt: text("created_at").notNull(), // our receive time
+  stripeCreatedAt: text("stripe_created_at"), // event.created (epoch → ISO)
+  result: text("result"), // short JSON of what we did (audit)
+});
+
+export const paymentRefunds = sqliteTable("payment_refunds", {
+  id: text("id").primaryKey(),
+  stripeRefundId: text("stripe_refund_id").notNull(), // re_...; UNIQUE (dedupe within table)
+  stripeChargeId: text("stripe_charge_id"),
+  stripePaymentIntentId: text("stripe_payment_intent_id"), // join key → external_payment_id
+  invoicePaymentId: text("invoice_payment_id").references(() => invoicePayments.id, { onDelete: "set null" }),
+  schedulerBookingId: text("scheduler_booking_id").references(() => schedulerBookings.id, { onDelete: "set null" }),
+  amountCents: integer("amount_cents").notNull().default(0),
+  currency: text("currency").notNull().default("usd"),
+  reason: text("reason"),
+  status: text("status"), // succeeded | pending | failed | canceled
+  stripeCreatedAt: text("stripe_created_at"), // for out-of-order monotonic guard
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const paymentDisputes = sqliteTable("payment_disputes", {
+  id: text("id").primaryKey(),
+  stripeDisputeId: text("stripe_dispute_id").notNull(), // dp_...; UNIQUE
+  stripeChargeId: text("stripe_charge_id"),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  invoicePaymentId: text("invoice_payment_id").references(() => invoicePayments.id, { onDelete: "set null" }),
+  schedulerBookingId: text("scheduler_booking_id").references(() => schedulerBookings.id, { onDelete: "set null" }),
+  amountCents: integer("amount_cents").notNull().default(0),
+  currency: text("currency").notNull().default("usd"),
+  reason: text("reason"),
+  status: text("status"), // warning_needs_response | needs_response | under_review | won | lost | ...
+  fundsReinstated: integer("funds_reinstated").notNull().default(0),
+  openedAt: text("opened_at"),
+  closedAt: text("closed_at"),
+  stripeCreatedAt: text("stripe_created_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+// Phase 9a — mileage log (tax deduction input). No money moved; admin CRUD only.
+export const mileageLogs = sqliteTable("mileage_logs", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
+  tripDate: text("trip_date").notNull(),
+  miles: real("miles").notNull(),
+  purpose: text("purpose"),
+  fromLocation: text("from_location"),
+  toLocation: text("to_location"),
+  notes: text("notes"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
 });
 
 export const portalAccessTokens = sqliteTable("portal_access_tokens", {
@@ -730,3 +813,7 @@ export type ProjectGallery = typeof projectGalleries.$inferSelect;
 export type EmailSuppression = typeof emailSuppressions.$inferSelect;
 export type SequenceEnrollment = typeof sequenceEnrollments.$inferSelect;
 export type SequenceSend = typeof sequenceSends.$inferSelect;
+export type StripeWebhookEvent = typeof stripeWebhookEvents.$inferSelect;
+export type PaymentRefund = typeof paymentRefunds.$inferSelect;
+export type PaymentDispute = typeof paymentDisputes.$inferSelect;
+export type MileageLog = typeof mileageLogs.$inferSelect;

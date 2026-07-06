@@ -3,6 +3,7 @@ import { clients, invoicePayments, invoices, projectParticipants, projects } fro
 import { logActivity } from "@/lib/activity";
 import { invoicePaymentClientPayableOpenCents, invoicePaymentOpenCents } from "@/lib/invoice-balances";
 import { autoAdvanceProjectStageForRetainerPayment, reconciledInvoicePaymentStatus } from "@/lib/sales";
+import { dispatchStripeRefundOrDisputeEvent } from "@/lib/stripe-refunds";
 import { and, asc, desc, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -191,7 +192,9 @@ export async function createInvoicePaymentCheckoutSession(
     throw new Error("Add a primary client with an email address before creating a checkout link for this invoice payment.");
   }
 
-  if (row.payment.status === "paid" || row.payment.status === "waived") {
+  if (row.payment.status === "paid" || row.payment.status === "waived" || row.payment.status === "refunded") {
+    // Phase 9a: a refunded payment is settled/terminal — do NOT mint a fresh Stripe
+    // checkout link for it.
     throw new Error("Checkout can only be created for an open invoice payment.");
   }
 
@@ -553,7 +556,11 @@ export async function handleStripeCheckoutWebhook(rawBody: string, signatureHead
     && eventType !== "checkout.session.async_payment_succeeded"
     && eventType !== "checkout.session.expired"
   ) {
-    return { ignored: true, reason: "unsupported_event", eventType };
+    // Phase 9a: reuse the already-verified webhook path. After the existing checkout
+    // branch, delegate refund/dispute/chargeback events to the sibling recording module
+    // (which handles event-id dedupe + convergent per-object writes). The checkout
+    // short-circuit above is UNTOUCHED and is NOT gated behind the new dedupe.
+    return dispatchStripeRefundOrDisputeEvent(event, eventType);
   }
 
   const session = checkoutSessionObject(event);

@@ -27,10 +27,15 @@ type CanonicalizationRecord = {
 };
 
 function missingPaymentEvidence(row: Awaited<ReturnType<typeof getPaymentLedgerReport>>["rows"][number]) {
-  if (row.payment.status !== "paid") return [];
+  // Phase 9a (Fable N2): run for "refunded" rows too — a refunded row can carry a
+  // divergence/over-cap/open-dispute reconciliation flag and would otherwise be invisible.
+  if (row.payment.status !== "paid" && row.payment.status !== "refunded") return [];
   const missing: string[] = [];
   if (!row.payment.externalPaymentId) missing.push("external_payment_id");
   if (!row.paymentSourceType || !row.paymentSourceId) missing.push("source");
+  if (row.disputeStatus === "open") missing.push("open_dispute");
+  if (row.succeededRefundCents > Math.max(row.payment.grossCollectedCents, 0)) missing.push("refund_over_collected");
+  if (row.payment.refundedAmountCents !== row.succeededRefundCents) missing.push("refund_summary_divergence");
   return missing;
 }
 
@@ -398,6 +403,10 @@ export async function getAgentFinanceReport(input: AgentFinanceReportInput = {})
           netDepositCents: row.payment.netDepositCents,
           openCents: row.openCents,
           clientPayableOpenCents: row.clientPayableOpenCents,
+          refundedAmountCents: row.refundedAmountCents,
+          disputeStatus: row.disputeStatus,
+          disputedAmountCents: row.disputedAmountCents,
+          netCollectedCents: row.netCollectedCents,
           externalPaymentId: row.payment.externalPaymentId,
           notes: row.payment.notes,
           paymentSourceType: row.paymentSourceType,
@@ -406,6 +415,7 @@ export async function getAgentFinanceReport(input: AgentFinanceReportInput = {})
           missingEvidence,
         };
       }),
+      unlinkedMoneyEvents: paymentLedger.unlinkedMoneyEvents,
     },
     bookkeeping: {
       totals: bookkeeping.totals,

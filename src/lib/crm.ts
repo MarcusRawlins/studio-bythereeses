@@ -620,7 +620,9 @@ export async function getClientWithProjects(clientId: string) {
   const paymentsByInvoice = new Map<string, typeof paymentRows>();
   for (const row of paymentRows) {
     paymentsByInvoice.set(row.invoiceId, [...(paymentsByInvoice.get(row.invoiceId) ?? []), row]);
-    if (row.status === "paid" || row.status === "waived") continue;
+    // Phase 9a: "refunded" is settled — a refunded payment must not become the
+    // client's "next payment due".
+    if (row.status === "paid" || row.status === "waived" || row.status === "refunded") continue;
     if (nextPaymentByInvoice.has(row.invoiceId)) continue;
     nextPaymentByInvoice.set(row.invoiceId, row.dueDate);
   }
