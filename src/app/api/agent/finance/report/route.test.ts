@@ -567,6 +567,11 @@ async function main() {
         missingEvidence: ["external_payment_id", "receipt_url", "source"],
       },
     ],
+    refundInitiations: {
+      initiatedNotRecorded: [],
+      stuckSubmitting: [],
+      totalCount: 0,
+    },
   });
 
   console.log("agent finance report route tests passed");

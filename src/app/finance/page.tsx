@@ -2,7 +2,8 @@ import { AppShell } from "@/components/AppShell";
 import { getBookkeepingReport } from "@/lib/bookkeeping";
 import { formatDate, formatMoney } from "@/lib/format";
 import { getPaymentLedgerReport, listProjectOptions } from "@/lib/sales";
-import { Download, Landmark, Pencil, Plus, ReceiptText, TrendingUp } from "lucide-react";
+import { getRefundInitiationReconciliationWithContext } from "@/lib/stripe-refund-initiation";
+import { AlertTriangle, Download, Landmark, Pencil, Plus, ReceiptText, TrendingUp } from "lucide-react";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -60,10 +61,14 @@ export default async function FinancePage({
   const asOfDate = firstQueryValue(params.asOfDate) ?? "";
   const saved = firstQueryValue(params.saved);
   const selectedExpenseId = firstQueryValue(params.expenseId) ?? "";
-  const [report, books, projectOptions] = await Promise.all([
+  const [report, books, projectOptions, refundReconciliation] = await Promise.all([
     getPaymentLedgerReport({ status, fromDate, toDate, asOfDate }),
     getBookkeepingReport({ status: expenseStatus, fromDate, toDate }),
     listProjectOptions(),
+    // Phase 9b §4.4: always-on read of the two refund-initiation reconciliation tripwires
+    // (succeeded-but-unrecorded, stuck-submitting). No flag; empty/inert until a refund has
+    // actually been initiated, so this is a no-op section while REFUND_INITIATION_ENABLED is off.
+    getRefundInitiationReconciliationWithContext(),
   ]);
   const exportHref = periodHref("/api/finance/payment-ledger.csv", { status, fromDate, toDate });
   const arAgingExportHref = periodHref("/api/finance/ar-aging.csv", { status, fromDate, toDate, asOfDate });
@@ -115,6 +120,50 @@ export default async function FinancePage({
           <div className="border border-[var(--accent)] bg-[var(--accent-soft)] px-4 py-3 text-sm font-medium">
             Expense saved to the canonical Studio ledger.
           </div>
+        )}
+
+        {refundReconciliation.totalCount > 0 && (
+          <section className="border border-[var(--warning)] bg-[var(--paper)] p-4">
+            <div className="flex items-center gap-2 text-[var(--warning)]">
+              <AlertTriangle className="h-4 w-4" />
+              <div className="studio-caps text-[0.58rem]">Refund initiation reconciliation</div>
+            </div>
+            <h2 className="mt-1 text-lg font-semibold">Needs manual reconciliation</h2>
+            <div className="mt-4 divide-y divide-[var(--line)]">
+              {refundReconciliation.stuckSubmitting.map((row) => (
+                <div key={row.initiationId} className="grid gap-2 py-3 first:pt-0 last:pb-0 sm:grid-cols-[1fr_auto] sm:items-center">
+                  <div>
+                    <div className="text-sm font-semibold">Refund stuck in-flight — reconcile against Stripe</div>
+                    <div className="mt-1 text-xs text-[var(--ink-3)]">
+                      {row.paymentLabel ?? "Payment"} {row.invoiceNumber ? `· ${row.invoiceNumber}` : ""} · initiation {row.initiationId}
+                    </div>
+                  </div>
+                  <div className="text-left sm:text-right">
+                    <div className="text-sm font-semibold">{formatMoney(row.amountCents)}</div>
+                    {row.href
+                      ? <Link href={row.href} prefetch={false} className="mt-1 inline-flex text-xs font-semibold text-[var(--accent)] underline-offset-4 hover:underline">View payment</Link>
+                      : <div className="mt-1 text-xs text-[var(--ink-3)]">{formatDate(row.updatedAt)}</div>}
+                  </div>
+                </div>
+              ))}
+              {refundReconciliation.initiatedNotRecorded.map((row) => (
+                <div key={row.initiationId} className="grid gap-2 py-3 first:pt-0 last:pb-0 sm:grid-cols-[1fr_auto] sm:items-center">
+                  <div>
+                    <div className="text-sm font-semibold">Initiated refund not yet recorded</div>
+                    <div className="mt-1 text-xs text-[var(--ink-3)]">
+                      {row.paymentLabel ?? "Payment"} {row.invoiceNumber ? `· ${row.invoiceNumber}` : ""} · {row.stripeRefundId ?? "no Stripe refund id yet"}
+                    </div>
+                  </div>
+                  <div className="text-left sm:text-right">
+                    <div className="text-sm font-semibold">{formatMoney(row.amountCents)}</div>
+                    {row.href
+                      ? <Link href={row.href} prefetch={false} className="mt-1 inline-flex text-xs font-semibold text-[var(--accent)] underline-offset-4 hover:underline">View payment</Link>
+                      : <div className="mt-1 text-xs text-[var(--ink-3)]">{formatDate(row.updatedAt)}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
         )}
 
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">

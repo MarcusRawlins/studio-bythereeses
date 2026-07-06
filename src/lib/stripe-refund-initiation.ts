@@ -24,7 +24,7 @@ import { invoicePayments, invoices, paymentRefunds, refundInitiations } from "@/
 import { logActivity } from "@/lib/activity";
 import { refundInitiationEnabled } from "@/lib/finance-flags";
 import { isRetainerPaymentLabel } from "@/lib/sales";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 
 const STRIPE_API_VERSION = "2026-02-25.clover"; // match stripe-checkout.ts
 const MAX_REASON_LEN = 500;
@@ -131,8 +131,19 @@ function earliestPaymentId(payments: InvoicePaymentRow[]): string | null {
   return sorted[0]?.id ?? null;
 }
 
-function isRetainerPayment(payment: InvoicePaymentRow, allPayments: InvoicePaymentRow[]) {
+// Exported (UI enable-prep, additive) so the admin refund control can pre-disable a retainer
+// row without a divergent copy of the predicate (F2) — this IS the exact rule §3.4/execute
+// enforces server-side; the UI use below never changes it, only reads it.
+export function isRetainerPayment(payment: InvoicePaymentRow, allPayments: InvoicePaymentRow[]) {
   return isRetainerPaymentLabel(payment.label) || payment.id === earliestPaymentId(allPayments);
+}
+
+// UI-ONLY mirror (additive) of the §3.4 dispute-eligibility gate (P5/M5) so the admin control
+// can pre-disable a disputed payment. Mirrors resolveEligiblePayment's own check exactly (never
+// a divergent copy); this is a display hint only — the server re-checks at prepare/execute and
+// remains authoritative. Does NOT change resolveEligiblePayment or any money-moving logic.
+export function isDisputeBlockedForRefundUi(payment: Pick<InvoicePaymentRow, "disputeStatus">) {
+  return payment.disputeStatus === "open" || payment.disputeStatus === "lost";
 }
 
 // ---------------------------------------------------------------------------
@@ -621,5 +632,79 @@ export async function getRefundInitiationReconciliation(options?: {
       kind: "refund_stuck_in_flight" as const,
     })),
     totalCount: initiatedNotRecorded.length + stuckSubmitting.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// UI ENABLE-PREP (read-only, additive, NOT money-moving) — the pieces the deferred
+// admin-UI + reconciliation-wiring tasks need. Neither function writes anything; both
+// only join existing rows for display. They never touch payment_refunds/refunded_amount_cents
+// and are never called from prepare/execute.
+// ---------------------------------------------------------------------------
+
+// Newest-first list of this payment's refund_initiations, for the admin UI to show under a
+// payment ("Refund history for this payment") so a double-submit / prior failure is visually
+// obvious (§5 task 1). Read-only; never used by the money path.
+export async function listRefundInitiationsForPayment(invoicePaymentId: string) {
+  const rows = await db.query.refundInitiations.findMany({
+    where: eq(refundInitiations.invoicePaymentId, invoicePaymentId),
+    orderBy: [desc(refundInitiations.createdAt)],
+  });
+  return rows.map((row) => ({
+    id: row.id,
+    status: row.status,
+    amountCents: row.amountCents,
+    stripeRefundId: row.stripeRefundId,
+    errorMessage: row.errorMessage,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }));
+}
+
+// Enriches getRefundInitiationReconciliation's two tripwires with the invoice/payment context
+// (invoice id/number, payment label, a direct link) needed to surface them as read-only rows in
+// the /finance needs-reconciliation view and the agent finance report reconciliation block
+// (§4.4). Always-on read (no flag); returns empty arrays when there are zero initiations, so it
+// stays inert until a refund has actually been initiated.
+export async function getRefundInitiationReconciliationWithContext(options?: {
+  now?: Date;
+  succeededThresholdMs?: number;
+  submittingThresholdMs?: number;
+}) {
+  const recon = await getRefundInitiationReconciliation(options);
+  const paymentIds = Array.from(
+    new Set([
+      ...recon.initiatedNotRecorded.map((row) => row.invoicePaymentId),
+      ...recon.stuckSubmitting.map((row) => row.invoicePaymentId),
+    ]),
+  );
+  if (!paymentIds.length) {
+    return { ...recon, initiatedNotRecorded: [], stuckSubmitting: [] };
+  }
+
+  const payments = await db.query.invoicePayments.findMany({ where: inArray(invoicePayments.id, paymentIds) });
+  const paymentById = new Map(payments.map((payment) => [payment.id, payment]));
+  const invoiceIds = Array.from(new Set(payments.map((payment) => payment.invoiceId)));
+  const invoiceRows = invoiceIds.length
+    ? await db.query.invoices.findMany({ where: inArray(invoices.id, invoiceIds) })
+    : [];
+  const invoiceById = new Map(invoiceRows.map((invoice) => [invoice.id, invoice]));
+
+  function enrich<T extends { invoicePaymentId: string }>(row: T) {
+    const payment = paymentById.get(row.invoicePaymentId);
+    const invoice = payment ? invoiceById.get(payment.invoiceId) : undefined;
+    return {
+      ...row,
+      paymentLabel: payment?.label ?? null,
+      invoiceId: invoice?.id ?? null,
+      invoiceNumber: invoice?.invoiceNumber ?? null,
+      href: invoice ? `/invoices/${invoice.id}#payment-${row.invoicePaymentId}` : null,
+    };
+  }
+
+  return {
+    ...recon,
+    initiatedNotRecorded: recon.initiatedNotRecorded.map(enrich),
+    stuckSubmitting: recon.stuckSubmitting.map(enrich),
   };
 }

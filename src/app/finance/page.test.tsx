@@ -75,6 +75,15 @@ async function main() {
     )
   `).run(now, now, now, now, now, now);
 
+  // Phase 9b §4.4 — a refund_initiations row stuck in "submitting" (execute crashed between
+  // the claim and the terminal update) is a money-critical reconciliation tripwire; it must
+  // surface as a read-only row on /finance regardless of REFUND_INITIATION_ENABLED (always-on
+  // read, no flag). Backdated well past both the ~1h threshold and this fixture's `now`.
+  database.prepare(`
+    INSERT INTO refund_initiations (id, invoice_payment_id, amount_cents, currency, status, created_at, updated_at)
+    VALUES ('ri-finance-stuck', 'payment-1', 15000, 'usd', 'submitting', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+  `).run();
+
   const markup = renderToStaticMarkup(await FinancePage({
     searchParams: Promise.resolve({ expenseStatus: "all", expenseId: "expense-1" }),
   }));
@@ -108,6 +117,14 @@ async function main() {
   assert.match(reconciliationMarkup, /Missing source/);
   assert.match(reconciliationMarkup, /Missing settlement ID/);
   assert.match(reconciliationMarkup, /href="\/api\/finance\/expenses.csv\?expenseStatus=needs_reconciliation"/);
+
+  // Phase 9b §4.4 — the stuck-submitting refund-initiation tripwire renders as a read-only row
+  // (always-on, no flag) with enough context to find the payment.
+  assert.match(markup, /Refund initiation reconciliation/);
+  assert.match(markup, /Refund stuck in-flight — reconcile against Stripe/);
+  assert.match(markup, /Retainer .*· INV-FINANCE-FEE/);
+  assert.match(markup, /href="\/invoices\/invoice-1#payment-payment-1"/);
+  assert.match(markup, /\$150/);
 
   console.log("finance page tests passed");
 }

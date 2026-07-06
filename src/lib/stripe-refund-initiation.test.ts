@@ -558,6 +558,73 @@ async function main() {
     // the submitting row pins maxRefundable at 0 (Σlocal counts submitting): service 20000, Σlocal = 5000(succ)+15000(submitting) = 20000
     const prepBlocked = await mod.prepareInvoicePaymentRefund({ invoiceId: "inv-recon", paymentId: "pay-recon", actorType: "admin" }).catch((e: Error) => e);
     assert.ok(prepBlocked instanceof Error && /No refundable service balance/.test(prepBlocked.message), "§9.14(b) stuck submitting pins maxRefundable at 0");
+
+    // §4.4 context enrichment (Phase 9b UI enable-prep, read-only, additive): the stuck row
+    // gets joined invoice/payment display context so the finance view / agent report can link
+    // straight to the payment without re-implementing the join at every call site.
+    const reconWithContext = await mod.getRefundInitiationReconciliationWithContext({ now: new Date(NOW) });
+    const stuckWithContext = reconWithContext.stuckSubmitting.find((r) => r.initiationId === "ri-recon-stuck");
+    assert.ok(stuckWithContext, "enriched reconciliation surfaces the stuck row");
+    assert.equal(stuckWithContext?.paymentLabel, "Final balance", "enrichment joins the payment label");
+    assert.equal(stuckWithContext?.invoiceId, "inv-recon", "enrichment joins the invoice id");
+    assert.equal(stuckWithContext?.href, "/invoices/inv-recon#payment-pay-recon", "enrichment builds a direct link");
+    const unrecordedWithContext = reconWithContext.initiatedNotRecorded.find((r) => r.initiationId === "ri-recon-succ");
+    assert.equal(unrecordedWithContext?.invoiceId, "inv-recon", "enrichment also joins the unrecorded tripwire");
+    // Zero-initiations case stays inert (empty arrays, not an error) — proves this is a no-op
+    // read while REFUND_INITIATION_ENABLED is off and nobody has ever initiated a refund.
+    seedInvoice("inv-recon-empty");
+    seedPayment("pay-recon-empty", "inv-recon-empty", { label: "Final balance", paidAmountCents: 10000, grossCollectedCents: 10000, dueDate: "2026-06-10", pi: "pi_recon_empty" });
+    const emptyRecon = await mod.getRefundInitiationReconciliationWithContext({ now: new Date(NOW) });
+    assert.equal(
+      emptyRecon.stuckSubmitting.some((r) => r.invoicePaymentId === "pay-recon-empty"),
+      false,
+      "a payment with no refund_initiations rows contributes nothing to the reconciliation surface",
+    );
+  }
+
+  // ===========================================================================
+  // UI enable-prep (Phase 9b, read-only, additive) — isRetainerPayment export,
+  // isDisputeBlockedForRefundUi, listRefundInitiationsForPayment. These never move money;
+  // they exist so the admin refund control can pre-disable a doomed action. The SERVER
+  // (resolveEligiblePayment, exercised throughout this file) remains authoritative.
+  // ===========================================================================
+  {
+    seedInvoice("inv-ui");
+    seedPayment("pay-ui-retainer", "inv-ui", { label: "Deposit", paidAmountCents: 5000, grossCollectedCents: 5000, dueDate: "2026-05-01", pi: "pi_ui_ret" });
+    seedPayment("pay-ui-earliest-unlabeled", "inv-ui", { label: "Payment 1", paidAmountCents: 4000, grossCollectedCents: 4000, dueDate: "2026-04-01", pi: "pi_ui_earliest" });
+    seedPayment("pay-ui-final", "inv-ui", { label: "Final balance", paidAmountCents: 20000, grossCollectedCents: 20000, dueDate: "2026-06-10", pi: "pi_ui_final" });
+    seedPayment("pay-ui-open-dispute", "inv-ui", { label: "Session fee", paidAmountCents: 8000, grossCollectedCents: 8000, dueDate: "2026-07-01", pi: "pi_ui_dispute", disputeStatus: "open" });
+    seedPayment("pay-ui-lost-dispute", "inv-ui", { label: "Print credit", paidAmountCents: 9000, grossCollectedCents: 9000, dueDate: "2026-07-05", pi: "pi_ui_lost", disputeStatus: "lost" });
+
+    const allPayments = database.prepare("SELECT * FROM invoice_payments WHERE invoice_id = 'inv-ui'").all() as Array<{ id: string; label: string; due_date: string | null; created_at: string; dispute_status: string | null }>;
+    const asRow = (id: string) => allPayments.find((row) => row.id === id)!;
+    const toCamel = (row: ReturnType<typeof asRow>) => ({
+      id: row.id,
+      label: row.label,
+      dueDate: row.due_date,
+      createdAt: row.created_at,
+      disputeStatus: row.dispute_status,
+    }) as unknown as Parameters<typeof mod.isRetainerPayment>[0];
+    const allCamel = allPayments.map(toCamel);
+
+    assert.equal(mod.isRetainerPayment(toCamel(asRow("pay-ui-retainer")), allCamel), true, "labeled retainer → retainer (label arm)");
+    assert.equal(mod.isRetainerPayment(toCamel(asRow("pay-ui-earliest-unlabeled")), allCamel), true, "earliest unlabeled payment → retainer (earliest arm)");
+    assert.equal(mod.isRetainerPayment(toCamel(asRow("pay-ui-final")), allCamel), false, "non-earliest, non-labeled payment → NOT retainer");
+
+    assert.equal(mod.isDisputeBlockedForRefundUi({ disputeStatus: "open" }), true, "open dispute → blocked");
+    assert.equal(mod.isDisputeBlockedForRefundUi({ disputeStatus: "lost" }), true, "lost (not reinstated) dispute → blocked");
+    assert.equal(mod.isDisputeBlockedForRefundUi({ disputeStatus: "won" }), false, "won dispute → not blocked");
+    assert.equal(mod.isDisputeBlockedForRefundUi({ disputeStatus: null }), false, "no dispute → not blocked");
+
+    // listRefundInitiationsForPayment: read-only, newest-first, for the "refund history" display.
+    const oldIso = new Date(Date.parse(NOW) - 60 * 60 * 1000).toISOString();
+    database.prepare(`INSERT INTO refund_initiations (id, invoice_payment_id, amount_cents, currency, status, created_at, updated_at) VALUES ('ri-ui-older', 'pay-ui-final', 5000, 'usd', 'failed', ?, ?)`).run(oldIso, oldIso);
+    database.prepare(`INSERT INTO refund_initiations (id, invoice_payment_id, amount_cents, currency, status, stripe_refund_id, created_at, updated_at) VALUES ('ri-ui-newer', 'pay-ui-final', 20000, 'usd', 'succeeded', 're_ui_final', ?, ?)`).run(NOW, NOW);
+    const history = await mod.listRefundInitiationsForPayment("pay-ui-final");
+    assert.deepEqual(history.map((row) => row.id), ["ri-ui-newer", "ri-ui-older"], "listRefundInitiationsForPayment is newest-first");
+    assert.equal(history[0]?.status, "succeeded");
+    assert.equal(history[0]?.stripeRefundId, "re_ui_final");
+    assert.equal(await mod.listRefundInitiationsForPayment("pay-ui-open-dispute").then((rows) => rows.length), 0, "a payment with no initiations returns an empty history");
   }
 
   // ===========================================================================

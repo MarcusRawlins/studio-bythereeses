@@ -1,9 +1,19 @@
 import { AppShell } from "@/components/AppShell";
+import { RefundControl, type RefundInitiationRow } from "@/components/RefundControl";
+import type { invoicePayments } from "@/db/schema";
+import { refundInitiationEnabled } from "@/lib/finance-flags";
 import { formatDate, formatMoney } from "@/lib/format";
 import { getInvoice, invoiceClientPayableCents, invoiceStatusOptions } from "@/lib/sales";
+import {
+  isDisputeBlockedForRefundUi,
+  isRetainerPayment,
+  listRefundInitiationsForPayment,
+} from "@/lib/stripe-refund-initiation";
 import { Bell, CreditCard, ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+
+type InvoicePaymentRow = typeof invoicePayments.$inferSelect;
 
 export const dynamic = "force-dynamic";
 
@@ -57,11 +67,38 @@ export default async function InvoiceDetailPage({
   const { saved } = searchParams ? await searchParams : {};
   const data = await getInvoice(id);
   if (!data) notFound();
+  const payments: InvoicePaymentRow[] = data.payments;
   const acceptedPaymentMethods = parseAcceptedPaymentMethods(data.invoice.acceptedPaymentMethodsJson);
   const clientPayableCents = invoiceClientPayableCents(data.invoice);
   const grossCollectedCents = data.payments.reduce((sum, payment) => sum + payment.grossCollectedCents, 0);
   const netDepositCents = data.payments.reduce((sum, payment) => sum + payment.netDepositCents, 0);
   const processingFeeCents = data.payments.reduce((sum, payment) => sum + payment.processingFeeCents, 0);
+
+  // Phase 9b — admin refund UI (DARK behind REFUND_INITIATION_ENABLED). Read INSIDE the body
+  // (never a default param, TS2559) so this stays a hard money-off-by-default read. When the
+  // flag is off, NOTHING below runs or renders — no refund control, no refund-history query.
+  const refundsEnabled = refundInitiationEnabled();
+  const refundEligiblePayments = refundsEnabled
+    ? payments.filter((payment) => payment.status === "paid" && Boolean(payment.externalPaymentId?.trim()))
+    : [];
+  const refundInitiationsByPaymentId: Record<string, RefundInitiationRow[]> = {};
+  if (refundEligiblePayments.length) {
+    const entries = await Promise.all(
+      refundEligiblePayments.map(async (payment) => [payment.id, await listRefundInitiationsForPayment(payment.id)] as const),
+    );
+    for (const [paymentId, rows] of entries) refundInitiationsByPaymentId[paymentId] = rows;
+  }
+  function refundDisabledReason(payment: InvoicePaymentRow) {
+    if (isRetainerPayment(payment, payments)) {
+      return "This is the initial retainer. Retainers are non-refundable.";
+    }
+    if (isDisputeBlockedForRefundUi(payment)) {
+      return payment.disputeStatus === "open"
+        ? "This payment has an open dispute and cannot be refunded until it resolves."
+        : "Funds for this payment were already pulled by a lost chargeback and cannot be refunded.";
+    }
+    return null;
+  }
 
   return (
     <AppShell>
@@ -131,12 +168,11 @@ export default async function InvoiceDetailPage({
             )}
             <div className="mt-4 divide-y divide-[var(--line)]">
               {data.payments.map((payment) => (
+                <div key={payment.id} id={`payment-${payment.id}`} className="scroll-mt-6 py-4 target:bg-[var(--accent-soft)]">
                 <form
-                  key={payment.id}
-                  id={`payment-${payment.id}`}
                   action={`/api/invoices/${data.invoice.id}/payments`}
                   method="post"
-                  className="grid scroll-mt-6 gap-3 py-4 target:bg-[var(--accent-soft)]"
+                  className="grid gap-3"
                 >
                   <input type="hidden" name="invoiceId" value={data.invoice.id} />
                   <input type="hidden" name="projectId" value={data.project.id} />
@@ -227,6 +263,18 @@ export default async function InvoiceDetailPage({
                     </label>
                   </div>
                 </form>
+                {refundsEnabled && payment.status === "paid" && payment.externalPaymentId?.trim() && (
+                  <div className="mt-3">
+                    <RefundControl
+                      invoiceId={data.invoice.id}
+                      paymentId={payment.id}
+                      paymentLabel={payment.label}
+                      disabledReason={refundDisabledReason(payment)}
+                      existingInitiations={refundInitiationsByPaymentId[payment.id] ?? []}
+                    />
+                  </div>
+                )}
+                </div>
               ))}
               {!data.payments.length && <p className="py-8 text-sm text-[var(--ink-muted)]">No payment schedule yet.</p>}
             </div>

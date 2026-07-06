@@ -2,6 +2,7 @@ import { db } from "@/db/client";
 import { projectSources } from "@/db/schema";
 import { getBookkeepingReport } from "@/lib/bookkeeping";
 import { getPaymentLedgerReport } from "@/lib/sales";
+import { getRefundInitiationReconciliationWithContext } from "@/lib/stripe-refund-initiation";
 import { inArray } from "drizzle-orm";
 
 type AgentFinanceReportInput = {
@@ -319,7 +320,7 @@ function buildProjectFinancials({
 }
 
 export async function getAgentFinanceReport(input: AgentFinanceReportInput = {}) {
-  const [paymentLedger, bookkeeping] = await Promise.all([
+  const [paymentLedger, bookkeeping, refundInitiationReconciliation] = await Promise.all([
     getPaymentLedgerReport({
       status: cleanStatus(input.paymentStatus, "all"),
       fromDate: input.fromDate,
@@ -331,15 +332,24 @@ export async function getAgentFinanceReport(input: AgentFinanceReportInput = {})
       fromDate: input.fromDate,
       toDate: input.toDate,
     }),
+    // Phase 9b §4.4: surface the refund-initiation reconciliation tripwires (succeeded-but-
+    // unrecorded, stuck-submitting) in the same read-only reconciliation block. Read-only,
+    // no flag, never touches payment_refunds; empty when no refund has ever been initiated.
+    getRefundInitiationReconciliationWithContext(),
   ]);
   const projectFinancials = buildProjectFinancials({
     paymentRows: paymentLedger.rows,
     expenseRows: bookkeeping.expenses,
   });
-  const reconciliation = buildReconciliationSummary({
+  const evidenceReconciliation = buildReconciliationSummary({
     paymentRows: paymentLedger.rows,
     expenseRows: bookkeeping.expenses,
   });
+  const reconciliation = {
+    ...evidenceReconciliation,
+    refundInitiations: refundInitiationReconciliation,
+    totalCount: evidenceReconciliation.totalCount + refundInitiationReconciliation.totalCount,
+  };
   const canonicalizationRecords: CanonicalizationRecord[] = [
     ...paymentLedger.rows.map((row) => ({
       ledger: "payment_ledger" as const,

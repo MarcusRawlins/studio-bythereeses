@@ -65,6 +65,34 @@ async function main() {
       NULL, NULL, 0, 0, 0, NULL, 'Final balance note.', ?, ?
     )
   `).run(now, now, now, now);
+  // Dedicated invoice for the Phase 9b refund-UI sub-test (kept OFF invoice-1 so its balance
+  // assertions are unperturbed). A retainer (earliest) + a later non-retainer paid Stripe payment.
+  database.prepare(`
+    INSERT INTO invoices (
+      id, project_id, proposal_id, invoice_number, status, total_cents, amount_paid_cents,
+      card_fee_policy, card_fee_percent_bps, card_fee_fixed_cents, card_fee_amount_cents,
+      created_at, updated_at
+    ) VALUES (
+      'invoice-refund', 'project-1', NULL, 'INV-REFUND', 'paid', 40000, 40000,
+      'studio_absorbs', 0, 0, 0,
+      ?, ?
+    )
+  `).run(now, now);
+  database.prepare(`
+    INSERT INTO invoice_payments (
+      id, invoice_id, label, amount_cents, due_date, status, paid_at, payment_method,
+      paid_amount_cents, gross_collected_cents, net_deposit_cents, external_payment_id, notes,
+      created_at, updated_at
+    ) VALUES (
+      'payment-refund-ret', 'invoice-refund', 'Retainer', 20000, '2026-05-01', 'paid',
+      '2026-05-02T10:00:00.000Z', 'stripe', 20000, 20000, 20000, 'pi_refund_ret',
+      NULL, ?, ?
+    ), (
+      'payment-refund-final', 'invoice-refund', 'Final payment', 20000, '2026-06-01', 'paid',
+      '2026-06-02T10:00:00.000Z', 'stripe', 20000, 20000, 20000, 'pi_refund_final',
+      NULL, ?, ?
+    )
+  `).run(now, now, now, now);
   database.prepare(`
     INSERT INTO templates (id, type, name, trigger, subject, body, status, created_at, updated_at)
     VALUES (
@@ -120,6 +148,30 @@ async function main() {
   assert.match(orphanMarkup, /INV-ORPHAN/);
   assert.match(orphanMarkup, /Needs Client Wedding · Needs primary client/);
   assert.match(orphanMarkup, /\$2,000/);
+
+  // Phase 9b — admin refund UI (DARK behind REFUND_INITIATION_ENABLED). Flag OFF (default,
+  // unset in this test's env): the refund control must not exist on the page AT ALL, not just
+  // be visually hidden — no "Start refund" button, no retainer note, no refund section.
+  assert.doesNotMatch(markup, /Start refund/, "flag off → no refund control rendered");
+  assert.doesNotMatch(markup, /Retainers are non-refundable/, "flag off → no retainer note rendered");
+
+  const savedFlag = process.env.REFUND_INITIATION_ENABLED;
+  try {
+    process.env.REFUND_INITIATION_ENABLED = "1";
+    const refundsOnMarkup = renderToStaticMarkup(await InvoiceDetailPage({
+      params: Promise.resolve({ id: "invoice-refund" }),
+    }));
+    // 'payment-refund-ret' is labeled "Retainer" AND is the earliest paid Stripe payment on the
+    // invoice — the UI must show the disabled note (reusing the server's own predicate) and
+    // must NOT offer a "Start refund" button for it.
+    assert.match(refundsOnMarkup, /This is the initial retainer\. Retainers are non-refundable\./, "flag on → retainer row shows the non-refundable note");
+    // 'payment-refund-final' is a paid, non-retainer, non-earliest Stripe payment — eligible, so
+    // the control must offer "Start refund".
+    assert.match(refundsOnMarkup, /Start refund/, "flag on → an eligible payment gets the refund control");
+  } finally {
+    if (savedFlag === undefined) delete process.env.REFUND_INITIATION_ENABLED;
+    else process.env.REFUND_INITIATION_ENABLED = savedFlag;
+  }
 
   console.log("invoice page tests passed");
 }
