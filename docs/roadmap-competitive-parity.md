@@ -16,11 +16,12 @@ deploy **dark** → Tyler enables.
 ## The genuine gaps (prioritized)
 
 ### Tier 1 — highest leverage
-- **Phase 12 — Unified accept-sign-PAY.** Today the client link combines review + sign, but the
-  retainer is a separate click. Fuse signature → retainer Stripe checkout into one continuous flow
-  (HoneyBook/SwiftBooks "accept, sign & pay"). Client-initiated payment (Stripe checkout) — **not**
-  autonomous money movement, so not money-gated. Biggest booking-conversion win. Reuses proposal +
-  contract + `stripe-checkout` + the `retainer_paid` stage. **Build first.**
+- **Phase 12 — Unified accept-sign-PAY.** ✅ **DEPLOYED dark 2026-07-06** (Worker `f7d81faa`, flag
+  `UNIFIED_SIGN_PAY` off). Signature → retainer Stripe checkout fused into one client flow; reuses the
+  existing client checkout (not money-movement-gated). Shared `retainer-selection.ts` (factored the
+  predicate; 9b now imports it, behavior-identical). Spec Fable-gated ×2 (caught a concurrent
+  double-charge race → fixed with a `link_ready` CAS + canonical-URL convergence + expire-and-remint),
+  code Fable-gated ×1 (APPROVE + 5 minors fixed). Enable `UNIFIED_SIGN_PAY=1` when ready.
 - **Phase 13 — Autopay / card-on-file.** MISSING today: every installment is a manual checkout
   link → dunning. Add a Stripe Customer + SetupIntent (card on file) + **off-session auto-charge**
   of scheduled installments. ⚠️ **MONEY MOVEMENT** (auto-charges a real card) — build dark behind a
