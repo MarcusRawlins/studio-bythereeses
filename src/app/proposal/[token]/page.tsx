@@ -59,7 +59,7 @@ export default async function ClientProposalPage({
       clientEmail={data.client?.email ?? null}
       acceptedNotice={query.accepted === "1"}
       signatureError={query.signature ?? null}
-      booked={query.booked === "1"}
+      booked={unifiedSignPay && query.booked === "1"}
       checkoutCancelled={query.checkout === "cancelled"}
       unifiedSignPay={unifiedSignPay}
       retainerDueCents={retainerDueCents}

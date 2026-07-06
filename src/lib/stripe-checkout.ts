@@ -95,7 +95,11 @@ async function fetchStripeCheckoutSessionReturnUrls(sessionId: string) {
     });
     if (!response.ok) return null;
     const body = stripeSessionResponseBody(await response.json().catch(() => ({})));
-    return { successUrl: stripeString(body.success_url), cancelUrl: stripeString(body.cancel_url) };
+    return {
+      successUrl: stripeString(body.success_url),
+      cancelUrl: stripeString(body.cancel_url),
+      status: stripeString(body.status), // "open" | "complete" | "expired"
+    };
   } catch {
     return null;
   }
@@ -214,8 +218,11 @@ export async function createInvoicePaymentCheckoutSession(
   if (returnUrls) {
     // Open-redirect defense-in-depth: the caller server-constructs these from constants + the
     // already-public token, but assert same-origin anyway.
+    // Match on `base + "/"` (or exact base) so `https://app.example.com.evil.com/...` cannot pass
+    // a bare prefix check (defense-in-depth; URLs are server-constructed today).
     const base = appBaseUrl();
-    if (!returnUrls.successUrl.startsWith(base) || !returnUrls.cancelUrl.startsWith(base)) {
+    const onOrigin = (url: string) => url === base || url.startsWith(`${base}/`);
+    if (!onOrigin(returnUrls.successUrl) || !onOrigin(returnUrls.cancelUrl)) {
       throw new Error("Checkout return URLs must be on the application origin.");
     }
   }
@@ -282,7 +289,11 @@ export async function createInvoicePaymentCheckoutSession(
     const storedReturnUrls = row.payment.stripeCheckoutSessionId
       ? await fetchStripeCheckoutSessionReturnUrls(row.payment.stripeCheckoutSessionId)
       : null;
+    // Reuse ONLY an "open" session whose return URLs already match. A Stripe-expired/complete
+    // session (webhook lagged, so our row still reads link_ready) must NOT be reused — the client
+    // would hit Stripe's "link expired" page — so treat non-open as a mismatch and mint fresh.
     const matches = storedReturnUrls
+      && storedReturnUrls.status === "open"
       && storedReturnUrls.successUrl === returnUrls.successUrl
       && storedReturnUrls.cancelUrl === returnUrls.cancelUrl;
     if (matches) {
@@ -297,7 +308,10 @@ export async function createInvoicePaymentCheckoutSession(
         reused: true,
       };
     }
-    if (row.payment.stripeCheckoutSessionId) {
+    // Expire the stale session only if it is still OPEN at Stripe (expiring an already
+    // expired/complete session errors). A non-open session is already uncompletable, so we just
+    // fall through to a fresh mint (the CAS still matches this row via priorCheckoutSessionId).
+    if (row.payment.stripeCheckoutSessionId && storedReturnUrls?.status === "open") {
       await expireStripeCheckoutSessionById(row.payment.stripeCheckoutSessionId);
     }
     // Fall through to the fresh mint. priorCheckoutSessionId still holds the expired session's id
@@ -376,8 +390,11 @@ export async function createInvoicePaymentCheckoutSession(
     metadata: {
       invoiceId,
       paymentId,
-      checkoutSessionId: session.id,
-      checkoutUrl: session.url,
+      // Log the CANONICAL session (re-read from the row), not this call's in-flight session — under
+      // a concurrent race the loser's in-flight url/id is non-canonical and must never be copyable
+      // out of the activity log.
+      checkoutSessionId: canonicalCheckoutSessionId,
+      checkoutUrl: canonicalCheckoutUrl,
       clientPayableOpenCents,
       serviceOpenCents: invoicePaymentOpenCents(row.payment),
       remainingClientFeeCents,
@@ -589,7 +606,14 @@ export async function expireInvoicePaymentCheckoutSession(session: Record<string
     return { ignored: true, reason: "invoice_payment_not_found", checkoutSessionId: sessionId };
   }
   if (payment.stripeCheckoutSessionId && payment.stripeCheckoutSessionId !== sessionId) {
-    throw new Error("Stripe checkout session does not match the canonical invoice payment.");
+    // A SUPERSEDED session expiring is expected and harmless: the fused sign-pay flow (Phase 12)
+    // proactively expires an admin-pre-minted session and re-mints a canonical one, and concurrent
+    // accepts leave a losing session that Stripe later expires. That session is NOT the canonical
+    // row, so treat its checkout.session.expired as an idempotent no-op — do NOT throw (a throw
+    // 500s the webhook and Stripe retries to exhaustion, ~3d of alert noise). The SETTLE handler
+    // keeps its mismatch throw — that one is the money guard (a non-canonical session must never
+    // record a payment).
+    return { ignored: true, reason: "non_canonical_session_expired", checkoutSessionId: sessionId };
   }
   if (payment.status === "paid" || payment.status === "waived") {
     return {
