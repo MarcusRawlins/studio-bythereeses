@@ -33,9 +33,13 @@ deploy **dark** → Tyler enables.
   Add: send email from the project thread (Resend, with the "agents draft, Tyler sends" guard) +
   route inbound client email into the existing project thread (extend Phase 8a routing) → a unified
   email+SMS inbox. Reuses `project_communications` + email infra.
-- **Phase 15 — PWA / installable mobile.** MISSING: no manifest/service worker. Add an installable
-  PWA (manifest + offline app-shell + optional web push) so Tyler runs the business from his phone on
-  location — HoneyBook's #1 differentiator. Cheap, low-risk, high daily value.
+- **Phase 15 — PWA / installable mobile.** ✅ **DEPLOYED 2026-07-06** (Worker `16f5e766`, proxy
+  `76d552af`) — manifest v1 is LIVE + installable (Add-to-Home-Screen works on iPhone now; inert static
+  metadata, zero behavior change). Icons + apple meta + `Viewport`; `/manifest.webmanifest` reachable
+  unauthenticated (200, `application/manifest+json`) while `/clients`/`/api/*` stay walled. Spec + code
+  Fable-gated ×2 (APPROVE). The **service worker is deferred** behind `PWA_SERVICE_WORKER` (a later
+  phase — its default-deny cache policy needs its own build+gate; the spec's unimplementable SW guards
+  were corrected). Offline shell + web push = future.
 - **Phase 16 — Mini-session day booking.** MISSING: scheduler is strictly 1:1. Add capacity-based
   session-day slots (publish a day, N bookable slots, clients grab distinct times, optional
   deposit-at-booking). New revenue line for portrait mini-sessions. **Business-dependent — confirm
