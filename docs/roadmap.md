@@ -73,9 +73,8 @@ Recommendation: build inbound intake **in-house on Cloudflare** rather than an e
 
 ## Phase 9: Financial completeness
 
-- Stripe refund / dispute / chargeback webhook handling (money-integrity gap today).
-- QuickBooks or Xero export/sync.
-- Quarterly tax estimates, mileage, 1099 / second-shooter vendor tracking.
+- ✅ **Phase 9a — DEPLOYED dark 2026-07-06** (`docs/specs/phase-9a-finance-completeness.md`, migration 0089, Worker `d29fe5c6`): Stripe refund/dispute/chargeback **webhook recording** (extends the existing signature-verified webhook; idempotent via per-object convergence, monotonic out-of-order guards, moves ZERO money), reconciliation surfacing (net-of-refunds, needs-reconciliation queue, unlinked-money-events section), QuickBooks/Xero-compatible accountant CSV export, quarterly tax estimate, 1099 vendor tracking (TIN last4 only), and mileage log — all read/report + guarded admin CRUD, no agent-write. Ships behind `FINANCE_REFUND_RECORDING` (default `record_only`; the `refunded` status transition is gated to `enforce`, Tyler-flipped). Spec Fable-gated ×2 (caught a D1-transaction BLOCKER + a gross-deletion BLOCKER), code Fable-gated ×1. Direct QuickBooks/Xero **API sync** (OAuth journal posting) deferred — needs Tyler's platform choice + credentials.
+- 🅣 **Phase 9b — refund INITIATION** (admin-triggered Stripe refund that MOVES money): under the money-movement pause — may be built, but its first live deploy requires Tyler's explicit go.
 
 ## Phase 10: Intelligence + forecasting
 

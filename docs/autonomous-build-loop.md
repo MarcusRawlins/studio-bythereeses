@@ -34,11 +34,13 @@ reviewer prompt is seeded with the **Active-Learning Log** below.
 | 7b | Deep gallery provider integration (Pixieset/Pic-Time API) | 🅣 needs Tyler's provider choice + API credentials |
 | 8b | SMS (Twilio) | ✅ deployed 2026-07-05 (dark) — Worker `7ca815bf`, proxy `df082f06`, migration 0087; send-UI wiring = follow-up |
 | 8c | Automated sequences (dunning/nudges/reviews) | ✅ deployed 2026-07-05 (dark) — Worker `3b78372e`, proxy `2913d3b4`, migration 0088 |
-| 9a | Finance completeness — refund/dispute WEBHOOK recording + QBO/Xero export + tax/1099 (NO money moved) | 🔵 speccing — safe to build+deploy dark |
+| 9a | Finance completeness — refund/dispute WEBHOOK recording + QBO/Xero export + tax/1099 (NO money moved) | ✅ deployed 2026-07-06 (dark) — Worker `d29fe5c6` (rollback `3b78372e`), migration 0089, `FINANCE_REFUND_RECORDING` default `record_only` (status-flip off). Spec Fable-gated ×2, code Fable-gated ×1. |
 | 9b | Refund INITIATION (admin-triggered Stripe refund — MOVES money) | 🅣 MONEY-MOVEMENT PAUSE — build allowed, deploy needs Tyler's explicit go |
 | 10 | Intelligence + forecasting | ⏭️ spec → build |
 | 11 | Multi-user + RBAC | ⏭️ deferred until a real 2nd user |
 | — | Enablement flips (M4 log→enforce, CSP report→enforce, feature flags) | 🅣 Tyler runbook (deploy-record + per-phase) |
+| — | **9a enable (Tyler):** (1) subscribe Stripe webhook to `charge.refunded`/`refund.*`/`charge.dispute.*` (dashboard config — nothing fires without it); (2) after an observation window, flip `FINANCE_REFUND_RECORDING=enforce` to allow the `refunded` status transition; (3) enter finance rate settings (tax set-aside %, mileage ¢, 1099 threshold) + vendor W-9 data | 🅣 Tyler |
+| — | **9a pre-enforce follow-ups** (report-only, inert at `record_only`; land before `enforce`): #3 SQL-side `MAX()` for the monotonic refund guard (currently read-modify-write); #4 net-revenue service-vs-gross unit + #5 exclude orphan refunds from the revenue subtraction (both feed the tax estimate); #7 dispute-close canon (child raw status vs summary) | ⏭️ tracked |
 | — | Agent-token canonical-mutation authority review | ⏭️ standing hardening item (surfaced by 8a) |
 
 ## Per-phase cycle (repeats autonomously)
@@ -76,6 +78,19 @@ Patterns the Fable gate has caught repeatedly — pre-empt them:
 - **Proxy CSP:** don't clobber app CSP on miss OR cache-HIT; cacheable `/book/*` must OMIT `script-src`
   ('self' blocks Next's inline bootstrap). Nonces require dynamic rendering.
 - **Classifier drift:** pin app classifiers against the proxy's real public-path predicates with a drift test.
+- **D1 has NO usable transaction (9a BLOCKER, caught by Fable):** drizzle's `db.transaction()` issues raw
+  `begin`/`commit`/`rollback`, which Cloudflare D1 **rejects at runtime** — only `db.batch()` is atomic, and
+  it can't hold flows that need reads between writes. Local better-sqlite3 *does* support transactions, so a
+  transaction-based design passes tests in dev and 500s every request in prod. Build idempotency on
+  **per-object convergence** instead: UNIQUE id + `INSERT ON CONFLICT DO NOTHING` + set-to-authoritative
+  (never increment); write any dedupe/audit row LAST (after processing) so a mid-write throw leaves no claim
+  → the caller retries → convergent writes reproduce the same state. Add **monotonic guards** for out-of-order
+  *distinct* events (never decrease a cumulative field; never demote a terminal status from a reordered older event).
+- **"Settled status" enumeration (9a):** introducing a new terminal status (e.g. `refunded`) means auditing
+  EVERY `=== "paid"`/`"waived"` branch — there were duplicated `openCents` helpers in 3 files plus dashboard/
+  crm/ledger-date/checkout-mint. Grep the whole codebase; a status read as "open" anywhere re-owes/re-bills the
+  record. Collapse duplicated predicates into one shared helper. A period-scoped gross query must treat the new
+  status as settled (`IN ("paid","refunded")` on the paidAt scope) or a later event retroactively deletes prior-period gross.
 - **Prod D1 migrations:** the `d1_migrations` tracker is out of sync with actual schema. Apply additive
   migrations via idempotent `CREATE TABLE IF NOT EXISTS` direct `d1 execute --file`; do NOT blanket
   `migrations apply --remote` (would error on already-existing tables). Reconcile the tracker separately.
