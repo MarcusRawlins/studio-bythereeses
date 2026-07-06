@@ -92,24 +92,25 @@ async function main() {
     actor_name: "The Reeses Studio Agent",
   });
 
-  const sent = await updateProjectCommunicationFromAgent("project-1", draft.id, {
+  // Phase 14 §8: the agent send-clamp now covers EMAIL as well as SMS. An
+  // agent-authored email row can only ever land "draft" — a prompt-injected agent
+  // can never flip it to "sent" ("we emailed them" that never went out). Body
+  // edits still apply (drafts are agent-editable); only the send-state is clamped.
+  const clampedUpdate = await updateProjectCommunicationFromAgent("project-1", draft.id, {
     status: "sent",
-    sentAt: "2026-05-29T13:30:00.000Z",
     body: "Hi Alex, here is the polished follow-up from our discovery call.",
   });
 
-  assert.equal(sent.id, draft.id);
-  assert.equal(sent.status, "sent");
-  assert.equal(sent.sentAt, "2026-05-29T13:30:00.000Z");
-  assert.equal(sent.body, "Hi Alex, here is the polished follow-up from our discovery call.");
+  assert.equal(clampedUpdate.id, draft.id);
+  assert.equal(clampedUpdate.status, "draft", "agent email status:sent is clamped to draft (§8)");
+  assert.equal(clampedUpdate.body, "Hi Alex, here is the polished follow-up from our discovery call.");
 
   assert.deepEqual(database.prepare(`
-    SELECT status, sent_at, body
+    SELECT status, body
     FROM project_communications
     WHERE id = ?
   `).get(draft.id), {
-    status: "sent",
-    sent_at: "2026-05-29T13:30:00.000Z",
+    status: "draft",
     body: "Hi Alex, here is the polished follow-up from our discovery call.",
   });
 
@@ -123,24 +124,23 @@ async function main() {
     actor_name: "The Reeses Studio Agent",
   });
 
+  // Agent create with status:sent (email) → also clamped to draft.
   const autoTimestampDraft = await createProjectCommunicationFromAgent("project-1", {
     subject: "Auto timestamp follow-up",
-    body: "This communication should get a sent timestamp when marked sent.",
+    body: "This communication should stay a draft even if asked to send.",
     status: "draft",
   });
-  const autoTimestampSent = await updateProjectCommunicationFromAgent("project-1", autoTimestampDraft.id, {
+  const clampedFlip = await updateProjectCommunicationFromAgent("project-1", autoTimestampDraft.id, {
     status: "sent",
   });
-  assert.equal(autoTimestampSent.status, "sent");
-  assert.equal(typeof autoTimestampSent.sentAt, "string");
+  assert.equal(clampedFlip.status, "draft", "agent email flip to sent → draft (§8)");
 
-  const autoTimestampCreatedSent = await createProjectCommunicationFromAgent("project-1", {
+  const agentCreatedSent = await createProjectCommunicationFromAgent("project-1", {
     subject: "Already sent follow-up",
-    body: "This communication is recorded as already sent.",
+    body: "This email claims to already be sent.",
     status: "sent",
   });
-  assert.equal(autoTimestampCreatedSent.status, "sent");
-  assert.equal(typeof autoTimestampCreatedSent.sentAt, "string");
+  assert.equal(agentCreatedSent.status, "draft", "agent email create status:sent → draft (§8)");
 
   const relinked = await updateProjectCommunicationFromAgent("project-1", draft.id, {
     sourceType: "project_source",

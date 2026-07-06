@@ -112,13 +112,16 @@ async function main() {
   const flipQueued = await updateProjectCommunicationFromAgent("project-1", agentSmsSent.id, { status: "queued" });
   assert.equal(flipQueued.status, "draft", "agent cannot flip an existing sms row to queued");
 
-  // Email is unaffected — the narrowing is sms-only.
+  // Phase 14 §8: the agent send-clamp now covers EMAIL too. An agent-authored
+  // email row can only ever land "draft" — a prompt-injected agent can never mint
+  // a "we emailed them" record. (Non-agent actors are unaffected; see the direct
+  // db.insert in approveInquiryReply / the sequence runner's systemActor.)
   const agentEmailSent = await createProjectCommunicationFromAgent("project-1", {
     channel: "email",
     status: "sent",
     body: "Legit sent email log.",
   });
-  assert.equal(agentEmailSent.status, "sent", "agent email status:sent is UNAFFECTED");
+  assert.equal(agentEmailSent.status, "draft", "agent email status:sent is clamped to draft (§8)");
 
   // Same via the generic MCP tool surface (studio_create_communication).
   const genericSmsSent = await handleStudioMcpMessage({

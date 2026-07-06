@@ -7,14 +7,20 @@ import { getProject } from "@/lib/crm";
 import { formatActivityAction, formatDate, formatMoney } from "@/lib/format";
 import { isGalleryUrlSafe } from "@/lib/gallery";
 import { projectWorkingNotes } from "@/lib/project-notes";
-import { sha256Hex } from "@/lib/project-communications";
+import {
+  emailApprovalHash,
+  emailSendingEnabled,
+  resolveEmailRecipientForCommunication,
+  sha256Hex,
+} from "@/lib/project-communications";
+import { isEmailSuppressed } from "@/lib/email";
 import { getProjectFinancialSummary } from "@/lib/project-finance";
 import { listProjectWorkflowRuns, sixFigureAutomationSteps } from "@/lib/project-workflow-automation";
 import { listProjectQuestionnaireResponses, listQuestionnaires, questionnaireResponseStatus } from "@/lib/questionnaires";
 import { listProjectBookingLinks } from "@/lib/scheduler";
 import { listProjectSequenceEnrollments } from "@/lib/sequences";
 import { isNumberSuppressed, smsEnabled, toE164 } from "@/lib/sms";
-import { Bot, CalendarCheck, CalendarPlus, CheckCircle2, ClipboardEdit, ClipboardList, Copy, ExternalLink, Eye, FileQuestion, FileSignature, Images, Landmark, Mail, MapPin, NotebookPen, Pencil, ReceiptText, Send, Sparkles, UsersRound } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, Bot, CalendarCheck, CalendarPlus, CheckCircle2, ClipboardEdit, ClipboardList, Copy, ExternalLink, Eye, FileQuestion, FileSignature, Images, Landmark, Mail, MapPin, MessageSquare, NotebookPen, Pencil, ReceiptText, Send, Sparkles, UsersRound } from "lucide-react";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
@@ -67,6 +73,27 @@ const smsSendErrorMessages: Record<string, string> = {
   too_long: "This SMS draft is over the character limit. Shorten it and try again.",
   send_failed: "The SMS could not be sent due to a delivery error. Nothing was sent; please try again.",
 };
+
+// Phase 14: reasons the admin "Send email" action surfaces back to Tyler,
+// mirroring the typed refusal reasons `sendApprovedProjectEmail` returns
+// (src/lib/project-communications.ts) — no silent drops.
+const emailSendErrorMessages: Record<string, string> = {
+  no_recipient: "This email draft has no resolvable recipient. Add a recipient email and try again.",
+  suppressed: "That email address is suppressed. Nothing was sent.",
+  flag_off: "Email sending is currently disabled. The draft is saved but nothing was sent.",
+  hash_mismatch: "This email draft (or its recipient) changed after it was reviewed. Re-review and try again.",
+  not_draft: "This email was already sent, or is not a sendable outbound draft.",
+  not_found: "That email draft could not be found.",
+  not_email: "That communication is not an email.",
+  too_long: "This email draft is over the character limit. Shorten it and try again.",
+  not_configured: "Email is not configured yet. Nothing was sent.",
+  send_failed: "The email could not be sent due to a delivery error. Nothing was sent; please try again.",
+};
+
+// Read-only email-send precheck shown next to a draft email so Tyler doesn't
+// attempt a send the server-side gate will refuse. The server gate stays
+// authoritative; this is a display convenience mirroring the SMS consent labels.
+type EmailSendCheck = { recipient: string | null; suppressed: boolean; approvedBodyHash: string | null };
 
 // Read-only reasons the UI shows next to a draft SMS so Tyler doesn't attempt a
 // send that the server-side gate (src/lib/sms.ts) will refuse anyway. The
@@ -174,10 +201,10 @@ export default async function ProjectDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ portalLink?: string; saved?: string; error?: string; smsError?: string }>;
+  searchParams: Promise<{ portalLink?: string; saved?: string; error?: string; smsError?: string; emailError?: string }>;
 }) {
   const { id } = await params;
-  const { portalLink, saved, error, smsError } = await searchParams;
+  const { portalLink, saved, error, smsError, emailError } = await searchParams;
   if (id.startsWith("seed-project-")) {
     redirect("/projects?pageSize=200");
   }
@@ -187,10 +214,24 @@ export default async function ProjectDetailPage({
   const workingNotes = projectWorkingNotes(data.project.notes);
   const clientsById = new Map(data.clients.map((client) => [client.id, client]));
   const smsSendingEnabled = smsEnabled();
+  const emailSendEnabled = emailSendingEnabled();
   const smsConsentByCommunicationId = new Map<string, SmsConsentCheck>();
+  const emailSendByCommunicationId = new Map<string, EmailSendCheck>();
   for (const communication of data.communications) {
     if (communication.channel === "sms" && communication.status === "draft" && communication.direction === "outbound") {
       smsConsentByCommunicationId.set(communication.id, await checkSmsDraftConsent(communication, clientsById));
+    }
+    if (communication.channel === "email" && communication.status === "draft" && communication.direction === "outbound") {
+      // Resolve the recipient server-side (the SAME resolution the send path uses)
+      // and bind the DISPLAYED recipient into the approval hash — this is what
+      // makes the send path's re-resolution + hash check reject a post-review
+      // recipientEmail swap (spec §1.2, Finding MEDIUM 1).
+      const recipient = await resolveEmailRecipientForCommunication(data.project.id, communication);
+      const suppressed = recipient ? await isEmailSuppressed(recipient) : false;
+      const approvedBodyHash = recipient
+        ? emailApprovalHash(communication.subject, communication.body, recipient)
+        : null;
+      emailSendByCommunicationId.set(communication.id, { recipient, suppressed, approvedBodyHash });
     }
   }
 
@@ -336,6 +377,18 @@ export default async function ProjectDetailPage({
         {smsError && (
           <div className="rounded-md border border-[var(--danger)] bg-[#fff5f2] p-4 text-sm font-semibold text-[var(--danger)]">
             {smsSendErrorMessages[smsError] ?? "The SMS could not be sent."}
+          </div>
+        )}
+
+        {saved === "email_sent" && (
+          <div className="rounded-md border border-[var(--accent)] bg-[#edf6f1] p-4 text-sm font-semibold text-[var(--accent-strong)]">
+            Email sent to the client.
+          </div>
+        )}
+
+        {emailError && (
+          <div className="rounded-md border border-[var(--danger)] bg-[#fff5f2] p-4 text-sm font-semibold text-[var(--danger)]">
+            {emailSendErrorMessages[emailError] ?? "The email could not be sent."}
           </div>
         )}
 
@@ -1112,8 +1165,24 @@ export default async function ProjectDetailPage({
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
+                        {communication.direction === "inbound" ? (
+                          <span className="inline-flex items-center gap-1 rounded-sm bg-[var(--paper-2)] px-1.5 py-0.5 text-[0.62rem] font-semibold text-[var(--ink-2)]">
+                            <ArrowDownLeft className="h-3 w-3" /> Received
+                          </span>
+                        ) : communication.direction === "outbound" ? (
+                          <span className="inline-flex items-center gap-1 rounded-sm bg-[var(--paper-2)] px-1.5 py-0.5 text-[0.62rem] font-semibold text-[var(--ink-2)]">
+                            <ArrowUpRight className="h-3 w-3" /> Outbound
+                          </span>
+                        ) : null}
+                        <span className="inline-flex items-center gap-1 text-xs capitalize text-[var(--ink-3)]">
+                          {communication.channel === "email" ? (
+                            <Mail className="h-3.5 w-3.5" />
+                          ) : communication.channel === "sms" ? (
+                            <MessageSquare className="h-3.5 w-3.5" />
+                          ) : null}
+                          {communication.channel}
+                        </span>
                         <span className="studio-caps text-[0.58rem] text-[var(--ink-3)]">{communicationStatusLabels[communication.status] ?? communication.status}</span>
-                        <span className="text-xs capitalize text-[var(--ink-3)]">{communication.channel}</span>
                         <span className="text-xs text-[var(--ink-3)]">Created by {communication.createdBy ?? "Studio"}</span>
                       </div>
                       <div className="mt-2 font-semibold">{communication.subject || "Untitled communication"}</div>
@@ -1127,17 +1196,26 @@ export default async function ProjectDetailPage({
                         {communication.channel === "sms" && communication.deliveryStatus && (
                           <span>Twilio status: {communication.deliveryStatus}</span>
                         )}
+                        {communication.channel === "email" && communication.deliveryStatus && (
+                          <span>Delivery: {communication.deliveryStatus}</span>
+                        )}
+                        {communication.channel === "email" && communication.providerMessageId && (
+                          <span>Resend id: {communication.providerMessageId}</span>
+                        )}
                         {taskSourceLabel(communication.sourceType, communication.sourceId, data.sources) && (
                           <span>Source: {taskSourceLabel(communication.sourceType, communication.sourceId, data.sources)}</span>
                         )}
                       </div>
                     </div>
-                    {/* SMS is never "mark sent" — it must actually go through the
-                        Twilio-backed send gate below. The generic mark-sent
-                        shortcut stays available for email/call/note, where
-                        "sent" only ever meant "logged as sent", not "we texted
-                        them" (that would be a false-success write for SMS). */}
-                    {communication.status !== "sent" && communication.channel !== "sms" && (
+                    {/* Neither SMS nor email is "mark sent" — both must go through
+                        their real, gated send action (Twilio / Resend) below.
+                        "Log as sent (no send)" stays available ONLY for call/note
+                        rows, where "sent" only ever meant "logged as sent", not
+                        "we contacted them" (a false-success write for a real
+                        channel). An email genuinely sent elsewhere can still be
+                        logged via the edit form's status field. */}
+                    {communication.status !== "sent" &&
+                      (communication.channel === "call" || communication.channel === "note") && (
                       <form action={`/api/projects/${data.project.id}/communications`} method="post">
                         <input type="hidden" name="communicationId" value={communication.id} />
                         <input type="hidden" name="direction" value={communication.direction} />
@@ -1149,8 +1227,8 @@ export default async function ProjectDetailPage({
                         <input type="hidden" name="recipientEmail" value={communication.recipientEmail ?? ""} />
                         <input type="hidden" name="sentAt" value={new Date().toISOString()} />
                         <button className="inline-flex items-center justify-center gap-2 rounded-sm border border-[var(--line)] px-3 py-2 text-sm font-semibold transition hover:border-[var(--foreground)]">
-                          <Send className="h-4 w-4" />
-                          Mark sent
+                          <CheckCircle2 className="h-4 w-4" />
+                          Log as sent (no send)
                         </button>
                       </form>
                     )}
@@ -1182,6 +1260,42 @@ export default async function ProjectDetailPage({
                         >
                           <Send className="h-4 w-4" />
                           Send SMS
+                        </button>
+                      </form>
+                    );
+                  })()}
+
+                  {communication.channel === "email" && communication.status === "draft" && communication.direction === "outbound" && (() => {
+                    const check = emailSendByCommunicationId.get(communication.id) ?? { recipient: null, suppressed: false, approvedBodyHash: null };
+                    const canSend = Boolean(check.recipient) && !check.suppressed && emailSendEnabled && Boolean(check.approvedBodyHash);
+                    const label = !check.recipient
+                      ? "No resolvable recipient for this email"
+                      : check.suppressed
+                        ? "Recipient is suppressed — will not send"
+                        : `Ready to send to ${check.recipient}`;
+                    return (
+                      <form
+                        action={`/api/projects/${data.project.id}/communications/send-email`}
+                        method="post"
+                        className="mt-3 flex flex-col gap-2 rounded-md border border-[var(--line)] bg-[var(--paper-2)] p-3 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div className="text-xs">
+                          <span className={canSend ? "font-semibold text-[var(--accent-strong)]" : "font-semibold text-[var(--danger)]"}>
+                            {label}
+                          </span>
+                          {Boolean(check.recipient) && !check.suppressed && !emailSendEnabled && (
+                            <span className="ml-2 text-[var(--ink-3)]">Email sending is currently disabled.</span>
+                          )}
+                        </div>
+                        <input type="hidden" name="communicationId" value={communication.id} />
+                        <input type="hidden" name="approvedBodyHash" value={check.approvedBodyHash ?? ""} />
+                        <button
+                          type="submit"
+                          disabled={!canSend}
+                          className="brand-primary-button inline-flex items-center justify-center gap-2 rounded-sm px-4 py-2 text-sm transition disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <Mail className="h-4 w-4" />
+                          Send email
                         </button>
                       </form>
                     );

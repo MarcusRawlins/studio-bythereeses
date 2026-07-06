@@ -1215,6 +1215,26 @@ const studioTools = [
       additionalProperties: false,
     },
   },
+  {
+    name: "studio_draft_email",
+    title: "Draft Email",
+    description: "Drafts an email for Tyler to review and send. Never sends. This ALWAYS creates a draft, agent-authored EMAIL communication row (channel:email, status:draft, direction:outbound, createdBy:agent) regardless of any status/channel/createdBy supplied — it has zero send authority and can never trigger a Resend delivery. Only Tyler's admin-only send action can mark an email sent.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string", description: "Canonical Studio project id." },
+        clientId: { type: "string", description: "Optional project client id. Defaults to the primary project client." },
+        subject: { type: "string", description: "Optional email subject for Tyler to review." },
+        body: { type: "string", description: "Email draft text for Tyler to review." },
+        recipientName: { type: "string", description: "Optional recipient name override." },
+        recipientEmail: { type: "string", description: "Optional recipient email override." },
+        sourceType: { type: "string", description: "Optional source label. Use project_source when sourceId points at project_sources.id." },
+        sourceId: { type: "string", description: "Optional source record id for traceability." },
+      },
+      required: ["projectId", "body"],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 function success(id: JsonRpcId, result: Record<string, unknown>): JsonRpcResponse {
@@ -2915,6 +2935,29 @@ async function callTool(params: unknown) {
       channel: "sms",
       status: "draft",
       body: stringArg(args, "body"),
+      sourceType: optionalStringArg(args, "sourceType"),
+      sourceId: optionalStringArg(args, "sourceId"),
+    });
+    return textToolResult({ communication });
+  }
+
+  if (name === "studio_draft_email") {
+    const projectId = stringArg(args, "projectId");
+    // HARD-FORCE channel:"email", status:"draft", direction:"outbound". The
+    // hostile fields (status/channel/createdBy) are never read from args — an
+    // agent can never mint a sent/queued email or trigger a send. The real
+    // enforcement is the §8 clamp in createProjectCommunicationFromAgent
+    // (agent + email ⇒ draft), so even the generic studio_create_communication
+    // cannot bypass it.
+    const communication = await createProjectCommunicationFromAgent(projectId, {
+      clientId: optionalStringArg(args, "clientId"),
+      direction: "outbound",
+      channel: "email",
+      status: "draft",
+      subject: optionalStringArg(args, "subject"),
+      body: stringArg(args, "body"),
+      recipientName: optionalStringArg(args, "recipientName"),
+      recipientEmail: optionalStringArg(args, "recipientEmail"),
       sourceType: optionalStringArg(args, "sourceType"),
       sourceId: optionalStringArg(args, "sourceId"),
     });

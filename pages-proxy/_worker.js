@@ -40,6 +40,15 @@ const RATE_LIMITS = {
   // The real trust boundary is the X-Twilio-Signature at the origin; this cap is
   // only an abuse ceiling, so err generous.
   twilioWebhook: { max: 600, windowSeconds: 60 },
+  // Phase 14: a DEDICATED, GENEROUS ceiling for the inbound project-email
+  // endpoint — NOT publicMutation. All inbound project mail arrives via ONE
+  // Worker with concentrated egress (the twilioWebhook lesson: a single machine
+  // source behind the proxy is not per-user public traffic), so the tight
+  // publicMutation cap (20/300s) would throttle legitimate bursts. The real trust
+  // boundary is the INBOUND_PROJECT_EMAIL_SECRET bearer at the origin; this cap is
+  // only an abuse ceiling, and exceeding it forwards-to-human (throughput cost,
+  // not a safety hole), so err generous.
+  inboundProjectEmail: { max: 600, windowSeconds: 60 },
 };
 
 function base64UrlEncode(input) {
@@ -224,6 +233,13 @@ export function isStudioPublicPath(pathname) {
     // NOT in the origin-guard bypass; it is reachable only through the proxy,
     // which stamps the origin secret.
     pathname === "/api/inbound/inquiry-email" ||
+    // Phase 14: the inbound project-email endpoint. Self-authenticated by the
+    // dedicated INBOUND_PROJECT_EMAIL_SECRET bearer (same rationale as 8a), so it
+    // must NOT be gated behind the admin Google session — otherwise the inbound
+    // Worker's POST is 303'd to /admin/login (a 200 login PAGE), the Worker
+    // misreads that as success, and the client reply is silently lost. NOT in the
+    // origin-guard bypass; reachable only through the proxy.
+    pathname === "/api/inbound/project-email" ||
     // Phase 8b: Twilio inbound-message + delivery-status webhooks. Self-
     // authenticated by the X-Twilio-Signature (HMAC-SHA1 over the configured
     // URL), so they must NOT be gated behind the admin Google session —
@@ -288,6 +304,12 @@ export function rateLimitKind(url, request) {
     (pathname === "/api/twilio/inbound" || pathname === "/api/twilio/status")
   ) {
     return "twilioWebhook";
+  }
+  // Phase 14: the inbound project-email endpoint gets its own generous kind (NOT
+  // publicMutation) — one Worker, concentrated egress, over-cap forwards-to-human.
+  // Match BEFORE the publicMutation branch below.
+  if (request.method !== "GET" && pathname === "/api/inbound/project-email") {
+    return "inboundProjectEmail";
   }
   if (
     pathname.startsWith("/proposal/") ||

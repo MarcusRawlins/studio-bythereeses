@@ -383,6 +383,10 @@ export const projectCommunications = sqliteTable("project_communications", {
   // status callback route keyed on providerMessageId.
   providerMessageId: text("provider_message_id"),
   deliveryStatus: text("delivery_status"),
+  // Phase 14: dedupe key for inbound client email replies attached to this
+  // project's thread. Scoped-to-thread unique index (project_id, inbound_message_id)
+  // — INSERT ON CONFLICT DO NOTHING, never UPDATE from inbound (see migration 0092).
+  inboundMessageId: text("inbound_message_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });

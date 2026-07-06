@@ -26,6 +26,7 @@ const studioPublic = [
   "/portal/proposals/abc", // Phase-6 fix (a): the whole /portal subtree is public
   "/api/portal/request-link", // Phase 6.5 self-service request endpoint (POST)
   "/api/inbound/inquiry-email", // Phase 8a inbound intake (self-authed by INBOUND_INTAKE_SECRET bearer)
+  "/api/inbound/project-email", // Phase 14 inbound project-email (self-authed by INBOUND_PROJECT_EMAIL_SECRET bearer)
   "/api/twilio/inbound", // Phase 8b Twilio inbound webhook (self-authed by X-Twilio-Signature)
   "/api/twilio/status", // Phase 8b Twilio status callback (self-authed by X-Twilio-Signature)
   "/api/email/unsubscribe", // Phase 8c one-click email unsubscribe (self-authed by signed token in URL)
@@ -67,6 +68,20 @@ assert.equal(isStudioPublicPath("/api/twilio/status"), true, "/api/twilio/status
 // unsubscribe, a compliance failure) fails loudly.
 assert.equal(adminProofRequired("/api/email/unsubscribe"), false, "/api/email/unsubscribe must be admin-proof-exempt");
 assert.equal(isStudioPublicPath("/api/email/unsubscribe"), true, "/api/email/unsubscribe must be proxy-public");
+
+// Phase 14: pin the inbound project-email endpoint — admin-proof-exempt AND
+// proxy-public AND NOT origin-bypassed — so a future edit that drops the first
+// two (silently login-walling the inbound Worker → losing every client reply to
+// the fallback) or widens the third (a direct-*.workers.dev bypass) fails loudly.
+assert.equal(adminProofRequired("/api/inbound/project-email"), false, "/api/inbound/project-email must be admin-proof-exempt");
+assert.equal(isStudioPublicPath("/api/inbound/project-email"), true, "/api/inbound/project-email must be proxy-public");
+assert.equal(isPublicOriginBypassApiPath("/api/inbound/project-email"), false, "/api/inbound/project-email must NOT be origin-bypassed");
+// Phase 14: the outbound admin send-email route is a GENUINE admin surface — NOT
+// public, NOT origin-bypassed, admin-proof required (identical trust model to
+// send-sms). Pin it so it can never drift into an agent/machine-reachable path.
+assert.equal(adminProofRequired("/api/projects/project-1/communications/send-email"), true, "send-email must require an admin proof");
+assert.equal(isStudioPublicPath("/api/projects/project-1/communications/send-email"), false, "send-email must NOT be proxy-public");
+assert.equal(isPublicOriginBypassApiPath("/api/projects/project-1/communications/send-email"), false, "send-email must NOT be origin-bypassed");
 
 // Phase 15 (PWA): the manifest + sw path are static, non-sensitive assets that
 // must load UNAUTHENTICATED (a login-walled manifest = broken install), added in

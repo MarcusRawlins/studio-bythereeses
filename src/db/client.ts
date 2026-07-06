@@ -667,6 +667,11 @@ function migrate(database: LocalDatabase) {
   addColumnIfMissing(database, "clients", "sms_last_consent_note", "TEXT");
   addColumnIfMissing(database, "project_communications", "provider_message_id", "TEXT");
   addColumnIfMissing(database, "project_communications", "delivery_status", "TEXT");
+  // Phase 14 (two-way email): the inbound dedupe key + the THREAD-scoped composite
+  // unique index. Must match migration 0092 exactly — dedupe is (project_id,
+  // inbound_message_id) so a replay to the SAME project is a no-op while one
+  // client's message to TWO projects appends to both threads (Finding MEDIUM 2).
+  addColumnIfMissing(database, "project_communications", "inbound_message_id", "TEXT");
   database.exec(`
     CREATE TABLE IF NOT EXISTS sms_suppressions (
       phone_e164 TEXT PRIMARY KEY NOT NULL,
@@ -675,6 +680,8 @@ function migrate(database: LocalDatabase) {
     );
     CREATE INDEX IF NOT EXISTS idx_project_communications_provider_message_id
       ON project_communications(provider_message_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_project_communications_project_inbound_message_id
+      ON project_communications(project_id, inbound_message_id);
   `);
 
   const automatedSequencesMigrationPath = path.join(process.cwd(), "migrations", "0088_automated_sequences.sql");

@@ -2,6 +2,15 @@ import { db } from "@/db/client";
 import { clients, projectCommunications, projectParticipants, projects } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { requireProjectSourceForTask } from "@/lib/agent-sources";
+import { isEmailSuppressed, sendProjectEmail } from "@/lib/email";
+import {
+  MAX_BODY_TEXT_LENGTH,
+  MAX_SUBJECT_LENGTH,
+  normalizeEmail,
+  sanitizeLine,
+  stripReplySubjectForSend,
+} from "@/lib/inbound-inquiry";
+import { projectReplyToAddress } from "@/lib/project-reply-token";
 import { SMS_OPT_OUT_LANGUAGE, SmsConsentError, sendProjectSms, type SmsSendResult } from "@/lib/sms";
 import { and, asc, desc, eq } from "drizzle-orm";
 import { createHash } from "node:crypto";
@@ -24,6 +33,26 @@ function assertSmsBodyLength(channel: string, body: string) {
   if (channel === "sms" && body.length > SMS_BODY_MAX_LENGTH) {
     throw new Error(`SMS message body exceeds the ${SMS_BODY_MAX_LENGTH}-character limit.`);
   }
+}
+
+// Phase 14 (email): a shared outbound/inbound email body ceiling, aligned with
+// MAX_BODY_TEXT_LENGTH in inbound-inquiry.ts so an outbound body and a stored
+// inbound body share one cap. Enforced here (not just the UI) so EVERY caller —
+// form, agent draft tool, generic MCP tool — is bound, exactly like the SMS cap.
+const EMAIL_BODY_MAX_LENGTH = MAX_BODY_TEXT_LENGTH; // 50_000
+
+function assertEmailBodyLength(channel: string, body: string) {
+  if (channel === "email" && body.length > EMAIL_BODY_MAX_LENGTH) {
+    throw new Error(`Email message body exceeds the ${EMAIL_BODY_MAX_LENGTH}-character limit.`);
+  }
+}
+
+// Phase 14 (email): fold CR/LF/NEL/LS/PS out of a stored email subject at
+// create/update time (cleanText only trims). A single-line stored subject can
+// then never carry a header-injection newline into the hash, the display, or the
+// send. Send-time stripReplySubjectForSend remains as defense-in-depth.
+function cleanEmailSubject(value: string | null | undefined) {
+  return sanitizeLine(value, MAX_SUBJECT_LENGTH);
 }
 
 type CreateProjectCommunicationInput = {
@@ -167,8 +196,16 @@ async function createProjectCommunication(projectId: string, input: CreateProjec
   // Tyler's admin send can mark an SMS sent" a table-level invariant, not a
   // per-tool convention. Email (and non-agent actors) are UNAFFECTED — the
   // narrowing is the `sms` channel for the agent actor only.
-  const status = actor.actorType === "agent" && channel === "sms" ? "draft" : requestedStatus;
+  // B1(b) + Phase 14 §8: an AGENT-authored sms OR email row can only ever land
+  // status "draft". This forbids a prompt-injected agent minting a forged
+  // channel:"email"/"sms", status:"sent" ("we emailed/texted them" that never
+  // went out) via the generic studio_create_communication tool — making "only
+  // Tyler's admin send can mark it sent" a table-level invariant for BOTH
+  // channels. Non-agent actors (admin form, sequence runner, inquiry-reply
+  // insert) are UNAFFECTED.
+  const status = actor.actorType === "agent" && (channel === "sms" || channel === "email") ? "draft" : requestedStatus;
   assertSmsBodyLength(channel, body);
+  assertEmailBodyLength(channel, body);
   const communication = {
     id: crypto.randomUUID(),
     projectId,
@@ -176,7 +213,7 @@ async function createProjectCommunication(projectId: string, input: CreateProjec
     direction: enumValue(input.direction, communicationDirections, "outbound"),
     channel,
     status,
-    subject: cleanText(input.subject),
+    subject: channel === "email" ? cleanEmailSubject(input.subject) : cleanText(input.subject),
     body,
     recipientName: cleanText(input.recipientName) ?? (recipientClient ? clientName(recipientClient) : null),
     recipientEmail: cleanEmail(input.recipientEmail) ?? recipientClient?.email ?? null,
@@ -231,10 +268,13 @@ async function updateProjectCommunication(
   // agent-supplied send-state on an sms row is clamped back to "draft" so the
   // approval trail stays truthful. Email/non-agent actors are unaffected.
   const nextStatus =
-    actor.actorType === "agent" && nextChannel === "sms" && (requestedStatus === "sent" || requestedStatus === "queued")
+    actor.actorType === "agent" &&
+    (nextChannel === "sms" || nextChannel === "email") &&
+    (requestedStatus === "sent" || requestedStatus === "queued")
       ? "draft"
       : requestedStatus;
   assertSmsBodyLength(nextChannel, nextBody);
+  assertEmailBodyLength(nextChannel, nextBody);
   const nextSentAt = hasOwn(input, "sentAt") ? cleanText(input.sentAt) : communication.sentAt;
   const nextSourceType = hasOwn(input, "sourceType") ? cleanText(input.sourceType) : communication.sourceType;
   const nextSourceId = hasOwn(input, "sourceId") ? cleanText(input.sourceId) : communication.sourceId;
@@ -249,7 +289,9 @@ async function updateProjectCommunication(
     direction: hasOwn(input, "direction") ? enumValue(input.direction, communicationDirections, communication.direction as typeof communicationDirections[number]) : communication.direction,
     channel: nextChannel,
     status: nextStatus,
-    subject: hasOwn(input, "subject") ? cleanText(input.subject) : communication.subject,
+    subject: hasOwn(input, "subject")
+      ? (nextChannel === "email" ? cleanEmailSubject(input.subject) : cleanText(input.subject))
+      : communication.subject,
     body: nextBody,
     recipientName: hasOwn(input, "recipientName") ? cleanText(input.recipientName) : communication.recipientName,
     recipientEmail: hasOwn(input, "recipientEmail") ? cleanEmail(input.recipientEmail) : communication.recipientEmail,
@@ -447,6 +489,209 @@ export async function sendApprovedProjectSmsFromForm(formData: FormData): Promis
   const approvedBodyHash = cleanText(formString(formData, "approvedBodyHash"));
   if (!projectId || !communicationId) throw new Error("Project and communication are required.");
   return sendApprovedProjectSms({
+    projectId,
+    communicationId,
+    approvedBodyHash: approvedBodyHash ?? "",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Phase 14 — admin-only "send approved email" action. The SOLE place
+// `sendProjectEmail` (project-thread transport) is invoked; behind the admin
+// session + admin proof like send-sms. No agent/MCP/automation/inbound path
+// reaches it.
+// ---------------------------------------------------------------------------
+
+/** Off-by-default outbound flag (strict `=== "1"`, read in body). OFF ⇒
+ * `sendApprovedProjectEmail` returns `flag_off`, the draft stays. */
+export function emailSendingEnabled(): boolean {
+  return process.env.EMAIL_SENDING_ENABLED === "1";
+}
+
+/** Phase 14 content+recipient binding (spec §1.2, Finding MEDIUM 1). Unlike SMS
+ * (body-only, recipient derives from the consented clientId), email binds
+ * subject AND body AND the resolved recipient, because a prompt-injected agent
+ * can swap ONLY `recipientEmail` after review (status stays draft, subject/body
+ * unchanged). Per-component sha256 encoding so a newline-bearing subject can
+ * never collide with a differently-split subject/body (Finding LOW 3). */
+export function emailApprovalHash(
+  subject: string | null | undefined,
+  body: string | null | undefined,
+  recipient: string | null | undefined,
+): string {
+  return sha256Hex(sha256Hex(subject ?? "") + sha256Hex(body ?? "") + sha256Hex(recipient ?? ""));
+}
+
+/** Resolve the recipient the send path will deliver to (and the UI must bind
+ * into the hash): the row's `recipientEmail`, else the project primary
+ * participant's email. Returns a normalized address or null. */
+export async function resolveEmailRecipientForCommunication(
+  projectId: string,
+  communication: { recipientEmail: string | null; clientId: string | null },
+): Promise<string | null> {
+  const direct = normalizeEmail(communication.recipientEmail);
+  if (direct) return direct;
+  const client = await resolveRecipient(projectId, communication.clientId);
+  return client ? normalizeEmail(client.email) : null;
+}
+
+export type SendApprovedEmailResult =
+  | { ok: true; communicationId: string; providerMessageId: string | null }
+  | {
+      ok: false;
+      reason:
+        | "not_found"
+        | "not_email"
+        | "not_draft"
+        | "too_long"
+        | "hash_mismatch"
+        | "no_recipient"
+        | "suppressed"
+        | "not_configured"
+        | "send_failed"
+        | "flag_off";
+      message: string;
+    };
+
+/**
+ * Ordered gate — each step refuses with ZERO Resend call. The recipient is
+ * RESOLVED BEFORE the hash check (spec §1.3, Finding MEDIUM 1) so the hash can
+ * bind it: a post-review swap of subject, body, OR recipientEmail changes the
+ * resolved recipient → the hash no longer matches → `hash_mismatch`.
+ */
+export async function sendApprovedProjectEmail(input: {
+  projectId: string;
+  communicationId: string;
+  approvedBodyHash: string;
+  actorName?: string;
+}): Promise<SendApprovedEmailResult> {
+  const communication = await db.query.projectCommunications.findFirst({
+    where: (row, { and, eq }) => and(eq(row.id, input.communicationId), eq(row.projectId, input.projectId)),
+  });
+  if (!communication) {
+    return { ok: false, reason: "not_found", message: "Email draft not found." };
+  }
+  if (communication.channel !== "email") {
+    return { ok: false, reason: "not_email", message: "This communication is not an email." };
+  }
+  // Only a NOT-yet-sent OUTBOUND draft can be sent: refuses a re-submit of an
+  // already-sent row (no double-send) and an INBOUND client reply (never sent back).
+  if (communication.status !== "draft" || communication.direction !== "outbound") {
+    return { ok: false, reason: "not_draft", message: "Only an unsent outbound email draft can be sent." };
+  }
+  if ((communication.body ?? "").length > EMAIL_BODY_MAX_LENGTH) {
+    return {
+      ok: false,
+      reason: "too_long",
+      message: `This email draft exceeds the ${EMAIL_BODY_MAX_LENGTH}-character limit. Shorten it and try again.`,
+    };
+  }
+
+  // Step 5: resolve the recipient FIRST — the hash binds the resolved recipient.
+  const resolvedRecipient = await resolveEmailRecipientForCommunication(input.projectId, communication);
+  if (!resolvedRecipient) {
+    return { ok: false, reason: "no_recipient", message: "This email draft has no valid recipient." };
+  }
+
+  // Step 6: recompute the recipient-bound hash over the STORED row and refuse on
+  // mismatch — closing BOTH the draft-swap TOCTOU and the recipient-redirect
+  // TOCTOU (SMS never had to defend the latter).
+  const storedHash = emailApprovalHash(communication.subject, communication.body, resolvedRecipient);
+  if (!input.approvedBodyHash || storedHash !== input.approvedBodyHash) {
+    await logActivity({
+      projectId: input.projectId,
+      clientId: communication.clientId,
+      action: "project.communication.email_send_refused",
+      actorType: "admin",
+      actorName: input.actorName || "Tyler",
+      metadata: { communicationId: input.communicationId, reason: "hash_mismatch" },
+    });
+    return {
+      ok: false,
+      reason: "hash_mismatch",
+      message: "This email draft (or its recipient) changed after it was reviewed. Re-review before sending.",
+    };
+  }
+
+  // Step 7: suppression WINS (same discipline as sendSequenceEmail + SMS).
+  if (await isEmailSuppressed(resolvedRecipient)) {
+    return { ok: false, reason: "suppressed", message: "This email address is suppressed. Nothing was sent." };
+  }
+
+  // Step 8: flag (dark no-op — draft stays, no false success).
+  if (!emailSendingEnabled()) {
+    return { ok: false, reason: "flag_off", message: "Email sending is currently disabled." };
+  }
+
+  // Step 10 prep: CRLF-strip the subject immediately before transport (defense in
+  // depth). A subject that still bears a newline after sanitization is refused.
+  let safeSubject: string;
+  try {
+    safeSubject = stripReplySubjectForSend(communication.subject ?? "");
+  } catch {
+    return { ok: false, reason: "send_failed", message: "The email subject could not be safely sent." };
+  }
+
+  // Two-way stays dark until REPLY_TOKEN_SECRET is set: mint returns null →
+  // replyTo undefined → resendRequest omits reply_to entirely (no empty-tag
+  // bouncing address). Outbound still sends.
+  const replyTo = projectReplyToAddress(input.projectId) ?? undefined;
+
+  let result: { delivered: boolean; status: number | null; providerMessageId: string | null };
+  try {
+    result = await sendProjectEmail({
+      to: resolvedRecipient,
+      subject: safeSubject,
+      text: communication.body ?? "",
+      replyTo,
+    });
+  } catch {
+    // Thrown after dispatch — ambiguous, never a false "sent" (under-send only).
+    return { ok: false, reason: "send_failed", message: "The email could not be sent. Nothing was sent." };
+  }
+
+  if (result.delivered) {
+    const now = new Date().toISOString();
+    await db
+      .update(projectCommunications)
+      .set({
+        status: "sent",
+        sentAt: now,
+        providerMessageId: result.providerMessageId,
+        deliveryStatus: "sent",
+        updatedAt: now,
+      })
+      .where(eq(projectCommunications.id, communication.id));
+    await logActivity({
+      projectId: input.projectId,
+      clientId: communication.clientId,
+      action: "project.communication.email_sent",
+      actorType: "admin",
+      actorName: input.actorName || "Tyler",
+      metadata: {
+        communicationId: communication.id,
+        recipient: resolvedRecipient,
+        providerMessageId: result.providerMessageId,
+        delivered: true,
+      },
+    });
+    return { ok: true, communicationId: communication.id, providerMessageId: result.providerMessageId };
+  }
+
+  // Fail-closed key: no RESEND_API_KEY → not-delivered, status null → draft stays.
+  if (result.status === null) {
+    return { ok: false, reason: "not_configured", message: "Email is not configured. Nothing was sent." };
+  }
+  // Any 4xx (rejected) or 5xx/ambiguous → draft stays, never a false "sent".
+  return { ok: false, reason: "send_failed", message: "The email could not be sent. Nothing was sent." };
+}
+
+export async function sendApprovedProjectEmailFromForm(formData: FormData): Promise<SendApprovedEmailResult> {
+  const projectId = cleanText(formString(formData, "projectId"));
+  const communicationId = cleanText(formString(formData, "communicationId"));
+  const approvedBodyHash = cleanText(formString(formData, "approvedBodyHash"));
+  if (!projectId || !communicationId) throw new Error("Project and communication are required.");
+  return sendApprovedProjectEmail({
     projectId,
     communicationId,
     approvedBodyHash: approvedBodyHash ?? "",

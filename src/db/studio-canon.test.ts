@@ -413,6 +413,36 @@ async function main() {
     indexNames("project_communications").has("idx_project_communications_project_source"),
     "communication source lookups should have a project-scoped source index",
   );
+  // Phase 14: the inbound-email dedupe column + THREAD-scoped composite unique
+  // index. Assert the index columns (not just its presence) so a regression to a
+  // global single-column unique index — which would silently drop a cross-project
+  // reply (Finding MEDIUM 2) — fails loudly.
+  assert.ok(
+    columnNames("project_communications").has("inbound_message_id"),
+    "project_communications should carry the Phase 14 inbound_message_id dedupe column",
+  );
+  assert.ok(
+    indexNames("project_communications").has("idx_project_communications_project_inbound_message_id"),
+    "inbound email dedupe should have the composite project/inbound-message-id unique index",
+  );
+  {
+    const info = database
+      .prepare("PRAGMA index_info(idx_project_communications_project_inbound_message_id)")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    assert.deepEqual(
+      info,
+      ["project_id", "inbound_message_id"],
+      "inbound email dedupe index must be scoped to (project_id, inbound_message_id), never global",
+    );
+    const list = database
+      .prepare("PRAGMA index_list(project_communications)")
+      .all()
+      .find((row) => (row as { name: string }).name === "idx_project_communications_project_inbound_message_id") as
+      | { unique: number }
+      | undefined;
+    assert.ok(list && list.unique === 1, "the inbound email dedupe index must be UNIQUE");
+  }
   assert.ok(
     triggerNames("project_communications").has("trg_project_communications_source_link_insert"),
     "project communication source links should reject half-linked inserts",

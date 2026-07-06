@@ -34,9 +34,13 @@ async function resendRequest(input: {
   subject: string;
   text: string;
   headers?: Record<string, string>;
-}): Promise<{ delivered: boolean; status: number | null }> {
+  // Phase 14: optional Reply-To (carries the signed project-reply token so a
+  // client reply routes back to the right project thread). Omitted entirely when
+  // undefined — never an empty-tag bouncing address.
+  replyTo?: string;
+}): Promise<{ delivered: boolean; status: number | null; providerMessageId: string | null }> {
   const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) return { delivered: false, status: null };
+  if (!apiKey) return { delivered: false, status: null, providerMessageId: null };
 
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -50,10 +54,37 @@ async function resendRequest(input: {
       subject: input.subject,
       text: input.text,
       ...(input.headers ? { headers: input.headers } : {}),
+      ...(input.replyTo ? { reply_to: input.replyTo } : {}),
     }),
   });
 
-  return { delivered: response.ok, status: response.status };
+  // Capture the Resend message id on success. Existing callers ignore this field
+  // (no behavior change to booking/sequence/magic-link mail).
+  let providerMessageId: string | null = null;
+  if (response.ok) {
+    try {
+      const body = (await response.json()) as { id?: unknown };
+      if (typeof body?.id === "string" && body.id) providerMessageId = body.id;
+    } catch {
+      providerMessageId = null;
+    }
+  }
+
+  return { delivered: response.ok, status: response.status, providerMessageId };
+}
+
+// Phase 14: the SINGLE Resend entry the project-thread send uses. Transport only
+// — suppression/consent/flag/hash gating all live in `sendApprovedProjectEmail`
+// (like SMS keeps consent in the lib). Returns the delivery flag, the HTTP status
+// (so the caller can classify 4xx-rejected vs 5xx/network-unknown, mirroring
+// `sendSequenceEmail`), and the captured Resend message id.
+export async function sendProjectEmail(input: {
+  to: string;
+  subject: string;
+  text: string;
+  replyTo?: string;
+}): Promise<{ delivered: boolean; status: number | null; providerMessageId: string | null }> {
+  return resendRequest({ to: input.to, subject: input.subject, text: input.text, replyTo: input.replyTo });
 }
 
 async function sendResendEmail(input: {

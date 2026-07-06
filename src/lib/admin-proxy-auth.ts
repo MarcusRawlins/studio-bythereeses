@@ -201,6 +201,11 @@ export function adminProofRequired(pathname: string): boolean {
   // through to `return true` and ADMIN_PROOF_ENFORCE would 404 the intake
   // Worker's POST (forcing every lead to the human fallback — no ingest at all).
   if (path === "/api/inbound/inquiry-email") return false;
+  // Phase 14: inbound project-email endpoint — authenticated by its own dedicated
+  // INBOUND_PROJECT_EMAIL_SECRET bearer, not the admin proof. Without this it
+  // falls through to `return true` and ADMIN_PROOF_ENFORCE would 404 the inbound
+  // Worker's POST (forcing every reply to the human fallback — no attach at all).
+  if (path === "/api/inbound/project-email") return false;
   // Phase 8b: Twilio inbound-message + delivery-status webhooks — authenticated by
   // their own X-Twilio-Signature (HMAC-SHA1 over the configured URL), not the
   // admin proof. Without this they fall through to `return true` and

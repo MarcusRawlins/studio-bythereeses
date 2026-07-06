@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "reese-project-email-inbound",
+  "main": "workers/project-email-inbound.ts",
+  "account_id": "765e233f8635f207a8a3db4847efd3e9",
+  "compatibility_date": "2026-04-28",
+  // No cron trigger. The trigger is the Cloudflare Email Routing rule
+  // (dashboard-configured: catch-all *@inbox.bythereeses.com → Send to a Worker →
+  // reese-project-email-inbound). Deploy with:
+  //   wrangler deploy --config wrangler.project-email-inbound.jsonc
+  // Set the (shared with the app Worker) secret with:
+  //   wrangler secret put INBOUND_PROJECT_EMAIL_SECRET --config wrangler.project-email-inbound.jsonc
+  "vars": {
+    "INTAKE_ENDPOINT": "https://studio.bythereeses.com/api/inbound/project-email",
+    // Flag. Default OFF — flag-off forwards every message to INTAKE_FALLBACK,
+    // never drops. Flip to "true" only after INTAKE_FALLBACK is verified AND
+    // REPLY_TOKEN_SECRET + INBOUND_PROJECT_EMAIL_ENABLED are set on the app.
+    "INTAKE_ENABLED": "false",
+    // ROLLOUT GATE: INTAKE_FALLBACK MUST be a VERIFIED Email Routing destination
+    // on the bythereeses.com zone. Forwarding to an unverified address does not
+    // deliver — that would reintroduce the silent-drop bug. Verify in the
+    // Cloudflare dashboard before enabling. Placeholder below; set to the real
+    // verified inbox.
+    "INTAKE_FALLBACK": "hello@bythereeses.com"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

@@ -277,6 +277,7 @@ async function main() {
       "studio_create_communication",
       "studio_update_communication",
       "studio_draft_sms",
+      "studio_draft_email",
     ],
   );
 
@@ -859,6 +860,10 @@ async function main() {
       name: "studio_create_communication",
       arguments: {
         projectId: "project-1",
+        // Phase 14 §8: the agent send-clamp now covers email AND sms, so an agent
+        // can only mark a call/note "sent" (a log, not a real send). Use a note
+        // here to keep exercising the update→sent path the tool supports.
+        channel: "note",
         subject: "Proposal next steps",
         body: "Hi Alex, here is the follow-up from our discovery call.",
         sourceType: "project_source",

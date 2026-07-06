@@ -63,6 +63,10 @@ async function main() {
   const response = await route.POST(request("https://studio.bythereeses.com/api/agent/projects/project-1/communications", {
     method: "POST",
     body: JSON.stringify({
+      // Phase 14 §8: the agent send-clamp now covers email + sms, so an agent can
+      // only mark a call/note "sent" (a log, not a real send). Use a note here to
+      // keep exercising the create→PATCH-sent path this route supports.
+      channel: "note",
       subject: "Proposal next steps",
       body: "Hi Alex, here is the follow-up from our discovery call.",
       sourceType: "project_source",
