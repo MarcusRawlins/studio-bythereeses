@@ -236,7 +236,13 @@ export type RevenueForecast = {
 
 export async function getRevenueForecast(input: IntelligenceInput = {}): Promise<RevenueForecast> {
   const settings = await getIntelligenceSettings();
-  const horizon = clampPositiveInt(input.horizonMonths) ?? settings.forecastHorizonMonths;
+  // Cap the horizon at 240 months (20 years) so a hostile/typo'd `?horizonMonths=10000000`
+  // on the admin CSV surface can't allocate a giant month array (Fable code-review #3).
+  const MAX_HORIZON_MONTHS = 240;
+  const horizon = Math.min(
+    clampPositiveInt(input.horizonMonths) ?? settings.forecastHorizonMonths,
+    MAX_HORIZON_MONTHS,
+  );
   const trailingMonths = settings.forecastTrailingMonths;
   const asOf = asOfDate(input);
   const thisMonth = monthKeyOf(new Date(`${asOf}T00:00:00.000Z`));
@@ -444,7 +450,12 @@ export type ConversionReport = {
 export async function getConversionReport(input: IntelligenceInput = {}): Promise<ConversionReport> {
   const asOf = asOfDate(input);
   const toDate = cleanDateInput(input.toDate) || asOf;
-  const fromDate = cleanDateInput(input.fromDate) || new Date(`${toDate}T00:00:00.000Z`).toISOString().slice(0, 10);
+  // Default to a trailing 30-day window (matches getBusinessReview + the MCP schema's stated
+  // default). A today-only default window (fromDate == toDate) makes the standalone report
+  // page / conversion.csv show "no inquiries" nearly every day even when last month had a dozen
+  // — misleading (Fable code-review #2).
+  const fromDate = cleanDateInput(input.fromDate)
+    || new Date(new Date(`${toDate}T00:00:00.000Z`).getTime() - 29 * 86_400_000).toISOString().slice(0, 10);
   const windowFrom = fromDate;
   const windowTo = toDate;
 
@@ -560,14 +571,19 @@ export async function getConversionReport(input: IntelligenceInput = {}): Promis
     ? Math.max(Math.round(median(bookedLags)), 1)
     : DEFAULT_MATURATION_WINDOW_DAYS;
 
-  // A cohort identity is "matured" if it has aged past the window OR already booked.
+  // A cohort identity is "matured" only once it has aged past the maturation window. Do NOT
+  // count a young-but-already-booked identity as matured (Fable code-review #1): including
+  // `|| id.booked` is survivorship bias — it keeps the quick wins in the denominator while
+  // excluding the young inquiries still deciding, inflating the headline rate (e.g. 6 recent
+  // inquiries, 2 booked fast → a false "100% (2/2 matured)"). §3.2: young cohorts are excluded
+  // from the headline rate, full stop.
   let cohortDenominator = 0;
   let cohortBookedCount = 0;
   let stillMaturingCount = 0;
   let runRateBookedInWindow = 0;
   for (const id of identityList) {
     const age = daysBetween(asOf, id.earliestTouch);
-    const matured = age >= maturationWindowDays || id.booked;
+    const matured = age >= maturationWindowDays;
     if (matured) {
       cohortDenominator += 1;
       if (id.booked) cohortBookedCount += 1;
@@ -940,8 +956,20 @@ export async function getSeasonalCapacity(input: IntelligenceInput = {}): Promis
     .map(([month, count]) => ({ month, count }))
     .sort((a, b) => a.month.localeCompare(b.month));
 
+  // Honest gate (Fable code-review #5): a seasonal index needs a genuine multi-year SPAN, not
+  // just two calendar-year labels. Dec-2025 + Jan-2026 touches 2 distinct years but is 2 months
+  // of data — presenting a "2+ years" seasonal index off that is the cold-start dishonesty this
+  // phase forbids. Require ≥2 distinct years AND ≥12 months between the earliest and latest
+  // populated month.
   const yearsOfData = yearsWithData.size;
-  const seasonalIndexAvailable = yearsOfData >= 2;
+  const monthSpan = eventsByMonth.length >= 2
+    ? (() => {
+        const first = parseMonthKey(eventsByMonth[0].month);
+        const last = parseMonthKey(eventsByMonth[eventsByMonth.length - 1].month);
+        return (last.year - first.year) * 12 + (last.month - first.month);
+      })()
+    : 0;
+  const seasonalIndexAvailable = yearsOfData >= 2 && monthSpan >= 12;
 
   // Calendar-month averages across years with data.
   const byCalendarMonth = new Map<number, number[]>();
