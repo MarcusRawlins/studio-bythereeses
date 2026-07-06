@@ -1,7 +1,16 @@
 # Phase 9a: Finance completeness — refund/dispute recording + bookkeeping export + tax/1099 (NO money moved)
 
-Status: 🔵 speccing → safe to build + deploy dark. **Fable-reviewed + revised (rev 2).**
+Status: 🔵 speccing → safe to build + deploy dark. **Fable-reviewed ×2 + revised (rev 3).**
 Migration: `0089` (additive; latest applied is `0088_automated_sequences`).
+
+> **Rev 3 (Fable re-review confirmation pass):** both BLOCKERs + MAJORs #4/#5/#6 + all MINORs
+> confirmed RESOLVED. Remaining/new items now addressed: #3 enumeration table completed — added the
+> two duplicate `openCents` (`project-finance.ts:67`, `studio-mcp.ts:1437`), `dashboard.ts`
+> metrics/"follow-up" action, `crm.ts:623`; flip scoped to `invoice_payments` only; `grossCollectedCents > 0`
+> guard + field-preservation (§1.6). **N1** (new MAJOR): monotonic guards for out-of-order distinct
+> events — never decrease `refunded_amount_cents`, never demote a terminal child status (§1.5).
+> **N2**: widen `needs_reconciliation` filter to `["paid","refunded"]`, orphans in their own section
+> (§2.1). Consolidated build checklist added (§5.1).
 
 > **Rev 2 (Fable spec-review, REQUEST-CHANGES → addressed):** 2 BLOCKERs + 4 MAJORs + 3 MINORs.
 > (1) D1 has no usable transaction — idempotency rebuilt on per-object convergence, dedupe row
@@ -236,6 +245,21 @@ Even post-signature, treat the JSON as adversarial (Active-Learning Log):
   `invoice_payments.refunded_amount_cents = Math.min(clamp(amount_refunded), grossCollectedCents)`
   (idempotent: replays converge to the same value; this is a set-to-authoritative, not an
   increment, so even without the event-dedupe it's safe — belt and suspenders).
+- **Out-of-order distinct events — monotonic guards (Fable rev-2 N1).** Stripe does not guarantee
+  delivery order, and set-to-authoritative alone handles *replays* but not *reordering* of
+  distinct events. Two partial refunds delivered as evt_2 (`amount_refunded=3000`) then evt_1
+  (`amount_refunded=1000`) would regress the stored value 3000→1000 (both are first deliveries, so
+  no dedupe skip). Guards:
+  - `charge.refunded`: `refunded_amount_cents = Math.min(clamp(Math.max(amount_refunded, stored)), grossCollectedCents)` —
+    **never decrease** (Stripe's cumulative `amount_refunded` is monotonic non-decreasing within
+    the event type; a lower value is a stale/reordered delivery).
+  - a payment already flipped to terminal `"refunded"` never regresses to `"paid"` from a
+    lower/older `charge.refunded`.
+  - child `refund.*` / `dispute.*` UPDATEs: never overwrite a **terminal** child status
+    (`succeeded`/`failed`/`canceled` for refunds; `won`/`lost` for disputes) with a non-terminal
+    snapshot — gate the UPDATE on either terminal-status precedence OR
+    `event.created >= stored stripe_created_at` (store `stripe_created_at` per child row for this).
+    Prevents a late `refund.created` (pending) demoting a `succeeded` refund out of the net.
 - `refund.reason` / `dispute.reason` / `dispute.status`: store as free text capped; do not
   branch security decisions on them.
 
@@ -283,9 +307,26 @@ do not leave to the builder):**
 | `createInvoicePaymentCheckoutSession` (stripe-checkout.ts:194, blocks `paid`\|`waived`) | mintable otherwise | **block on `"refunded"`** — do NOT let a fresh Stripe checkout link be minted for a refunded payment. |
 | `reconciledInvoicePaymentStatus` (sales.ts:84) | maps recomputed paidTotal→status; 0 → `"sent"` | a fully-refunded invoice must NOT resurrect into `"sent"`/dunning. Give it a deliberate invoice-level status (e.g. keep/route to a `"refunded"`-aware terminal) rather than the accidental `"sent"`. |
 | AR aging filter (sales.ts:1590) | **already excludes `refunded`** ✅ | no change (pre-wired). |
+| **`invoicePaymentOpenCents` DUPLICATE — `project-finance.ts:67`** (Fable rev-2 #3) | separate local copy, `paid`\|`waived` → 0 | add `"refunded"` → 0. Fixing invoice-balances.ts does NOT fix this copy → project-page `openPayableCents` would re-owe. |
+| **`paymentOpenCents` DUPLICATE — `studio-mcp.ts:1437`** (Fable rev-2 #3) | third copy on the **agent MCP surface**, `paid`\|`waived` → 0 | add `"refunded"` → 0, else the agent reports refunded money as open. **Build note: collapse all three openCents copies into one shared helper to prevent recurrence.** |
+| **`summarizeInvoicePaymentMetrics` — `dashboard.ts:53/60/273`** (Fable rev-2 #3) | counts non-paid rows' full `amountCents` in `outstandingPaymentCents`, can pick `nextPaymentDue`, emits **"Follow up on overdue payment"** action | treat `"refunded"` like `waived`/settled — exclude from unpaid rows, metrics, and action items (the exact "chase money that was refunded" failure). |
+| **`crm.ts:623`** (Fable rev-2 #3) | `paid`\|`waived` → `continue` | add `"refunded"` → skip, else a refunded payment becomes the client's "next payment due". |
 
 Recompute the parent invoice **system-from-webhook** (actorType `"system"`, actorName
 `"Stripe"`), never from an agent or admin form.
+
+**Scope the flip to `invoice_payments` ONLY (Fable rev-2 #3).** A booking-linked refund
+(§1.4 case 2) must NOT flip `scheduler_bookings.paymentStatus` to `"refunded"` from a webhook —
+booking gross would delete at `bookkeeping.ts:526` and the booking mirrors (`sales.ts:1760/1763`)
+are not enumerated here. For 9a, a booking-linked refund is **recorded** in `payment_refunds`
+(with `scheduler_booking_id`) and surfaced in net/reconciliation, but does not mutate booking
+status. (Booking-status refund handling is a deliberate later increment, not silently in scope.)
+
+**Guard the full-refund flip with `grossCollectedCents > 0` (Fable rev-2 #4 edge).** A paid row
+with zero gross must not flip on `0 >= 0`. The flip must also **preserve** the payment row's
+`paidAt`, `paidAmountCents`, `grossCollectedCents`, `netDepositCents` (only `status` changes) —
+zeroing any of them deletes P1 gross via the `paidAt`-scoped query and breaks the
+`invoiceClientPayableBalanceCents` dunning-stop.
 
 The status flip (and only the flip) sits behind the three-state `FINANCE_REFUND_RECORDING` flag
 (§5): at `record_only` the child tables + summary columns are written and surfaced in net
@@ -320,10 +361,20 @@ eventId }`. Register the new action strings anywhere activity actions are enumer
   gross fields unchanged (don't break current consumers/tests); add net alongside.
 - **`paymentLedgerNeedsReconciliation(row)`** (sales.ts:1526) currently flags paid rows
   missing external id / source. Extend to also flag: an **open dispute**, a **refund whose
-  amount exceeds recorded collected** (the over-cap case from 1.5), and an **orphaned refund/
-  dispute** (`invoice_payment_id IS NULL`). These appear in the `status=needs_reconciliation`
-  view and the agent finance report's `reconciliation` block (agent-finance.ts:334,
-  `buildReconciliationSummary` / `missingPaymentEvidence`).
+  amount exceeds recorded collected** (the over-cap case from 1.5), and a
+  **child-vs-summary divergence** (`refunded_amount_cents ≠ Σ succeeded child refunds`, §2.2).
+  These appear in the `status=needs_reconciliation` view and the agent finance report's
+  `reconciliation` block (agent-finance.ts:334, `buildReconciliationSummary` /
+  `missingPaymentEvidence`).
+- **Plumbing the view for refunded + orphaned rows (Fable rev-2 N2).** The
+  `status=needs_reconciliation` filter at `sales.ts:1630` maps to `eq(status,"paid")`, and
+  `missingPaymentEvidence` (agent-finance.ts:30) early-returns on non-paid — so a **refunded** row
+  carrying the divergence/over-cap flag would be invisible. **Widen that filter to
+  `inArray(status, ["paid","refunded"])`** and let the evidence check run for refunded rows.
+  **Orphaned** refunds/disputes (`invoice_payment_id IS NULL`) have no payment row and cannot be
+  `PaymentLedgerRow`s — surface them as a **dedicated "Unlinked money events" report section**
+  (its own query over `payment_refunds`/`payment_disputes WHERE invoice_payment_id IS NULL`), not
+  as ledger rows.
 
 ### 2.2 Net figures
 
@@ -523,6 +574,25 @@ Per Autonomous Build Loop guardrails 1 & 3:
   of sync). All `ALTER … ADD COLUMN` use `NOT NULL DEFAULT` (SQLite-safe, no table rewrite).
 - **Everything deploys dark/safe.** Backup D1 → capture Worker rollback version → apply 0089 →
   verify → deploy Worker + Pages-proxy → health-check → rollback-ready.
+
+### 5.1 Must-not-get-wrong at build time (Fable rev-2 build checklist)
+
+1. The `"refunded"` flip **preserves** `paidAt`, `paidAmountCents`, `grossCollectedCents`,
+   `netDepositCents` on the payment row — only `status` changes. Zeroing any deletes P1 gross
+   (paidAt-scoped query) and breaks the dunning-stop.
+2. **No `db.transaction` / `db.batch` for this flow.** Dedupe row written strictly AFTER
+   processing. Never gate the existing checkout branch behind the dedupe.
+3. **Monotonic guards (N1):** never decrease `refunded_amount_cents`; never demote a terminal
+   child-refund/dispute status from a reordered older event.
+4. **Fix ALL THREE `openCents` copies** (`invoice-balances.ts:56`, `project-finance.ts:67`,
+   `studio-mcp.ts:1437`) — ideally collapse into one shared helper — plus `dashboard.ts` metrics/
+   action-items and `crm.ts:623`. Refunded must read as settled everywhere, not just AR aging.
+5. Guard the full-refund flip with `grossCollectedCents > 0`; flip **`invoice_payments` only**,
+   never `scheduler_bookings` from a webhook.
+6. Divergence flag **computed at report read time, never persisted** (it self-heals when a
+   reordered `charge.refunded`/`refund.created` pair settles). Net subtracts `status='succeeded'`
+   child rows only, scoped by refund `created_at`. Widen the `needs_reconciliation` filter to
+   `["paid","refunded"]`; surface orphans as their own section.
 
 ---
 
