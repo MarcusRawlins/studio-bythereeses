@@ -1,11 +1,27 @@
 # Phase 10 — Intelligence + Forecasting (build-ready spec)
 
-Status: spec → Fable review (Rev 2 — REQUEST-CHANGES addressed) → build. Deploys **dark**. Moves
-ZERO money, writes ZERO canonical business rows. Next migration number: **0090** (0089 applied).
+Status: spec → Fable review ×2 (Rev 3 — confirmation-pass findings addressed) → build. Deploys
+**dark**. Moves ZERO money, writes ZERO canonical business rows. Next migration number: **0090**
+(0089 applied).
 
 This phase is **derived analytics** over data Phases 1–9a already persist. Every number is
 recomputed at read time from the existing ledgers, projects, proposals, events, and bookings.
 Nothing here is a new source of truth.
+
+### Rev 3 (Fable confirmation pass) — 3 residual/new items addressed
+
+All 9 rev-2 findings were confirmed resolved. The focused re-review found the blank-email edge the
+F4 rework invited, plus two consistency slips:
+- **§3.2 zero-key identity (MAJOR, new):** an email key is emitted ONLY when `trim(email)` is
+  non-empty (inbound email = `parsedEmail`, nullable); a row with **zero** keys is its own **singleton**
+  identity — never a bare `email:` key that would union every blank-email row into one giant identity.
+  §8 zero-key-singleton test added. (Bookings always carry an email, so only unparsed inbounds hit this.)
+- **§3.1A reconciliation exactness (MINOR):** carry-in/contracted now partition purely by `dueDate`
+  over rows with `openCents > 0` (no independent status re-filter) — a refunded *booking* keeps
+  `openCents > 0`, so a status filter would break the `== totals.openCents` invariant. §8 fixture adds a
+  refunded consult booking.
+- **§8 cold-start (MINOR):** corrected "`< 3` emits contracted-only" → "`== 0` emits contracted-only"
+  (1–2 datapoints show a labeled low-confidence run-rate, matching §3.1B).
 
 ### Rev 2 (Fable spec-review) — REQUEST-CHANGES addressed
 
@@ -121,30 +137,38 @@ Money in cents throughout. All month bucketing uses UTC `YYYY-MM` on the relevan
 
 **Two explicitly separated components; never one blended hero number.**
 
-**(A) Contracted pipeline (facts).** For each month `m` in the horizon
-`[thisMonth, thisMonth + H)`:
+**(A) Contracted pipeline (facts).** Partition **purely by `dueDate`** the set of ledger rows with
+`openCents > 0` — do NOT apply an independent `status ∉ {…}` re-filter. This matters:
+`totals.openCents` sums every row's `openCents`, but a **refunded scheduler booking** still has
+`openCents > 0` (booking rows zero `openCents` only for `paid`/`waived`, sales.ts:1852 — unlike invoice
+rows, which `isSettledInvoicePaymentStatus` forces to 0 for `refunded` too). A status re-filter would
+drop that refunded-booking row from both carry-in and contracted while `totals.openCents` still counts
+it, breaking the reconciliation invariant on reachable data. Keying off `openCents > 0` makes the
+partition exactly match the total. For each month `m` in `[thisMonth, thisMonth + H)`:
 ```
 contractedCents[m] = Σ paymentLedger.rows[r].openCents
-                     where r.payment.dueDate ∈ month m
-                     and r.payment.status ∉ {paid, waived, refunded}
+                     where r.openCents > 0 and r.payment.dueDate ∈ month m
 ```
-Source: `getPaymentLedgerReport({status:"all"})`. `openCents` already excludes settled/refunded.
-Confidence: `high` (these are signed, scheduled receivables).
+Source: `getPaymentLedgerReport({status:"all"})` — its `openCents` is the single source of truth for
+"still owed" (already 0 for settled invoice payments). Confidence: `high` (signed, scheduled receivables).
 
 **Carry-in (overdue + unscheduled receivables).** The horizon buckets only capture payments whose
-`dueDate` falls *inside* `[thisMonth, thisMonth + H)`. Open payments with a **past** `dueDate`
-(overdue AR) or a **NULL** `dueDate` (signed but unscheduled) fall into no bucket and would silently
-vanish — so a $3,000 overdue final payment reads as $0 here while the adjacent AR aging report shows
-$3,000 open (two fact surfaces contradicting). Emit an explicit, separately-labeled carry-in fact:
+`dueDate` falls *inside* `[thisMonth, thisMonth + H)`. Open rows (`openCents > 0`) with a **past**
+`dueDate` (overdue AR) or a **NULL** `dueDate` (signed but unscheduled) fall into no bucket and would
+silently vanish — so a $3,000 overdue final payment reads as $0 here while the adjacent AR aging report
+shows $3,000 open (two fact surfaces contradicting). Emit an explicit, separately-labeled carry-in fact,
+using the same `openCents > 0` keying (no status re-filter):
 ```
 carryInCents = Σ paymentLedger.rows[r].openCents
-               where r.payment.status ∉ {paid, waived, refunded}
+               where r.openCents > 0
                and (r.payment.dueDate < thisMonth OR r.payment.dueDate IS NULL)
 ```
 Render `carryInCents` as its own line ("overdue + unscheduled receivables: $X"), never merged into a
 monthly bucket. **Reconciliation invariant** (required §8 test): over an unbounded horizon,
-`carryInCents + Σ_m contractedCents[m] == getPaymentLedgerReport().totals.openCents` — every open
-receivable is accounted for exactly once.
+`carryInCents + Σ_m contractedCents[m] == getPaymentLedgerReport().totals.openCents` — a disjoint
+`dueDate` partition (past/NULL vs in-horizon month) of exactly the `openCents > 0` rows, so every open
+receivable is accounted for exactly once. Include a refunded-consult-booking row in the §8 fixture to
+lock this edge.
 
 **(B) Statistical projection.**
 ```
@@ -197,10 +221,20 @@ and the admin later creates the project.
 
 Phase 10 instead builds identity as a **KEY-SET UNION**:
 - each inquiry row emits **every** key it carries — `project:<id>`, `client:<id>`,
-  `email:<lower(trim(email))>` (a row may emit 1–3 keys);
+  `email:<lower(trim(email))>` (a row may emit **0–3** keys). The inbound-inquiry email key is sourced
+  from `inbound_inquiries.parsedEmail` (both `parsedEmail` and `projectId` are nullable, schema.ts:647-679).
+- **An email key is emitted ONLY when `trim(email)` is non-empty.** A null/blank/whitespace email emits
+  **no** email key — never a bare `email:` key (otherwise every blank-email row would union into one
+  giant identity and mass-undercount inquiries). Scheduler bookings always carry an email
+  (`scheduler_bookings.attendeeEmail` NOT NULL, schema.ts:174; booking creation rejects a missing email,
+  scheduler.ts:835), so a booking always emits at least an email key; only an unparseable/unlinked
+  inbound can reach zero keys.
+- **A row with zero keys forms its own singleton identity** — it counts as exactly one inquiry, is never
+  merged with another row, and is never dropped or allowed to crash the union.
 - rows that share **any** key are merged into one identity (connected components / union-find over the
-  key graph). One couple who emails (email-only inbound), books a discovery call (email-only booking),
-  and later becomes a project (whose client's email matches) collapses to a **single** identity.
+  key graph — transitive: A↔email↔B, B↔client↔C ⇒ all one identity; order-independent). One couple who
+  emails (email-only inbound), books a discovery call (email-only booking), and later becomes a project
+  (whose client's email matches) collapses to a **single** identity.
 
 An inquiry cohort for window `W` = distinct **merged** identities whose **earliest touch** falls in
 `W`, drawn from:
@@ -508,8 +542,8 @@ flips after an observation window. MVP may skip the tile entirely; if built, it 
 `src/lib/intelligence.test.ts` — formula + honesty unit tests:
 - **Cold-start labeling (F2)**: keyed on `dataPoints` = fully-elapsed months since the first settled
   money event (min `paidAt` over status ∈ {paid,refunded}), NOT a fixed window length. Assert
-  `0 / 1 / 3 / 24` datapoints → `insufficient_data` / `low` / `medium` / `high`; `< 3` emits
-  contracted-only. Critically: a studio with a single $8,000 month reads `baseRunRateCents == $8,000`
+  `0 / 1 / 3 / 24` datapoints → `insufficient_data` / `low` / `medium` / `high`; only `== 0` emits
+  contracted-only (1–2 datapoints show a labeled low-confidence run-rate, per §3.1(B)). Critically: a studio with a single $8,000 month reads `baseRunRateCents == $8,000`
   (1 datapoint, `low`), **not** the diluted `mean([0,0,0,0,0,8000]) == $1,333` — pre-activity zero
   months are never averaged in.
 - **Carry-in reconciliation (F3)**: an open payment with a **past** dueDate and one with a **NULL**
@@ -527,6 +561,9 @@ flips after an observation window. MVP may skip the tile entirely; if built, it 
   converts, not undercounts). Spam inbound excluded; `< 5` inquiries → counts not percentage; cohorts
   younger than the maturation window (default 28 days) marked `still maturing` and the window value
   appears in `method`.
+- **Zero-key singleton identity (F4 edge)**: two separate inbound inquiries each with a null/blank
+  `parsedEmail` and no `projectId`/`clientId` stay **two** distinct identities (each is its own
+  singleton) — they must NOT union into one via a bare `email:` key. Assert the inquiry count is 2, not 1.
 - **Lead-source (F1)**: a refunded payment **reduces** its source's `netCollectedCents` (a
   fully-refunded booking contributes $0, does NOT credit full gross); a project with **no primary
   participant** lands in `Unknown`; null/blank `referralSource` → `Unknown`; taxonomy maps
