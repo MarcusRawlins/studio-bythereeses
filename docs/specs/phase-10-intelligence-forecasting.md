@@ -1,11 +1,37 @@
 # Phase 10 — Intelligence + Forecasting (build-ready spec)
 
-Status: spec → Fable review → build. Deploys **dark**. Moves ZERO money, writes ZERO
-canonical business rows. Next migration number: **0090** (0089 applied).
+Status: spec → Fable review (Rev 2 — REQUEST-CHANGES addressed) → build. Deploys **dark**. Moves
+ZERO money, writes ZERO canonical business rows. Next migration number: **0090** (0089 applied).
 
 This phase is **derived analytics** over data Phases 1–9a already persist. Every number is
 recomputed at read time from the existing ledgers, projects, proposals, events, and bookings.
 Nothing here is a new source of truth.
+
+### Rev 2 (Fable spec-review) — REQUEST-CHANGES addressed
+
+Adversarial review returned REQUEST-CHANGES; each fix below is verified against the cited code.
+
+- **F1 (§3.3 lead-source refund honesty):** per-source money is now Σ of per-ledger-row
+  refund-adjusted `netCollectedCents` (gross − refunded − disputeLost, `sales.ts:1569-1576`), NOT
+  `getAgentFinanceReport().netDepositCents` (raw sum, no refund subtraction, `agent-finance.ts:262`).
+  Fields renamed `netCollectedCents`/`collectedProfitCents`; projects with no primary participant (or
+  a participant lacking a client row) land in `Unknown`. §8 test added: a refund reduces its source's figure.
+- **F2 (§3.1B cold-start):** ladder + mean now driven by `dataPoints` = fully-elapsed months since the
+  first settled money event (not a fixed-length zero-padded history); pre-history zero months are never
+  averaged in. §8 0/1/3/24-datapoint tests re-pointed at this definition.
+- **F3 (§3.1A carry-in):** added `carryInCents` for overdue + null-dueDate open receivables so the
+  forecast no longer contradicts AR aging; §8 reconciliation invariant added.
+- **F4 (§3.2 dedup):** identity is now a KEY-SET UNION (merge on any shared project/client/email key),
+  replacing first-match `inquiryIdentity`; email-only inbounds now correctly merge + convert. §8 fixture
+  adds an unlinked booking + unlinked inbound sharing only an email with a project's primary client.
+- **F5 (§3.2 maturation window):** N defined (default 28 days / observed median lag), stated in `method`.
+- **F6 (§3.4 package value):** pick earliest-created linked invoice per accepted proposal (fallback
+  `proposals.totalCents`); never sum multiple linked invoices. §8 two-linked-invoices test added.
+- **F7 (§3.5 event types):** count ALL `project_events` (rehearsal included); the unimplementable
+  "other-non-call" bucket removed.
+- **F8 (§5 citation):** corrected — there is NO existing `app_settings` column block; model the new
+  block on the **vendors** block (lines 900–906), not a nonexistent 9a app_settings block.
+- **F9 (§3.1B clamp):** non-positive run-rate short-circuits to `projectedCents=0` / `low` / `note`.
 
 ---
 
@@ -105,37 +131,79 @@ contractedCents[m] = Σ paymentLedger.rows[r].openCents
 Source: `getPaymentLedgerReport({status:"all"})`. `openCents` already excludes settled/refunded.
 Confidence: `high` (these are signed, scheduled receivables).
 
+**Carry-in (overdue + unscheduled receivables).** The horizon buckets only capture payments whose
+`dueDate` falls *inside* `[thisMonth, thisMonth + H)`. Open payments with a **past** `dueDate`
+(overdue AR) or a **NULL** `dueDate` (signed but unscheduled) fall into no bucket and would silently
+vanish — so a $3,000 overdue final payment reads as $0 here while the adjacent AR aging report shows
+$3,000 open (two fact surfaces contradicting). Emit an explicit, separately-labeled carry-in fact:
+```
+carryInCents = Σ paymentLedger.rows[r].openCents
+               where r.payment.status ∉ {paid, waived, refunded}
+               and (r.payment.dueDate < thisMonth OR r.payment.dueDate IS NULL)
+```
+Render `carryInCents` as its own line ("overdue + unscheduled receivables: $X"), never merged into a
+monthly bucket. **Reconciliation invariant** (required §8 test): over an unbounded horizon,
+`carryInCents + Σ_m contractedCents[m] == getPaymentLedgerReport().totals.openCents` — every open
+receivable is accounted for exactly once.
+
 **(B) Statistical projection.**
 ```
 trailingMonths      = settings.forecastTrailingMonths (default 6)
-history[]           = for each of the last `trailingMonths` fully-elapsed months,
-                      getBookkeepingReport(monthBounds).totals.netRevenueCents
-baseRunRateCents    = mean(history)                         // trailing arithmetic mean
-seasonalIndex[m]    = (only if ≥24 months history) monthAvg[calMonth(m)] / overallMonthlyAvg
+firstActivityMonth  = YYYY-MM of the earliest settled money event — min(paidAt) over ledger rows
+                      whose status ∈ {paid, refunded} (the first real money movement, refund included)
+dataPoints          = count of fully-elapsed months from firstActivityMonth through the last-closed
+                      month, capped at trailingMonths (0 if there is no settled money event yet)
+history[]           = getBookkeepingReport(monthBounds).totals.netRevenueCents for each of the last
+                      `dataPoints` fully-elapsed months — i.e. ONLY months at/after firstActivityMonth.
+                      NEVER pad with pre-activity zero months (history.length === dataPoints).
+baseRunRateCents    = dataPoints > 0 ? mean(history) : 0    // trailing mean over real months only
+seasonalIndex[m]    = (only if dataPoints ≥ 24) monthAvg[calMonth(m)] / overallMonthlyAvg
 projectedCents[m]   = round(baseRunRateCents × (seasonalIndex[m] ?? 1))
 ```
-Horizon `H = settings.forecastHorizonMonths` (default 3).
+Horizon `H = settings.forecastHorizonMonths` (default 3). **Why not a fixed-length history:** an
+empty month returns `0`, not absence, so a fixed "last 6 months" window always yields 6 entries and
+the cold-start branches would never fire — a 1-month-old studio with one $8,000 month would read
+`mean([0,0,0,0,0,8000]) = $1,333/mo` at MEDIUM confidence (a diluted run-rate, forbidden by §2.3).
+Driving both the mean and the ladder off `dataPoints` makes that studio read **$8,000/mo, 1
+datapoint, low confidence**.
 
-**Cold-start / low-confidence:**
-- `history.length == 0` → `confidence: insufficient_data`; emit **only** component (A); projection
+**Cold-start / low-confidence (all keyed on `dataPoints`, not a fixed window length):**
+- `dataPoints == 0` → `confidence: insufficient_data`; emit **only** component (A); projection
   section shows "Not enough revenue history to project — showing contracted pipeline only."
-- `1 ≤ history.length < 3` → `confidence: low`; show `baseRunRateCents` with a prominent
-  "based on N month(s) — directional only" label; **no** seasonal adjustment.
-- `3 ≤ history.length < 24` → `confidence: medium`; run-rate, no seasonal index.
-- `≥24 months` → `confidence: high` for the seasonal-adjusted run-rate.
-- Guard against wild extrapolation: `projectedCents[m]` is clamped to
-  `[0, 4 × baseRunRateCents]`; a clamp event flips that month's confidence to `low` and sets a
-  `note`.
+- `1 ≤ dataPoints < 3` → `confidence: low`; show `baseRunRateCents` (the mean of the real months
+  only) with a prominent "based on N month(s) — directional only" label; **no** seasonal adjustment.
+- `3 ≤ dataPoints < 24` → `confidence: medium`; run-rate, no seasonal index.
+- `dataPoints ≥ 24` → `confidence: high` for the seasonal-adjusted run-rate.
+- **Non-positive run-rate (F9):** if `baseRunRateCents ≤ 0` (a refund-heavy trailing window can push
+  `netRevenueCents` negative → the clamp upper bound `4 × baseRunRateCents` would invert), short-circuit:
+  `projectedCents[m] = 0`, `confidence: low`, and set a `note` ("Trailing net revenue is non-positive —
+  projection suppressed"). Do NOT apply the standard clamp in this case.
+- Guard against wild extrapolation (only when `baseRunRateCents > 0`): `projectedCents[m]` is clamped
+  to `[0, 4 × baseRunRateCents]`; a clamp event flips that month's confidence to `low` and sets a `note`.
 
-Output per month: `{ month, contractedCents, projectedCents, confidence, note }` plus a
-`method` string.
+Output: a top-level `{ carryInCents, dataPoints, method }` plus a per-month array of
+`{ month, contractedCents, projectedCents, confidence, note }`. `carryInCents` (§3.1(A)) renders as a
+labeled fact separate from the monthly buckets; `dataPoints` (not the raw window length) drives the
+confidence ladder above.
 
 ### 3.2 Booking-conversion rate
 
-**Denominator (inquiries).** Reuse the existing identity dedup from `getDashboardMetrics`
-(`src/lib/dashboard.ts:383`, `inquiryIdentity`): key = `project:<id>` ‖ `client:<id>` ‖
-`email:<lower(email)>` ‖ `booking:<id>` fallback. An inquiry cohort for window `W` =
-distinct identities whose **first touch** falls in `W`, drawn from:
+**Denominator (inquiries).** Do **NOT** reuse `inquiryIdentity` (`src/lib/dashboard.ts:15-28`) as
+the dedup key. It is **first-match precedence** (`project:` > `client:` > `email:`), so a project row
+always keys `project:<id>` while an unlinked scheduler booking or inbound inquiry that shares only the
+couple's email keys `email:…` — the same couple then counts **twice**. This is the common flow: a
+couple emails (email-only inbound), books a discovery call from the public link (no projectId/clientId),
+and the admin later creates the project.
+
+Phase 10 instead builds identity as a **KEY-SET UNION**:
+- each inquiry row emits **every** key it carries — `project:<id>`, `client:<id>`,
+  `email:<lower(trim(email))>` (a row may emit 1–3 keys);
+- rows that share **any** key are merged into one identity (connected components / union-find over the
+  key graph). One couple who emails (email-only inbound), books a discovery call (email-only booking),
+  and later becomes a project (whose client's email matches) collapses to a **single** identity.
+
+An inquiry cohort for window `W` = distinct **merged** identities whose **earliest touch** falls in
+`W`, drawn from:
 - `projects` created in `W` with stage ∈ {`inquiry`,`proposal_sent`} (or any stage — a project
   that jumped straight to booked still had an inquiry moment; include all projects created in `W`
   and classify by outcome),
@@ -143,18 +211,23 @@ distinct identities whose **first touch** falls in `W`, drawn from:
 - `inbound_inquiries` received in `W` with status ∉ {`spam`,`dismissed`} (8a staging — count the
   human inquiry, exclude spam).
 
-Dedup across all three by identity so one couple emailing + booking a call + becoming a project
-counts **once**.
+The key-set union guarantees one couple emailing + booking a call + becoming a project counts
+**once** even when the booking/inbound carry no project or client id.
 
 **Numerator (booked).** An inquiry identity is `booked` if its project reached a booked
 milestone: `proposals.status = 'accepted'` (has `acceptedAt`/`signedAt`) **OR** project stage ∈
 {`retainer_paid`,`planning`,`editing`,`delivered`,`completed`} (the `RETAINER_STAGE_PRECEDENCE`
 ranks in `src/lib/sales.ts:92`). Booked date = `acceptedAt` (fallback: first retainer `paidAt`).
+Because identity is a key-set union, an email-only inbound or an unlinked booking is marked `booked`
+when it shares a key (email or client) with a booked project — otherwise the numerator would
+undercount conversions that never carried a projectId on the inbound/booking row.
 
 **Two reported figures (label both honestly):**
 1. **Cohort conversion** (primary): of inquiries first-touched in `W`, the % booked *to date*.
-   Carries a **lag caveat** — recent cohorts are still maturing, so the last N weeks are marked
-   `still maturing` and excluded from the headline rate.
+   Carries a **lag caveat** — recent cohorts are still maturing, so cohorts younger than the
+   **maturation window** (default **28 days**; if ≥ a handful of booked inquiry→booked pairs exist,
+   use the observed **median inquiry→booked lag** instead) are marked `still maturing` and excluded
+   from the headline rate. The exact window value used is stated in the metric's `method` string.
 2. **Period run-rate ratio** (secondary, labeled approximate):
    `bookings dated in W / inquiries first-touched in W` — fast but mixes cohorts.
 
@@ -175,13 +248,26 @@ bucket = taxonomy[lower(raw)] ?? titleCaseKnown(raw) ?? raw
 if !raw → bucket = "Unknown"
 ```
 `taxonomy` comes from `settings.leadSourceTaxonomyJson` (optional; default `{}` → identity map).
-Blank/null always lands in the explicit **`Unknown`** bucket (never silently dropped).
+Blank/null `referralSource` — **and** any project with no primary participant, or whose primary
+participant has no `clients` row — always lands in the explicit **`Unknown`** bucket (never silently
+dropped, and never keyed off a missing referralSource alone).
 
-**Per bucket:** `{ source, projectCount, bookedCount, netRevenueCents, avgPackageValueCents }`.
-- `netRevenueCents` = Σ over that source's projects of the project's collected net
-  (`projectFinancials[p].netDepositCents − paidExpenseCents`, from `getAgentFinanceReport`), so it
-  reconciles with the finance report and respects refunds.
-- Sorted by `netRevenueCents` desc; `Unknown` always rendered (even at 0) so sparsity is visible.
+**Per bucket:** `{ source, projectCount, bookedCount, netCollectedCents, collectedProfitCents, avgPackageValueCents }`.
+- `netCollectedCents` = Σ over that source's **ledger rows** (`getPaymentLedgerReport`) of the
+  per-row refund-adjusted `netCollectedCents` (= `gross − refunded − disputeLost`; the
+  `ledgerNetCollectedCents` math at `src/lib/sales.ts:1569-1576`), grouped by each row's
+  project → primary participant → `referralSource`. This is the **only** figure that respects
+  refunds: a fully-refunded $5,000 wedding contributes **$0** to its source (the retroactive-refund
+  dishonesty class 9a fixed). **Do NOT** use
+  `getAgentFinanceReport().projectFinancials[p].netDepositCents` — it sums raw
+  `payment.netDepositCents` with **no** refund / lost-dispute subtraction (`agent-finance.ts:262`)
+  and would credit a refunded booking its full gross.
+- `collectedProfitCents` = `netCollectedCents − Σ paidExpenseCents` (paidExpenseCents per project
+  from `getAgentFinanceReport`) — collected **profit**, labeled as such. Never name either field
+  `netRevenueCents`: `netDepositCents − paidExpenseCents` is collected profit, not revenue, and will
+  not reconcile with `getBookkeepingReport().totals.netRevenueCents` (which is period-scoped, not
+  project-scoped). `collectedProfitCents` is optional — ship `netCollectedCents` at minimum.
+- Sorted by `netCollectedCents` desc; `Unknown` always rendered (even at 0) so sparsity is visible.
 
 **Cold-start / sparsity:** buckets with `projectCount < 3` are grouped-visible but flagged
 `sparse` (one big wedding shouldn't crown a source). If `Unknown` ≥ 50% of projects, surface a
@@ -189,7 +275,7 @@ banner: "Lead source is unknown for N of M projects — capture referral source 
 report." (Actionable, not a fake number.)
 
 **Optional future ROI:** if a bucket in `leadSourceTaxonomyJson` carries `spendCents`, additionally
-emit `roi = netRevenueCents / spendCents` for that bucket only, labeled. MVP ships taxonomy with
+emit `roi = netCollectedCents / spendCents` for that bucket only, labeled. MVP ships taxonomy with
 label-mapping only; spend is a later admin follow-up (no code change needed beyond reading the
 field).
 
@@ -199,8 +285,15 @@ field).
 resolves to a proposal with `status = 'accepted'`, bucketed by `proposals.acceptedAt` month.
 Rationale: `syncUnpaidProposalInvoicesToAcceptedTotal` (`src/lib/sales.ts:229`) keeps the invoice
 total equal to the accepted proposal total including selected optionals, so the invoice total is
-the truest "what they actually booked". **Fallback** when no linked invoice: `proposals.totalCents`
-(note: may predate optional-line-item selection — flag such rows `estimated`).
+the truest "what they actually booked".
+
+**Pick exactly ONE invoice per accepted proposal.** A proposal can have **multiple** linked
+invoices, and `syncUnpaidProposalInvoicesToAcceptedTotal` (`src/lib/sales.ts:240-273`) loops over
+**every** linked invoice and syncs each one to the full accepted total — so summing linked invoices
+would count the package value once per invoice (double-count). Picker: the **earliest-created**
+linked invoice (`order by createdAt asc, id asc`) is the booked value. **Fallback** when no linked
+invoice: `proposals.totalCents` (note: may predate optional-line-item selection — flag such rows
+`estimated`). Never sum multiple linked invoices for one proposal.
 
 ```
 avgPackageValueCents[month] = mean(bookedContractCents for proposals accepted in month)
@@ -219,9 +312,15 @@ show the raw list.
 **Shootable events per month** (calls are not shoots — exclude `scheduler_bookings`; use
 `project_events` + `projects.eventDate`):
 ```
-eventsByMonth[YYYY-MM] = count of project_events with eventDate in that month
-                         and type ∈ {wedding, engagement, portrait, other-non-call}
+eventsByMonth[YYYY-MM] = count of ALL project_events with eventDate in that month
 ```
+No event-type filter is applied. `project_events` never contains calls — calls live only in
+`scheduler_bookings`, which is already excluded — and `project_events.type` is free text defaulting
+to `wedding` with the known vocabulary `{engagement, wedding, rehearsal, portrait}`
+(`src/app/projects/[id]/page.tsx:32`). There is **no** `call`-type project_event, and there is no
+"other-non-call" value to filter on. Counting every `project_events` row is both simplest and
+correct. (If a type filter is ever wanted, enumerate the exact include list **including
+`rehearsal`** — never the unimplementable "other-non-call".)
 **Seasonal index (YoY):** requires `≥2` calendar years of event history:
 ```
 calMonthAvg[1..12] = mean events in that calendar month across years with data
@@ -283,7 +382,12 @@ ALTER TABLE app_settings ADD COLUMN lead_source_taxonomy_json TEXT;       -- cod
 Mirror into **all four** places (drift guard):
 1. `src/db/schema.ts` — add the four columns to `appSettings` (nullable `integer`/`text`).
 2. `src/db/studio-canon.test.ts` — add a `columnNames("app_settings")` assertion block for the
-   four columns (matches the existing 9a block at lines 900–906).
+   four columns, modeled on the existing **vendors** column block (lines 900–906). Note: there is
+   **no** existing `app_settings` *column* block to copy — lines 890–899 assert `invoice_payments`
+   columns and 900–906 assert `vendors` columns; `app_settings` today carries only *trigger*
+   assertions (lines 185–197), not column assertions. (Optional cleanup while here: backfill column
+   assertions for the three 9a `app_settings` finance-rate columns — tax set-aside %, mileage ¢,
+   1099 threshold — which currently ship unasserted.)
 3. `src/db/client.ts` dev migrate — four `addColumnIfMissing(database, "app_settings", …)` calls
    in the 0090 section (helper at `src/db/client.ts:23`; identical to the 0089 calls at 746–752).
 4. The migration file above.
@@ -402,22 +506,39 @@ flips after an observation window. MVP may skip the tile entirely; if built, it 
 ## 8. Test plan (tsx + build-exit-code gate)
 
 `src/lib/intelligence.test.ts` — formula + honesty unit tests:
-- **Cold-start labeling**: 0 / 1 / 3 / 24+ months history → correct `confidence`
-  (`insufficient_data`/`low`/`medium`/`high`) and that `< 3` months emits contracted-only.
-- **Extrapolation clamp**: a spiky trailing month cannot push `projectedCents` above `4×` run-rate;
-  clamp flips confidence `low`.
+- **Cold-start labeling (F2)**: keyed on `dataPoints` = fully-elapsed months since the first settled
+  money event (min `paidAt` over status ∈ {paid,refunded}), NOT a fixed window length. Assert
+  `0 / 1 / 3 / 24` datapoints → `insufficient_data` / `low` / `medium` / `high`; `< 3` emits
+  contracted-only. Critically: a studio with a single $8,000 month reads `baseRunRateCents == $8,000`
+  (1 datapoint, `low`), **not** the diluted `mean([0,0,0,0,0,8000]) == $1,333` — pre-activity zero
+  months are never averaged in.
+- **Carry-in reconciliation (F3)**: an open payment with a **past** dueDate and one with a **NULL**
+  dueDate both land in `carryInCents`, not dropped; over an unbounded horizon
+  `carryInCents + Σ_m contractedCents[m] == getPaymentLedgerReport().totals.openCents`.
+- **Extrapolation clamp (F9)**: a spiky trailing month cannot push `projectedCents` above `4×`
+  run-rate; clamp flips confidence `low`. Non-positive run-rate (refund-heavy window,
+  `baseRunRateCents ≤ 0`) → `projectedCents == 0`, `confidence: low`, `note` set (no inverted clamp).
 - **Refund honesty**: a refund in the trailing window lowers `netRevenueCents` on the money-event
   month, not the original month; forecast uses the net series (asserts we did NOT use a paid-only
   query).
-- **Conversion dedup**: one couple as project + booking + inbound inquiry counts once; spam
-  inbound excluded; `< 5` inquiries → counts not percentage; cohort lag marks recent weeks
-  `still maturing`.
-- **Lead-source**: null/blank `referralSource` → `Unknown` bucket; taxonomy maps raw→canonical;
-  `Unknown ≥ 50%` sets the banner flag; revenue reconciles with `getAgentFinanceReport`.
-- **Package value**: accepted-invoice total preferred over `proposals.totalCents`; `< 2`
-  bookings/month marked `thin`; declined/expired excluded.
-- **Seasonal**: `< 2 years` → index `insufficient_data`, raw counts shown; utilization only when
-  target set; calls excluded.
+- **Conversion dedup (F4/F5)**: fixture includes an **unlinked booking + unlinked inbound sharing
+  only an email** with a project's primary client — the key-set union merges all three into one
+  identity, counted **once**, and marked `booked` via the project (proves an email-only inbound
+  converts, not undercounts). Spam inbound excluded; `< 5` inquiries → counts not percentage; cohorts
+  younger than the maturation window (default 28 days) marked `still maturing` and the window value
+  appears in `method`.
+- **Lead-source (F1)**: a refunded payment **reduces** its source's `netCollectedCents` (a
+  fully-refunded booking contributes $0, does NOT credit full gross); a project with **no primary
+  participant** lands in `Unknown`; null/blank `referralSource` → `Unknown`; taxonomy maps
+  raw→canonical; `Unknown ≥ 50%` sets the banner flag; `netCollectedCents` equals Σ of per-ledger-row
+  `netCollectedCents` and does **NOT** equal `getAgentFinanceReport().netDepositCents` for a source
+  that had a refund.
+- **Package value (F6)**: accepted-invoice total preferred over `proposals.totalCents`; a proposal
+  with **two linked invoices** contributes **one** booked value (earliest-created), never the sum;
+  `< 2` bookings/month marked `thin`; declined/expired excluded.
+- **Seasonal (F7)**: all `project_events` counted (a `rehearsal` event is included, not dropped);
+  `< 2 years` → index `insufficient_data`, raw counts shown; utilization only when target set; calls
+  (scheduler_bookings) excluded.
 - **CSV**: header/row shape, cents formatting, `method`/`confidence` present in footer.
 
 Existing suites must stay green: `bookkeeping.test.ts`, `dashboard-metrics.test.ts`,
