@@ -965,6 +965,7 @@ async function main() {
       && columnNames("refund_initiations").has("stripe_refund_id")
       && columnNames("refund_initiations").has("stripe_payment_intent_id")
       && columnNames("refund_initiations").has("error_message")
+      && columnNames("refund_initiations").has("claim_token")
       && columnNames("refund_initiations").has("initiated_by"),
     "refund_initiations should carry the money-critical audit/idempotency columns",
   );

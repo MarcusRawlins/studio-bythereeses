@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS refund_initiations (
   service_not_rendered_confirmed INTEGER NOT NULL DEFAULT 0,  -- P10/§3.9: admin affirmed service was NOT rendered (1) before the money-moving call
   stripe_reason                  TEXT,                         -- requested_by_customer | duplicate | fraudulent
   status                         TEXT NOT NULL DEFAULT 'pending', -- pending | submitting | succeeded | failed
+  claim_token                    TEXT,                         -- per-execute nonce; only the CAS winner (whose token survives the re-read) may POST/finalize (concurrency guard)
   stripe_refund_id               TEXT,                         -- re_... returned by Stripe (read-only cross-ref)
   error_message                  TEXT,                         -- cleaned Stripe error (capped)
   initiated_by                   TEXT,                         -- admin identity (actorName)

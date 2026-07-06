@@ -607,6 +607,7 @@ export const refundInitiations = sqliteTable("refund_initiations", {
   serviceNotRenderedConfirmed: integer("service_not_rendered_confirmed").notNull().default(0), // P10/§3.9 affirmation
   stripeReason: text("stripe_reason"), // requested_by_customer | duplicate | fraudulent
   status: text("status").notNull().default("pending"), // pending | submitting | succeeded | failed
+  claimToken: text("claim_token"), // per-execute nonce; only the CAS winner (whose token survives the re-read) may POST/finalize
   stripeRefundId: text("stripe_refund_id"), // re_... (read-only cross-ref; canonical lives in payment_refunds)
   errorMessage: text("error_message"), // cleaned Stripe error (capped)
   initiatedBy: text("initiated_by"), // admin identity (actorName)

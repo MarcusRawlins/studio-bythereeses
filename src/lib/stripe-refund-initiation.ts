@@ -151,7 +151,11 @@ function isRetainerPayment(payment: InvoicePaymentRow, allPayments: InvoicePayme
 // initiation row) and a fresh 9b refund (counted locally, webhook not landed) are DISJOINT;
 // plain max drops the smaller and over-permits by up to clientFeeCents. See §9.22.
 // ---------------------------------------------------------------------------
-async function computeMaxRefundableCents(payment: InvoicePaymentRow) {
+// Returns the SERVICE ceiling and the (UNCLAMPED) already-refunded total on the service basis.
+// Exposing `alreadyRefundedServiceCents` unclamped lets the execute path re-check for a
+// concurrent overshoot AFTER claiming its own row (two DISTINCT initiations racing — Fable
+// code-review finding 2): once both rows are 'submitting' the sum can exceed the ceiling.
+async function computeRefundExposure(payment: InvoicePaymentRow) {
   const serviceCollectedCents = Math.max(payment.paidAmountCents, 0); // SERVICE the studio kept
   const webhookRefundedCents = Math.max(payment.refundedAmountCents, 0);
 
@@ -182,6 +186,11 @@ async function computeMaxRefundableCents(payment: InvoicePaymentRow) {
     webhookRefundedCents,
     localInFlightRefundedCents + externalRefundedCents,
   );
+  return { serviceCollectedCents, alreadyRefundedServiceCents };
+}
+
+async function computeMaxRefundableCents(payment: InvoicePaymentRow) {
+  const { serviceCollectedCents, alreadyRefundedServiceCents } = await computeRefundExposure(payment);
   return Math.max(serviceCollectedCents - alreadyRefundedServiceCents, 0);
 }
 
@@ -233,13 +242,13 @@ async function logInitiationFailed(projectId: string | null, meta: {
   amountCents: number;
   errorMessage: string;
   initiationId: string | null;
-}) {
+}, actorName?: string) {
   try {
     await logActivity({
       projectId,
       action: "invoice.payment_refund_initiation_failed",
       actorType: "admin",
-      actorName: "Tyler Reese",
+      actorName: actorName ?? "Tyler Reese",
       metadata: {
         paymentId: meta.paymentId,
         amountCents: meta.amountCents,
@@ -273,10 +282,22 @@ export async function prepareInvoicePaymentRefund({
     throw new Error("Refunds are admin-only and cannot be initiated by agents or system actors.");
   }
 
-  const { payment, paymentIntentId } = await resolveEligiblePayment(invoiceId, paymentId);
+  // Audit prepare-path rejections too (§3.7 / Fable finding 3) — a blocked retainer / ineligible
+  // / zero-balance attempt is a security-relevant event, not a silent no-op.
+  let payment;
+  let paymentIntentId;
+  try {
+    ({ payment, paymentIntentId } = await resolveEligiblePayment(invoiceId, paymentId));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Refund is not eligible.";
+    await logInitiationFailed(null, { paymentId, amountCents: 0, errorMessage: message, initiationId: null }, actorName ?? undefined);
+    throw error;
+  }
   const maxRefundableCents = await computeMaxRefundableCents(payment);
   if (maxRefundableCents <= 0) {
-    throw new Error("No refundable service balance remains on this payment.");
+    const message = "No refundable service balance remains on this payment.";
+    await logInitiationFailed(null, { paymentId, amountCents: 0, errorMessage: message, initiationId: null }, actorName ?? undefined);
+    throw new Error(message);
   }
 
   const id = crypto.randomUUID();
@@ -420,9 +441,12 @@ export async function initiateInvoicePaymentRefund({
   const cleanStripeReason = normalizedStripeReason(stripeReason);
   const now = new Date().toISOString();
 
-  // (8) CAS claim pending → submitting, PINNING the amount, in ONE UPDATE, BEFORE the network
-  //     call (M3). The Stripe request then sends the ROW's persisted amount, so the row, the
-  //     Σ-cap, and the Stripe request are byte-identical. No db.transaction (D1 rejects it).
+  // (8) CAS claim pending → submitting, PINNING the amount + a per-execute CLAIM TOKEN, in ONE
+  //     UPDATE, BEFORE the network call (M3). The claim token is how we detect the CAS WINNER:
+  //     a no-op UPDATE by a concurrent loser matches 0 rows and writes nothing, so a plain
+  //     status re-read would see 'submitting' for BOTH racers (Fable code-review BLOCKER). Only
+  //     the writer whose token survives the re-read may POST. No db.transaction (D1 rejects it).
+  const claimToken = crypto.randomUUID();
   await db
     .update(refundInitiations)
     .set({
@@ -431,6 +455,7 @@ export async function initiateInvoicePaymentRefund({
       reason: cleanReason,
       serviceNotRenderedConfirmed: 1,
       stripeReason: cleanStripeReason,
+      claimToken,
       updatedAt: now,
     })
     .where(and(eq(refundInitiations.id, initiationId), eq(refundInitiations.status, "pending")));
@@ -438,31 +463,65 @@ export async function initiateInvoicePaymentRefund({
   const claimed = await db.query.refundInitiations.findFirst({
     where: eq(refundInitiations.id, initiationId),
   });
-  if (!claimed || claimed.status !== "submitting") {
-    // Lost the pending→submitting race to a concurrent execute; do NOT call Stripe.
+  if (!claimed || claimed.status !== "submitting" || claimed.claimToken !== claimToken) {
+    // Lost the pending→submitting race to a concurrent execute (its token, not ours, is on the
+    // row) — do NOT call Stripe. The winner is in flight; surface it for reconciliation.
     return {
       status: "submitting" as const,
       inProgress: true,
-      needsReconciliation: claimed?.status === "submitting",
+      needsReconciliation: true,
       initiationId,
       amountCents: claimed?.amountCents ?? amount,
     };
   }
 
-  // (9) The money-moving call. Sends claimed.amountCents (the ROW's persisted, pinned amount).
+  // (8b) Post-claim overshoot guard (Fable finding 2): two DISTINCT pending initiations on the
+  //      same payment each pass the pre-claim cap (each excludes the other's still-`pending`
+  //      row), then both claim — jointly exceeding the service ceiling. Re-read the ledger with
+  //      OUR row now `submitting` and fail-closed if the committed total exceeds the ceiling.
+  //      Revert our own row (token-guarded) and do NOT POST. Both racers reverting is safe
+  //      over-block; the admin re-submits one.
+  const freshPayment = await db.query.invoicePayments.findFirst({ where: eq(invoicePayments.id, paymentId) });
+  if (freshPayment) {
+    const { serviceCollectedCents, alreadyRefundedServiceCents } = await computeRefundExposure(freshPayment);
+    if (alreadyRefundedServiceCents > serviceCollectedCents) {
+      const message = "A concurrent refund on this payment would exceed the refundable service balance.";
+      await db
+        .update(refundInitiations)
+        .set({ status: "failed", errorMessage: capReason(message), updatedAt: new Date().toISOString() })
+        .where(and(
+          eq(refundInitiations.id, initiationId),
+          eq(refundInitiations.status, "submitting"),
+          eq(refundInitiations.claimToken, claimToken),
+        ));
+      await logInitiationFailed(projectId, { paymentId, amountCents: claimed.amountCents, errorMessage: message, initiationId });
+      throw new Error(message);
+    }
+  }
+
+  // (9) The money-moving call. Sends claimed.amountCents + claimed.stripeReason (the ROW's
+  //     persisted, pinned values — byte-identical to the row, the Σ-cap, and any retry).
   try {
     const refund = await createStripeRefund({
       paymentIntentId,
       amountCents: claimed.amountCents,
-      stripeReason: cleanStripeReason,
+      // Re-normalize the persisted value (idempotent — the CAS stored a normalized reason);
+      // coerces the nullable column type to the definite string the Stripe call requires.
+      stripeReason: normalizedStripeReason(claimed.stripeReason),
       idempotencyKey: initiationId, // = the row id
       invoicePaymentId: paymentId,
       initiationId,
     });
+    // Terminal UPDATE guarded by status+token: only the CAS winner can finalize, so a late
+    // loser can never clobber a `succeeded` row (nor mask moved money with `failed`).
     await db
       .update(refundInitiations)
       .set({ status: "succeeded", stripeRefundId: refund.id, errorMessage: null, updatedAt: new Date().toISOString() })
-      .where(eq(refundInitiations.id, initiationId));
+      .where(and(
+        eq(refundInitiations.id, initiationId),
+        eq(refundInitiations.status, "submitting"),
+        eq(refundInitiations.claimToken, claimToken),
+      ));
 
     await logActivity({
       projectId,
@@ -474,7 +533,7 @@ export async function initiateInvoicePaymentRefund({
         paymentId,
         amountCents: claimed.amountCents,
         reason: cleanReason,
-        stripeReason: cleanStripeReason,
+        stripeReason: claimed.stripeReason,
         stripeRefundId: refund.id,
         initiationId,
         serviceNotRenderedConfirmed: true,
@@ -493,8 +552,12 @@ export async function initiateInvoicePaymentRefund({
     await db
       .update(refundInitiations)
       .set({ status: "failed", errorMessage: capReason(message), updatedAt: new Date().toISOString() })
-      .where(eq(refundInitiations.id, initiationId));
-    await logInitiationFailed(projectId, { paymentId, amountCents: claimed.amountCents, errorMessage: message, initiationId });
+      .where(and(
+        eq(refundInitiations.id, initiationId),
+        eq(refundInitiations.status, "submitting"),
+        eq(refundInitiations.claimToken, claimToken),
+      ));
+    await logInitiationFailed(projectId, { paymentId, amountCents: claimed.amountCents, errorMessage: message, initiationId }, actorName ?? undefined);
     throw error;
   }
 }

@@ -839,6 +839,7 @@ function migrate(database: LocalDatabase) {
       service_not_rendered_confirmed INTEGER NOT NULL DEFAULT 0,
       stripe_reason                  TEXT,
       status                         TEXT NOT NULL DEFAULT 'pending',
+      claim_token                    TEXT,
       stripe_refund_id               TEXT,
       error_message                  TEXT,
       initiated_by                   TEXT,
@@ -849,6 +850,8 @@ function migrate(database: LocalDatabase) {
     CREATE INDEX IF NOT EXISTS idx_refund_initiations_refund  ON refund_initiations(stripe_refund_id);
     CREATE INDEX IF NOT EXISTS idx_refund_initiations_status  ON refund_initiations(status);
   `);
+  // Guard a dev DB that created refund_initiations before the claim_token column existed.
+  addColumnIfMissing(database, "refund_initiations", "claim_token", "TEXT");
 
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),

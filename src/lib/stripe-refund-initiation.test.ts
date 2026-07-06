@@ -20,6 +20,10 @@ type StripeCall = { body: string; idempotencyKey: string | undefined; authorizat
 const stripeCalls: StripeCall[] = [];
 let stripeNextError: { status: number; message: string } | null = null;
 let reCounter = 0;
+// When set, a refund POST records its call immediately (so the call COUNT reflects how many
+// executes reached the money-moving call) then PARKS until released — lets the concurrent-race
+// test hold the CAS winner at Stripe while the loser runs its CAS + re-read (§9.23).
+let stripeHold: Promise<void> | null = null;
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: unknown, init?: { body?: unknown; headers?: Record<string, string> }) => {
@@ -28,6 +32,7 @@ globalThis.fetch = (async (input: unknown, init?: { body?: unknown; headers?: Re
     const headers = (init?.headers ?? {}) as Record<string, string>;
     const bodyText = init?.body != null ? String(init.body) : "";
     stripeCalls.push({ body: bodyText, idempotencyKey: headers["idempotency-key"], authorization: headers.authorization });
+    if (stripeHold) await stripeHold;
     if (stripeNextError) {
       const err = stripeNextError;
       stripeNextError = null;
@@ -344,6 +349,40 @@ async function main() {
     const stuck = await mod.initiateInvoicePaymentRefund({ invoiceId: "inv-inflight", paymentId: "pay-inflight", initiationId: "ri-stuck", amountCents: 4000, confirmAmountCents: 4000, reason: "cancel", serviceNotRenderedConfirmed: true, actorType: "admin" });
     assert.equal((stuck as { inProgress?: boolean }).inProgress, true, "§9.6 submitting row → in-progress / needs reconciliation, never re-POST");
     assert.equal(callCount(), 1, "§9.6 submitting row makes ZERO Stripe calls");
+  }
+
+  // ===========================================================================
+  // §9.23 Concurrent double-execute of the SAME initiation → EXACTLY ONE Stripe POST.
+  // Regression guard for the CAS-winner detection: the loser's no-op UPDATE matches 0 rows, so a
+  // plain status re-read would see 'submitting' for BOTH racers and let the loser POST too. The
+  // claim-token disambiguates the winner. The held fetch parks the winner at Stripe so the loser
+  // runs its full CAS + re-read while the winner is in flight (the exact race the reviewer found).
+  // ===========================================================================
+  {
+    stripeCalls.length = 0;
+    seedInvoice("inv-race");
+    seedPayment("pay-race-ret", "inv-race", { label: "Retainer", paidAmountCents: 5000, grossCollectedCents: 5000, dueDate: "2026-05-01", pi: "pi_race_ret" });
+    seedPayment("pay-race", "inv-race", { label: "Final balance", paidAmountCents: 20000, grossCollectedCents: 20000, dueDate: "2026-06-10" });
+    const prep = await mod.prepareInvoicePaymentRefund({ invoiceId: "inv-race", paymentId: "pay-race", actorType: "admin" });
+
+    let release: () => void = () => {};
+    stripeHold = new Promise<void>((resolve) => { release = resolve; });
+    const args = { invoiceId: "inv-race", paymentId: "pay-race", initiationId: prep.initiationId, amountCents: 15000, confirmAmountCents: 15000, reason: "cancel", serviceNotRenderedConfirmed: true, actorType: "admin" as const };
+    const p1 = mod.initiateInvoicePaymentRefund(args).catch((e: Error) => ({ error: e.message }));
+    const p2 = mod.initiateInvoicePaymentRefund(args).catch((e: Error) => ({ error: e.message }));
+    // Let both racers reach steady state (winner parked at the held POST; loser past its re-read).
+    for (let i = 0; i < 10; i += 1) await new Promise((r) => setImmediate(r));
+    assert.equal(callCount(), 1, "§9.23 only the CAS winner POSTs — the loser bails at the re-read (never reaches Stripe)");
+    release();
+    stripeHold = null;
+    const [r1, r2] = await Promise.all([p1, p2]);
+    const outcomes = [r1, r2];
+    assert.equal(outcomes.filter((r) => (r as { status?: string }).status === "succeeded").length, 1, "§9.23 exactly one execute succeeds");
+    assert.equal(callCount(), 1, "§9.23 still exactly one Stripe refund after both settle");
+    // The winner's re_ id is on the row (not clobbered), and refunded service = 15000 (not 30000).
+    const raceRow = riRow(prep.initiationId);
+    assert.equal(raceRow?.status, "succeeded", "§9.23 winner row is succeeded");
+    assert.ok(typeof raceRow?.stripe_refund_id === "string" && raceRow.stripe_refund_id.length > 0, "§9.23 winner's re_ id persisted");
   }
 
   // ===========================================================================
