@@ -815,6 +815,15 @@ function migrate(database: LocalDatabase) {
     CREATE INDEX IF NOT EXISTS idx_mileage_logs_project ON mileage_logs(project_id);
   `);
 
+  // Phase 10: intelligence/forecasting admin settings. Additive + idempotent
+  // nullable columns on app_settings (safe code defaults when NULL). app_settings
+  // is read on always-on paths, so these must exist before /finance loads —
+  // deploy-order-critical (apply 0090 to prod D1 before the Worker deploy).
+  addColumnIfMissing(database, "app_settings", "forecast_horizon_months", "INTEGER");
+  addColumnIfMissing(database, "app_settings", "forecast_trailing_months", "INTEGER");
+  addColumnIfMissing(database, "app_settings", "monthly_capacity_target", "INTEGER");
+  addColumnIfMissing(database, "app_settings", "lead_source_taxonomy_json", "TEXT");
+
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),
   );

@@ -243,6 +243,7 @@ Available tools:
 - `studio_list_activity`: reads recent canonical Studio activity before deciding whether an agent action is new work, follow-up, or a duplicate.
 - `studio_get_data_health`: reads canonical project/client link health before reconciling drift or creating new records.
 - `studio_get_finance_report`: reads the canonical payment ledger and expense ledger for bookkeeping or executive-assistant reporting, including source evidence links.
+- `studio_get_business_review`: reads the derived Studio intelligence review (revenue forecast, booking-conversion, lead-source performance, package-value trend, seasonal capacity, plus headlines) for a period. READ-ONLY analytics — the agent composes the prose narrative from this JSON; the tool never sends or writes anything (moves zero money, writes zero canonical rows).
 - `studio_get_settings`: reads sanitized business/profile and enabled payment settings before drafting proposals, invoices, or payment instructions.
 - `studio_list_templates`: reads canonical Studio templates for contracts, proposal packages, reminders, emails, questionnaires, and workflow prompts before drafting copy.
 - `studio_list_questionnaires`: reads canonical active questionnaires and question ids before creating questionnaire links or filling responses.

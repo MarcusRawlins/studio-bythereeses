@@ -904,6 +904,22 @@ async function main() {
       && columnNames("vendors").has("tax_address"),
     "vendors should carry admin-entered W-9 columns (TIN last4 only)",
   );
+  // Phase 9a — finance rate settings columns on app_settings (backfilled assertions).
+  assert.ok(
+    columnNames("app_settings").has("tax_set_aside_rate_percent")
+      && columnNames("app_settings").has("mileage_rate_cents")
+      && columnNames("app_settings").has("form_1099_threshold_cents"),
+    "app settings should carry the 9a finance-rate columns (set-aside %, mileage ¢, 1099 threshold)",
+  );
+  // Phase 10 — intelligence/forecasting admin settings (migration 0090). Nullable,
+  // safe code defaults when NULL; read on the always-on settings path.
+  assert.ok(
+    columnNames("app_settings").has("forecast_horizon_months")
+      && columnNames("app_settings").has("forecast_trailing_months")
+      && columnNames("app_settings").has("monthly_capacity_target")
+      && columnNames("app_settings").has("lead_source_taxonomy_json"),
+    "app settings should carry the Phase 10 intelligence/forecasting columns",
+  );
   assert.ok(
     columnNames("stripe_webhook_events").has("event_id"),
     "stripe webhook events dedupe table should exist keyed on the Stripe event id",

@@ -89,6 +89,9 @@ export default async function FinancePage({
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <a href="/finance/intelligence" className="brand-secondary-button inline-flex items-center justify-center gap-2 px-4 py-2.5 transition">
+              Intelligence
+            </a>
             <a href={exportHref} className="brand-secondary-button inline-flex items-center justify-center gap-2 px-4 py-2.5 transition">
               <Download className="h-4 w-4" />
               Payments CSV

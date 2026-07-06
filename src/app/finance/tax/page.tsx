@@ -29,9 +29,15 @@ export default async function FinanceTaxPage({
   return (
     <AppShell>
       <div className="space-y-8">
-        <header className="border-b border-neutral-200 pb-4">
-          <h1 className="text-3xl font-semibold">Tax &amp; 1099</h1>
-          <p className="mt-1 text-neutral-500">Estimates and deduction tracking — not tax advice.</p>
+        <header className="flex flex-col justify-between gap-3 border-b border-neutral-200 pb-4 sm:flex-row sm:items-end">
+          <div>
+            <h1 className="text-3xl font-semibold">Tax &amp; 1099</h1>
+            <p className="mt-1 text-neutral-500">Estimates and deduction tracking — not tax advice.</p>
+          </div>
+          <nav className="flex gap-3 text-sm text-blue-600">
+            <a href="/finance">Finance</a>
+            <a href="/finance/intelligence">Intelligence</a>
+          </nav>
         </header>
         <section className="rounded-xl border border-neutral-200 bg-white p-5">
           <div className="flex items-center justify-between gap-3">

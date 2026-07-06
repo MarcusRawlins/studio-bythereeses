@@ -217,6 +217,12 @@ export const appSettings = sqliteTable("app_settings", {
   taxSetAsideRatePercent: integer("tax_set_aside_rate_percent"),
   mileageRateCents: integer("mileage_rate_cents"),
   form1099ThresholdCents: integer("form_1099_threshold_cents"),
+  // Phase 10 — intelligence/forecasting admin settings (reports only; safe code
+  // defaults when NULL). Never agent-written; guarded admin CRUD only.
+  forecastHorizonMonths: integer("forecast_horizon_months"),
+  forecastTrailingMonths: integer("forecast_trailing_months"),
+  monthlyCapacityTarget: integer("monthly_capacity_target"),
+  leadSourceTaxonomyJson: text("lead_source_taxonomy_json"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });

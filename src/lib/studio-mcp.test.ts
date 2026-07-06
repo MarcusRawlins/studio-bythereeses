@@ -228,6 +228,7 @@ async function main() {
       "studio_list_activity",
       "studio_get_data_health",
       "studio_get_finance_report",
+      "studio_get_business_review",
       "studio_get_settings",
       "studio_list_templates",
       "studio_list_questionnaires",

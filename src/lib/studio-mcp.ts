@@ -5,6 +5,7 @@ import { createProjectSourceFromAgent, updateProjectSourceFromAgent } from "./ag
 import { attachProjectGalleryFromAgent, type AgentGalleryAttachInput } from "./gallery";
 import { claimNextAgentTask, createAgentTask, hydrateAgentTaskLinkedSource, hydrateAgentTaskLinkedSources, listAgentTasks, updateAgentTaskStatus } from "./agent-tasks";
 import { getAgentFinanceReport } from "./agent-finance";
+import { getBusinessReview } from "./intelligence";
 import { getAgenda, type AgendaCategory } from "./agenda";
 import { listStudioActivityLog } from "./activity";
 import { createExpenseFromAgent, updateExpenseFromAgent, type AgentExpenseInput, type AgentExpenseUpdateInput } from "./bookkeeping";
@@ -154,6 +155,20 @@ const studioTools = [
         fromDate: { type: "string", description: "Optional YYYY-MM-DD start date for paid revenue and expense reporting." },
         toDate: { type: "string", description: "Optional YYYY-MM-DD end date for paid revenue and expense reporting." },
         asOfDate: { type: "string", description: "Optional YYYY-MM-DD date for accounts-receivable aging. Defaults to today." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "studio_get_business_review",
+    title: "Get Business Review",
+    description: "Read the derived Studio intelligence review (revenue forecast, booking conversion, lead-source performance, package-value trend, seasonal capacity, plus headlines) for a requested period. READ-ONLY — the agent composes the prose narrative from this JSON; the tool never sends or writes anything.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fromDate: { type: "string", description: "Optional YYYY-MM-DD start of the review window. Defaults to the trailing 30 days." },
+        toDate: { type: "string", description: "Optional YYYY-MM-DD end of the review window. Defaults to today." },
+        asOfDate: { type: "string", description: "Optional YYYY-MM-DD as-of date for forecasting and aging. Defaults to today." },
       },
       additionalProperties: false,
     },
@@ -2438,6 +2453,17 @@ async function callTool(params: unknown) {
       asOfDate: optionalStringArg(args, "asOfDate"),
     });
     return textToolResult({ financeReport });
+  }
+
+  if (name === "studio_get_business_review") {
+    // READ-ONLY derived analytics (§4). No canonical write; the agent drafts prose
+    // from this JSON and never auto-sends. Optional dates are the only inputs read.
+    const review = await getBusinessReview({
+      fromDate: optionalStringArg(args, "fromDate"),
+      toDate: optionalStringArg(args, "toDate"),
+      asOfDate: optionalStringArg(args, "asOfDate"),
+    });
+    return textToolResult({ review });
   }
 
   if (name === "studio_get_settings") {
