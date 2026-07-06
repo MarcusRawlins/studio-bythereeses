@@ -29,10 +29,22 @@ deploy **dark** → Tyler enables.
   exactly like Phase 9b. Highest dunning-reduction payoff.
 
 ### Tier 2 — high value
-- **Phase 14 — Two-way per-project email.** Email is log-only today; inbound is inquiry-intake only.
-  Add: send email from the project thread (Resend, with the "agents draft, Tyler sends" guard) +
-  route inbound client email into the existing project thread (extend Phase 8a routing) → a unified
-  email+SMS inbox. Reuses `project_communications` + email infra.
+- **Phase 14 — Two-way per-project email.** ✅ **BUILT + Fable-reviewed + pushed dark 2026-07-06**
+  (branch `claude/reese-crm-production-qa-4caxz0`, commits `cbba1d5` + `bff7fac`). Outbound
+  project-thread send (Resend, "agents draft, Tyler sends", recipient-bound content-hash approval) +
+  inbound client-reply routing via a project-bound reply token (envelope-recipient-only, append-only,
+  thread-scoped dedupe) → unified email+SMS inbox. Reuses `project_communications` + email infra.
+  Adversarial Fable security review of the inbound boundary: **APPROVE WITH FIXES** — no BLOCKER/MAJOR
+  (could not forge a token, cross projects, override the envelope via a header, bypass auth, or force a
+  silent drop); M1 (subject HTML-neutralization) + m2 (byte-length gate) applied. Build gate green
+  (lint/build/209 tests exit 0). Flags **off**: `EMAIL_SENDING_ENABLED`, `INBOUND_PROJECT_EMAIL_ENABLED`,
+  Worker `INTAKE_ENABLED="false"`.
+  **Dark-deploy runbook (run where the Cloudflare token lives — NOT this remote env, which has no CF
+  creds):** (1) apply migration `0092_inbound_project_email.sql` to D1; (2) `npm run deploy` (app Worker
+  via OpenNext); (3) `wrangler deploy --config wrangler.project-email-inbound.jsonc` (the Email Routing
+  Worker) + set `INBOUND_PROJECT_EMAIL_SECRET` via `wrangler secret put`; (4) `npm run deploy:pages-proxy`
+  (proxy composition). All four ship inert while the flags stay off. Enablement (set `REPLY_TOKEN_SECRET`,
+  a VERIFIED `INTAKE_FALLBACK`, then flip the flags) stays with Tyler.
 - **Phase 15 — PWA / installable mobile.** ✅ **DEPLOYED 2026-07-06** (Worker `16f5e766`, proxy
   `76d552af`) — manifest v1 is LIVE + installable (Add-to-Home-Screen works on iPhone now; inert static
   metadata, zero behavior change). Icons + apple meta + `Viewport`; `/manifest.webmanifest` reachable
