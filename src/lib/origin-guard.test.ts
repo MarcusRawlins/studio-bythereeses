@@ -210,4 +210,40 @@ assert.equal(
   "direct /p/ token links stay origin-bypass-public (unchanged)",
 );
 
+// --------------------------------------------------------------------------
+// Phase 9b — the admin refund-INITIATION routes (the only code that can call Stripe's
+// mutating refund endpoint) must NEVER be origin-bypass-public: they are first-class admin
+// mutations behind the Pages-proxy admin wall + origin secret. A direct *.workers.dev POST
+// (no origin secret) must 404. Adding these to a bypass list would let an unauthenticated
+// caller drain money up to the service ceiling — pin the classifier + the guard.
+// --------------------------------------------------------------------------
+assert.equal(
+  isPublicOriginBypassApiPath("/api/invoices/inv-1/payments/pay-1/refund/execute"),
+  false,
+  "the refund EXECUTE route must NOT bypass the origin guard (money-movement is admin-only)",
+);
+assert.equal(
+  isPublicOriginBypassApiPath("/api/invoices/inv-1/payments/pay-1/refund/prepare"),
+  false,
+  "the refund PREPARE route must NOT bypass the origin guard",
+);
+assert.equal(
+  guardDirectWorkerApiRequest(
+    new Request("https://reese-photography-crm.solitary-flower-c3ab.workers.dev/api/invoices/inv-1/payments/pay-1/refund/execute", {
+      method: "POST",
+    }),
+  )?.status,
+  404,
+  "direct workers.dev POST to refund/execute (no origin secret) must be 404'd",
+);
+assert.equal(
+  guardDirectWorkerApiRequest(
+    new Request("https://reese-photography-crm.solitary-flower-c3ab.workers.dev/api/invoices/inv-1/payments/pay-1/refund/prepare", {
+      method: "POST",
+    }),
+  )?.status,
+  404,
+  "direct workers.dev POST to refund/prepare (no origin secret) must be 404'd",
+);
+
 console.log("origin guard tests passed");

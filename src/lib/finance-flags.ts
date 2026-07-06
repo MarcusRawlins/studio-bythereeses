@@ -38,3 +38,12 @@ export function financeRefundStatusFlipEnabled(env?: { FINANCE_REFUND_RECORDING?
 export function financeRefundRecordingEnabled(env?: { FINANCE_REFUND_RECORDING?: string }): boolean {
   return financeRefundRecordingMode(env) !== "off";
 }
+
+// Phase 9b: hard money gate for admin-triggered Stripe refund INITIATION (the only
+// code that calls POST /v1/refunds). Default OFF. Parsed strict `=== "1"` — exactly
+// like adminProofEnforced (admin-proxy-auth.test.ts:194-197): unset, "", "0", "true",
+// "on", any typo → OFF; only the literal "1" enables. No fuzzy truthiness on a money
+// gate. Read INSIDE the body (never as a default param) to avoid TS2559 on ProcessEnv.
+export function refundInitiationEnabled(env?: { REFUND_INITIATION_ENABLED?: string }): boolean {
+  return (env ?? process.env).REFUND_INITIATION_ENABLED === "1";
+}

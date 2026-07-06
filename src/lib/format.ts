@@ -34,6 +34,8 @@ const activityActionLabels: Record<string, string> = {
   "invoice.created": "Invoice created",
   "invoice.payment_updated": "Invoice payment updated",
   "invoice.payment_refunded_from_stripe": "Payment refunded (from Stripe)",
+  "invoice.payment_refund_initiated": "Refund initiated to Stripe",
+  "invoice.payment_refund_initiation_failed": "Refund initiation failed",
   "invoice.payment_dispute_opened_from_stripe": "Payment dispute opened (from Stripe)",
   "invoice.payment_dispute_closed_from_stripe": "Payment dispute closed (from Stripe)",
   "invoice.payment_dispute_funds_reinstated_from_stripe": "Dispute funds reinstated (from Stripe)",

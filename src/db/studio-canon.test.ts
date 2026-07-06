@@ -953,6 +953,28 @@ async function main() {
     "mileage logs table should exist for the tax deduction report",
   );
 
+  // Phase 9b — refund INITIATION audit/idempotency ledger (migration 0091). The row id is
+  // the Stripe Idempotency-Key; the money-critical columns (amount_cents, status,
+  // service_not_rendered_confirmed, reason, stripe_refund_id) must all exist, and the table
+  // must be indexed by payment/refund/status for the §3.1 dedupe-union cap + §4.4 tripwires.
+  assert.ok(
+    columnNames("refund_initiations").has("amount_cents")
+      && columnNames("refund_initiations").has("status")
+      && columnNames("refund_initiations").has("service_not_rendered_confirmed")
+      && columnNames("refund_initiations").has("reason")
+      && columnNames("refund_initiations").has("stripe_refund_id")
+      && columnNames("refund_initiations").has("stripe_payment_intent_id")
+      && columnNames("refund_initiations").has("error_message")
+      && columnNames("refund_initiations").has("initiated_by"),
+    "refund_initiations should carry the money-critical audit/idempotency columns",
+  );
+  assert.ok(
+    indexNames("refund_initiations").has("idx_refund_initiations_payment")
+      && indexNames("refund_initiations").has("idx_refund_initiations_refund")
+      && indexNames("refund_initiations").has("idx_refund_initiations_status"),
+    "refund_initiations should be indexed by payment, Stripe refund id, and status",
+  );
+
   // The refund dedupe write is INSERT ... ON CONFLICT DO NOTHING — the UNIQUE index is
   // what makes a redelivered webhook converge instead of double-recording.
   const refundCanonNow = new Date("2026-07-01T12:00:00.000Z").toISOString();

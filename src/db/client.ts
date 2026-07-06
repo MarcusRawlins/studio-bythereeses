@@ -824,6 +824,32 @@ function migrate(database: LocalDatabase) {
   addColumnIfMissing(database, "app_settings", "monthly_capacity_target", "INTEGER");
   addColumnIfMissing(database, "app_settings", "lead_source_taxonomy_json", "TEXT");
 
+  // Phase 9b (migration 0091): refund INITIATION audit + idempotency ledger. Additive +
+  // idempotent so local dev (better-sqlite3) and any partially-migrated prod D1 converge
+  // without a blanket `migrations apply`. NOT on an always-on read path — only the refund
+  // feature touches it. This is the sole table 9b writes; payment_refunds stays webhook-owned.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS refund_initiations (
+      id                             TEXT PRIMARY KEY NOT NULL,
+      invoice_payment_id             TEXT NOT NULL REFERENCES invoice_payments(id) ON DELETE CASCADE,
+      stripe_payment_intent_id       TEXT,
+      amount_cents                   INTEGER NOT NULL DEFAULT 0,
+      currency                       TEXT NOT NULL DEFAULT 'usd',
+      reason                         TEXT,
+      service_not_rendered_confirmed INTEGER NOT NULL DEFAULT 0,
+      stripe_reason                  TEXT,
+      status                         TEXT NOT NULL DEFAULT 'pending',
+      stripe_refund_id               TEXT,
+      error_message                  TEXT,
+      initiated_by                   TEXT,
+      created_at                     TEXT NOT NULL,
+      updated_at                     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_refund_initiations_payment ON refund_initiations(invoice_payment_id);
+    CREATE INDEX IF NOT EXISTS idx_refund_initiations_refund  ON refund_initiations(stripe_refund_id);
+    CREATE INDEX IF NOT EXISTS idx_refund_initiations_status  ON refund_initiations(status);
+  `);
+
   const projectColumns = new Set(
     database.prepare("PRAGMA table_info(projects)").all().map((column) => (column as { name: string }).name),
   );

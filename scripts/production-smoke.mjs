@@ -84,6 +84,14 @@ export function evaluateProductionSmoke(results) {
   if (results.directWorker?.status !== 404) {
     errors.push("Direct workers.dev admin/API access should be blocked with 404.");
   }
+  // Phase 9b PRECONDITION AUTH-ARMED (M2 / §9.20): an unauthenticated POST to the refund
+  // EXECUTE route on the *.workers.dev origin (no origin secret, no admin proof) must 404.
+  // This is the pre-enable assertion that ORIGIN_PROXY_SECRET is set at the Worker and
+  // ADMIN_PROOF_ENFORCE=1 — both fail OPEN when unset, so a hole here would leave the most
+  // destructive action in the app unauthenticated-reachable. Only runs when supplied.
+  if (results.refundExecuteDirect && results.refundExecuteDirect.status !== 404) {
+    errors.push("Direct workers.dev POST to refund/execute must be blocked with 404 (auth boundary not armed).");
+  }
   if (results.agentProjects?.status !== 200) {
     errors.push("Agent project search should return 200 with bearer auth.");
   }
@@ -146,6 +154,18 @@ async function fetchHead(url) {
     status: response.status,
     location: response.headers.get("location"),
   };
+}
+
+// Phase 9b: assert an unauthenticated method-specific request (e.g. POST refund/execute)
+// is origin-guarded to 404 on the direct Worker origin. Sends an empty JSON body.
+async function fetchStatus(url, method) {
+  const response = await fetch(url, {
+    method,
+    redirect: "manual",
+    headers: { "content-type": "application/json" },
+    body: method === "GET" || method === "HEAD" ? undefined : "{}",
+  });
+  return { status: response.status };
 }
 
 // L7 (phase-6-hardening-r2.md, Section 3): the proxy must force `no-referrer` on
@@ -216,6 +236,7 @@ async function runProductionSmoke() {
     scheduleProjects: await fetchHead(`${schedule}/projects`),
     studioBook: await fetchHead(`${studio}/book/${bookingSlug}`),
     directWorker: await fetchHead(`${worker}/projects`),
+    refundExecuteDirect: await fetchStatus(`${worker}/api/invoices/smoke-inv/payments/smoke-pay/refund/execute`, "POST"),
     agentProjects: await fetchJson(`${studio}/api/agent/projects?limit=5&page=1&sort=eventDate`, token),
     dataHealth: await fetchJson(`${studio}/api/agent/data-health`, token),
     financeReport: await fetchJson(`${studio}/api/agent/finance/report?paymentStatus=needs_reconciliation&expenseStatus=needs_reconciliation`, token),

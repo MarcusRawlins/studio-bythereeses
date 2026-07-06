@@ -99,7 +99,9 @@ const RETAINER_STAGE_PRECEDENCE = new Map([
   ["completed", 6],
 ]);
 
-function isRetainerPaymentLabel(label: string | null) {
+// Phase 9b (F2): EXPORTED so the refund retainer hard-block (§3.8) reuses the exact
+// predicate that drives `retainer_paid` stage-advance — not a divergent copy of the regex.
+export function isRetainerPaymentLabel(label: string | null) {
   return /\b(retainer|deposit)\b/i.test(label ?? "");
 }
 

@@ -593,6 +593,27 @@ export const paymentDisputes = sqliteTable("payment_disputes", {
   updatedAt: text("updated_at").notNull(),
 });
 
+// Phase 9b — refund INITIATION audit + idempotency ledger. This is the ONLY table
+// written by the admin-triggered Stripe refund path (POST /v1/refunds). It is NOT
+// the canonical refund ledger — payment_refunds (9a, webhook-owned) is. The row `id`
+// doubles as the Stripe Idempotency-Key. Never written from an agent/webhook path.
+export const refundInitiations = sqliteTable("refund_initiations", {
+  id: text("id").primaryKey(), // our uuid; ALSO the Stripe Idempotency-Key
+  invoicePaymentId: text("invoice_payment_id").notNull().references(() => invoicePayments.id, { onDelete: "cascade" }),
+  stripePaymentIntentId: text("stripe_payment_intent_id"), // pi_... snapshot at initiation
+  amountCents: integer("amount_cents").notNull().default(0),
+  currency: text("currency").notNull().default("usd"),
+  reason: text("reason"), // internal reason (audit; capped 500); REQUIRED at execute (§3.9)
+  serviceNotRenderedConfirmed: integer("service_not_rendered_confirmed").notNull().default(0), // P10/§3.9 affirmation
+  stripeReason: text("stripe_reason"), // requested_by_customer | duplicate | fraudulent
+  status: text("status").notNull().default("pending"), // pending | submitting | succeeded | failed
+  stripeRefundId: text("stripe_refund_id"), // re_... (read-only cross-ref; canonical lives in payment_refunds)
+  errorMessage: text("error_message"), // cleaned Stripe error (capped)
+  initiatedBy: text("initiated_by"), // admin identity (actorName)
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 // Phase 9a — mileage log (tax deduction input). No money moved; admin CRUD only.
 export const mileageLogs = sqliteTable("mileage_logs", {
   id: text("id").primaryKey(),
