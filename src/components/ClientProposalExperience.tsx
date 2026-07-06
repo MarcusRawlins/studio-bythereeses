@@ -29,6 +29,12 @@ type ClientProposalExperienceProps = {
   clientEmail: string | null;
   acceptedNotice: boolean;
   signatureError: string | null;
+  // Phase 12 — all optional/defaulted so flag-off render is byte-identical.
+  booked?: boolean;
+  checkoutCancelled?: boolean;
+  unifiedSignPay?: boolean;
+  retainerDueCents?: number;
+  allPayableSettled?: boolean;
   initialSection?: ProposalClientSection | null;
   contractTitle: string | null;
   contractBody: string | null;
@@ -100,6 +106,11 @@ export function ClientProposalExperience({
   clientEmail,
   acceptedNotice,
   signatureError,
+  booked = false,
+  checkoutCancelled = false,
+  unifiedSignPay = false,
+  retainerDueCents = 0,
+  allPayableSettled = false,
   initialSection,
   contractTitle,
   contractBody,
@@ -110,6 +121,16 @@ export function ClientProposalExperience({
   const isAccepted = proposalStatus === "accepted" || Boolean(acceptedAt);
   const isSigned = Boolean(signedAt);
   const [step, setStep] = useState<ProposalStep>(initialSection ?? (isAccepted || acceptedNotice ? "contract" : "welcome"));
+  const [signPending, setSignPending] = useState(false);
+  const [resumePending, setResumePending] = useState(false);
+  // Phase 12: derived confirmation state (all false / no-op with the flag off).
+  // Booked: retainer paid (external return ?booked=1) OR a signed proposal with nothing payable
+  // left (computed server-side so an all-settled re-visit renders booked without a ?booked param).
+  const showBooked = booked || (isSigned && allPayableSettled);
+  // Resume-to-pay CTA: whenever signed with a payable retainer — NOT only after a cancel — so a
+  // days-later revisit (session expired, /portal + invoice pay links hidden) can still pay.
+  const showResumeCta = unifiedSignPay && isSigned && retainerDueCents > 0 && !showBooked;
+  const signAndPay = unifiedSignPay && retainerDueCents > 0;
   const [selectedOptionalLineItemIds, setSelectedOptionalLineItemIds] = useState<string[]>([]);
   const selectedPackage = useMemo(
     () => buildSelectedProposalPackage({ lineItems, selectedOptionalLineItemIds }),
@@ -383,13 +404,21 @@ export function ClientProposalExperience({
                       <div className="flex items-start gap-3">
                         <CheckCircle2 className="mt-0.5 h-5 w-5 text-[var(--brand-brown)]" />
                         <div>
-                          <h3 className="font-semibold">{isSigned ? "Proposal signed and accepted" : "Signature required"}</h3>
+                          <h3 className="font-semibold">
+                            {showBooked
+                              ? "Signed ✓ Paid ✓ — you're booked."
+                              : isSigned
+                                ? "Proposal signed and accepted"
+                                : "Signature required"}
+                          </h3>
                           <p className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">
-                            {isSigned
-                              ? "Thank you. Tyler can see that this proposal has been signed and accepted."
-                              : contractCanBeSigned
-                                ? "Please type your full legal name below to sign the contract and accept this proposal."
-                                : "Tyler is still finalizing the contract language. This proposal cannot be signed until the agreement text is ready."}
+                            {showBooked
+                              ? "Thank you — your signature and retainer are in. Tyler can see that you're booked."
+                              : isSigned
+                                ? "Thank you. Tyler can see that this proposal has been signed and accepted."
+                                : contractCanBeSigned
+                                  ? "Please type your full legal name below to sign the contract and accept this proposal."
+                                  : "Tyler is still finalizing the contract language. This proposal cannot be signed until the agreement text is ready."}
                           </p>
                           {signedAt && (
                             <p className="mt-2 text-xs uppercase tracking-[0.16em] text-[var(--ink-muted)]">
@@ -402,8 +431,40 @@ export function ClientProposalExperience({
                       </div>
                     </div>
 
+                    {showResumeCta && (
+                      <form
+                        action={`/api/proposal/${token}/accept`}
+                        method="post"
+                        onSubmit={() => setResumePending(true)}
+                        className={`mt-6 rounded-md border p-5 ${checkoutCancelled ? "border-[var(--brand-brown)] bg-[#f7f4ef]" : "border-[var(--line)] bg-[var(--surface)]"}`}
+                      >
+                        {/* Re-POSTs the accept form; the route validates BEFORE the idempotent
+                            short-circuit, so the recorded signer name + consent="on" must ride along
+                            or it 303s to ?signature=signature_name_required. Idempotent (no double-sign). */}
+                        <input type="hidden" name="signatureName" value={signerName ?? ""} />
+                        <input type="hidden" name="signatureEmail" value={signerEmail ?? clientEmail ?? ""} />
+                        <input type="hidden" name="signatureConsent" value="on" />
+                        <h3 className="font-semibold">
+                          {checkoutCancelled ? "Signed ✓ — your retainer is still due" : "Finish booking — pay your retainer"}
+                        </h3>
+                        <p className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">
+                          Your retainer of {formatMoney(retainerDueCents)} secures your date. Continue to secure checkout to complete your booking.
+                        </p>
+                        <div className="mt-4 flex justify-center">
+                          <button
+                            type="submit"
+                            disabled={resumePending}
+                            className="brand-primary-button inline-flex items-center gap-3 rounded-full px-8 py-4 disabled:opacity-60"
+                          >
+                            Pay retainer {formatMoney(retainerDueCents)}
+                            <ArrowRight className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </form>
+                    )}
+
                     {!isSigned && contractCanBeSigned && (
-                      <form action={`/api/proposal/${token}/accept`} method="post" className="mt-8 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+                      <form action={`/api/proposal/${token}/accept`} method="post" onSubmit={() => setSignPending(true)} className="mt-8 rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
                         {selectedOptionalLineItemIds.map((lineItemId) => (
                           <input key={lineItemId} type="hidden" name="selectedOptionalLineItemId" value={lineItemId} />
                         ))}
@@ -431,8 +492,8 @@ export function ClientProposalExperience({
                           </label>
                         </div>
                         <div className="mt-6 flex justify-center">
-                          <button type="submit" className="brand-primary-button inline-flex items-center gap-3 rounded-full px-8 py-4">
-                            Sign and accept proposal
+                          <button type="submit" disabled={signPending} className="brand-primary-button inline-flex items-center gap-3 rounded-full px-8 py-4 disabled:opacity-60">
+                            {signAndPay ? `Sign & Pay retainer ${formatMoney(retainerDueCents)}` : "Sign and accept proposal"}
                             <CheckCircle2 className="h-4 w-4" />
                           </button>
                         </div>

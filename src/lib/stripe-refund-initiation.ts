@@ -23,7 +23,7 @@ import { db } from "@/db/client";
 import { invoicePayments, invoices, paymentRefunds, refundInitiations } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { refundInitiationEnabled } from "@/lib/finance-flags";
-import { isRetainerPaymentLabel } from "@/lib/sales";
+import { isRetainerPayment } from "@/lib/retainer-selection";
 import { and, desc, eq, inArray } from "drizzle-orm";
 
 const STRIPE_API_VERSION = "2026-02-25.clover"; // match stripe-checkout.ts
@@ -109,34 +109,12 @@ async function createStripeRefund({
 }
 
 // ---------------------------------------------------------------------------
-// Retainer identity (§3.8). Reuses the EXPORTED isRetainerPaymentLabel (F2) unioned with
-// "earliest payment on the invoice" (min dueDate NULLS LAST, tie-break createdAt, tie-break id).
+// Retainer identity (§3.8). Reuses the SHARED predicate from retainer-selection.ts (label arm
+// unioned with "earliest payment on the invoice": min dueDate NULLS LAST, tie-break createdAt,
+// tie-break id) — no forked copy. Re-exported so the admin refund control (invoices/[id]/page.tsx)
+// keeps importing it from this module while the definition lives in one place (F2).
 // ---------------------------------------------------------------------------
-function earliestPaymentId(payments: InvoicePaymentRow[]): string | null {
-  if (!payments.length) return null;
-  const sorted = [...payments].sort((a, b) => {
-    // dueDate NULLS LAST
-    const ad = a.dueDate;
-    const bd = b.dueDate;
-    if (ad !== bd) {
-      if (ad === null || ad === undefined) return 1;
-      if (bd === null || bd === undefined) return -1;
-      return ad < bd ? -1 : 1;
-    }
-    const ac = a.createdAt ?? "";
-    const bc = b.createdAt ?? "";
-    if (ac !== bc) return ac < bc ? -1 : 1;
-    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-  });
-  return sorted[0]?.id ?? null;
-}
-
-// Exported (UI enable-prep, additive) so the admin refund control can pre-disable a retainer
-// row without a divergent copy of the predicate (F2) — this IS the exact rule §3.4/execute
-// enforces server-side; the UI use below never changes it, only reads it.
-export function isRetainerPayment(payment: InvoicePaymentRow, allPayments: InvoicePaymentRow[]) {
-  return isRetainerPaymentLabel(payment.label) || payment.id === earliestPaymentId(allPayments);
-}
+export { isRetainerPayment };
 
 // UI-ONLY mirror (additive) of the §3.4 dispute-eligibility gate (P5/M5) so the admin control
 // can pre-disable a disputed payment. Mirrors resolveEligiblePayment's own check exactly (never

@@ -3,7 +3,8 @@ import { activityLogs, clients, invoicePayments, invoices, paymentDisputes, paym
 import { logActivity } from "@/lib/activity";
 import { ensureEngagementPlaceholder } from "@/lib/crm";
 import { formatMoney } from "@/lib/format";
-import { invoiceClientPayableBalanceCents as calculateInvoiceClientPayableBalanceCents, invoiceClientPayableCents as calculateInvoiceClientPayableCents, isSettledInvoicePaymentStatus } from "@/lib/invoice-balances";
+import { invoiceClientPayableBalanceCents as calculateInvoiceClientPayableBalanceCents, invoiceClientPayableCents as calculateInvoiceClientPayableCents, invoicePaymentClientPayableOpenCents, invoicePaymentOpenCents, isSettledInvoicePaymentStatus } from "@/lib/invoice-balances";
+import { isRetainerPaymentLabel, resolveRetainerPayment } from "@/lib/retainer-selection";
 import { canSignProposalContract, nextProposalStatus } from "@/lib/proposal-readiness";
 import { enabledPaymentMethods, getAppSettings, type PaymentMethodKey } from "@/lib/settings";
 import { createHash, randomBytes } from "node:crypto";
@@ -15,6 +16,9 @@ const DEFAULT_CARD_FEE_PERCENT_BPS = 290;
 const DEFAULT_CARD_FEE_FIXED_CENTS = 30;
 
 export { invoiceClientPayableBalanceCents, invoiceClientPayableCents } from "@/lib/invoice-balances";
+// Phase 9b (F2): re-exported so existing `import { isRetainerPaymentLabel } from "@/lib/sales"`
+// callers keep working while the single definition lives in retainer-selection.ts.
+export { isRetainerPaymentLabel } from "@/lib/retainer-selection";
 
 function textValue(formData: FormData, key: string) {
   return String(formData.get(key) ?? "").trim();
@@ -77,7 +81,9 @@ export function hashProposalToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function proposalBaseUrl() {
+// Phase 12 (Minor 4): EXPORTED so the accept route can build the token-surface return URLs from
+// one definition (instead of re-deriving the base from the same envs inline).
+export function proposalBaseUrl() {
   return process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_SCHEDULE_URL || "http://localhost:3000";
 }
 
@@ -98,12 +104,6 @@ const RETAINER_STAGE_PRECEDENCE = new Map([
   ["delivered", 5],
   ["completed", 6],
 ]);
-
-// Phase 9b (F2): EXPORTED so the refund retainer hard-block (§3.8) reuses the exact
-// predicate that drives `retainer_paid` stage-advance — not a divergent copy of the regex.
-export function isRetainerPaymentLabel(label: string | null) {
-  return /\b(retainer|deposit)\b/i.test(label ?? "");
-}
 
 function shouldAdvanceToRetainerPaid(stage: string, paymentLabel: string | null, status: string, paidAmountCents: number) {
   const currentStageRank = RETAINER_STAGE_PRECEDENCE.get(stage);
@@ -1273,6 +1273,57 @@ export async function getProposalPackageByToken(token: string, lastUsedIp?: stri
       balanceCents: calculateInvoiceClientPayableBalanceCents(invoice, paymentsByInvoiceId.get(invoice.id) ?? []),
     })),
   };
+}
+
+// Phase 12: identify the retainer to carry into Stripe Checkout after signing, sourced ENTIRELY
+// from the token's own proposal (never from request input — no IDOR). Rule (§3):
+//   1. Load the proposal's non-void invoices and ALL their payments (settled or not).
+//   2. Identify the ONE retainer over ALL payments with the shared predicate
+//      (`resolveRetainerPayment` = label arm, else earliest arm — never over the payable subset).
+//   3. Gate payability on THAT single pick: payable (`invoicePaymentOpenCents > 0`) → return it;
+//      settled (open == 0) → return null (skip → confirmation), EVEN when later installments are
+//      still open. We NEVER fall through to a later installment or the whole remaining balance.
+export async function resolveProposalRetainerCheckout(
+  proposalId: string,
+): Promise<{ invoiceId: string; paymentId: string; clientPayableOpenCents: number } | null> {
+  const linkedInvoices = await db.query.invoices.findMany({
+    where: eq(invoices.proposalId, proposalId),
+  });
+  const payableInvoices = linkedInvoices.filter((invoice) => invoice.status !== "void");
+  if (!payableInvoices.length) return null;
+
+  const invoiceIds = payableInvoices.map((invoice) => invoice.id);
+  const allPayments = await db.query.invoicePayments.findMany({
+    where: inArray(invoicePayments.invoiceId, invoiceIds),
+  });
+  if (!allPayments.length) return null;
+
+  const retainer = resolveRetainerPayment(allPayments);
+  if (!retainer) return null;
+
+  // Payability gate on THAT single pick — settled (paid/waived/refunded → open 0) → null (skip).
+  const openCents = invoicePaymentOpenCents(retainer);
+  if (openCents <= 0) return null;
+
+  const invoice = payableInvoices.find((candidate) => candidate.id === retainer.invoiceId);
+  if (!invoice) return null;
+
+  // Client-payable open (service + a proportional share of the remaining card fee), mirroring
+  // createInvoicePaymentCheckoutSession's own math so retainerDueCents matches what will be charged.
+  const paymentsOnInvoice = allPayments.filter((payment) => payment.invoiceId === retainer.invoiceId);
+  const paidClientFeeCents = paymentsOnInvoice.reduce(
+    (sum, payment) => (payment.status === "paid" ? sum + payment.clientFeeCents : sum),
+    0,
+  );
+  const remainingClientFeeCents = Math.max(invoice.cardFeeAmountCents - paidClientFeeCents, 0);
+  const openServiceTotalCents = paymentsOnInvoice.reduce((sum, payment) => sum + invoicePaymentOpenCents(payment), 0);
+  const clientPayableOpenCents = invoicePaymentClientPayableOpenCents({
+    payment: retainer,
+    openServiceTotalCents,
+    remainingClientFeeCents,
+  });
+
+  return { invoiceId: retainer.invoiceId, paymentId: retainer.id, clientPayableOpenCents };
 }
 
 export async function acceptProposalByToken(

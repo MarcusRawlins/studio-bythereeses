@@ -4,7 +4,7 @@ import { logActivity } from "@/lib/activity";
 import { invoicePaymentClientPayableOpenCents, invoicePaymentOpenCents } from "@/lib/invoice-balances";
 import { autoAdvanceProjectStageForRetainerPayment, reconciledInvoicePaymentStatus } from "@/lib/sales";
 import { dispatchStripeRefundOrDisputeEvent } from "@/lib/stripe-refunds";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { createHmac, timingSafeEqual } from "node:crypto";
 
@@ -77,6 +77,47 @@ async function createStripeCheckoutSession(params: URLSearchParams) {
   }
 
   return { id, url };
+}
+
+// Phase 12 (§4.3c): read a stored Checkout Session's return URLs so we can detect whether a reused
+// `link_ready` session (e.g. one an admin pre-minted with /portal return URLs) carries DIFFERENT
+// return URLs than the requested client override. A read (no money). Returns null on any failure —
+// callers treat "cannot confirm a match" conservatively (expire + re-mint) so the client is never
+// dropped on the /portal lock wall.
+async function fetchStripeCheckoutSessionReturnUrls(sessionId: string) {
+  try {
+    const response = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${stripeSecretKey()}`,
+        "stripe-version": STRIPE_API_VERSION,
+      },
+    });
+    if (!response.ok) return null;
+    const body = stripeSessionResponseBody(await response.json().catch(() => ({})));
+    return { successUrl: stripeString(body.success_url), cancelUrl: stripeString(body.cancel_url) };
+  } catch {
+    return null;
+  }
+}
+
+// Phase 12 (§4.3c): expire a stored session whose return URLs are WRONG for the client surface.
+// Stripe sessions are immutable, so expiring is the only way to make the old one uncompletable —
+// guaranteeing the subsequent re-mint cannot leave TWO payable sessions live. Expiring moves NO
+// money (it renders a session uncompletable — the opposite of a charge).
+async function expireStripeCheckoutSessionById(sessionId: string) {
+  const response = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${stripeSecretKey()}`,
+      "content-type": "application/x-www-form-urlencoded",
+      "stripe-version": STRIPE_API_VERSION,
+    },
+  });
+  if (!response.ok) {
+    const body = stripeSessionResponseBody(await response.json().catch(() => ({})));
+    throw new Error(stripeErrorMessage(body) ?? "Stripe checkout session expire failed.");
+  }
 }
 
 function parseStripeSignatureHeader(header: string | null) {
@@ -162,8 +203,23 @@ export async function createInvoicePaymentCheckoutSession(
   activityOptions: {
     actorType?: "admin" | "client" | "system" | "agent";
     actorName?: string | null;
+    // Phase 12 (§4.3a): ADDITIVE, optional. Defaults (below) are the exact current
+    // /portal?checkout=success|cancelled… strings, so every existing caller is byte-identical.
+    // When provided (the unified sign&pay accept route), these route the client back to the
+    // token surface instead of the /portal lock wall.
+    returnUrls?: { successUrl: string; cancelUrl: string };
   } = {},
 ) {
+  const { returnUrls } = activityOptions;
+  if (returnUrls) {
+    // Open-redirect defense-in-depth: the caller server-constructs these from constants + the
+    // already-public token, but assert same-origin anyway.
+    const base = appBaseUrl();
+    if (!returnUrls.successUrl.startsWith(base) || !returnUrls.cancelUrl.startsWith(base)) {
+      throw new Error("Checkout return URLs must be on the application origin.");
+    }
+  }
+
   const rows = await db
     .select({
       invoice: invoices,
@@ -198,17 +254,54 @@ export async function createInvoicePaymentCheckoutSession(
     throw new Error("Checkout can only be created for an open invoice payment.");
   }
 
+  // Track the session id present at reuse-read time so the CAS write below can only win against
+  // THIS observed value (or a null row) — a concurrent racer that already stored its own session
+  // makes our CAS no-op (§4.3b).
+  const priorCheckoutSessionId = row.payment.stripeCheckoutSessionId;
+
   if (row.payment.stripeCheckoutUrl && row.payment.stripeCheckoutStatus === "link_ready") {
-    return {
-      invoiceId,
-      projectId: row.project.id,
-      paymentId: row.payment.id,
-      checkoutUrl: row.payment.stripeCheckoutUrl,
-      checkoutSessionId: row.payment.stripeCheckoutSessionId,
-      checkoutStatus: row.payment.stripeCheckoutStatus,
-      clientPayableOpenCents: 0,
-      reused: true,
-    };
+    // No override (every existing installment caller) → reuse verbatim, byte-identical to today.
+    if (!returnUrls) {
+      return {
+        invoiceId,
+        projectId: row.project.id,
+        paymentId: row.payment.id,
+        checkoutUrl: row.payment.stripeCheckoutUrl,
+        checkoutSessionId: row.payment.stripeCheckoutSessionId,
+        checkoutStatus: row.payment.stripeCheckoutStatus,
+        clientPayableOpenCents: 0,
+        reused: true,
+      };
+    }
+
+    // Override provided (§4.3c): reuse the stored session ONLY when its return URLs already match
+    // the requested override (e.g. the resume-CTA re-POST). If they differ (e.g. an admin-pre-minted
+    // /portal session at first client sign), the stored session is uncompletable-for-the-client:
+    // EXPIRE it (immutable → cannot mutate its URLs) and fall through to a fresh mint with the client
+    // return URLs. Because the old session is expired first, this can NOT create two payable sessions.
+    const storedReturnUrls = row.payment.stripeCheckoutSessionId
+      ? await fetchStripeCheckoutSessionReturnUrls(row.payment.stripeCheckoutSessionId)
+      : null;
+    const matches = storedReturnUrls
+      && storedReturnUrls.successUrl === returnUrls.successUrl
+      && storedReturnUrls.cancelUrl === returnUrls.cancelUrl;
+    if (matches) {
+      return {
+        invoiceId,
+        projectId: row.project.id,
+        paymentId: row.payment.id,
+        checkoutUrl: row.payment.stripeCheckoutUrl,
+        checkoutSessionId: row.payment.stripeCheckoutSessionId,
+        checkoutStatus: row.payment.stripeCheckoutStatus,
+        clientPayableOpenCents: 0,
+        reused: true,
+      };
+    }
+    if (row.payment.stripeCheckoutSessionId) {
+      await expireStripeCheckoutSessionById(row.payment.stripeCheckoutSessionId);
+    }
+    // Fall through to the fresh mint. priorCheckoutSessionId still holds the expired session's id
+    // so the CAS matches this row (WHERE stripeCheckoutSessionId = priorCheckoutSessionId).
   }
 
   const allPayments = await db.query.invoicePayments.findMany({
@@ -231,8 +324,8 @@ export async function createInvoicePaymentCheckoutSession(
   const baseUrl = appBaseUrl();
   const params = new URLSearchParams();
   params.set("mode", "payment");
-  params.set("success_url", `${baseUrl}/portal?checkout=success&invoiceId=${encodeURIComponent(invoiceId)}&paymentId=${encodeURIComponent(paymentId)}`);
-  params.set("cancel_url", `${baseUrl}/portal?checkout=cancelled&invoiceId=${encodeURIComponent(invoiceId)}&paymentId=${encodeURIComponent(paymentId)}`);
+  params.set("success_url", returnUrls?.successUrl ?? `${baseUrl}/portal?checkout=success&invoiceId=${encodeURIComponent(invoiceId)}&paymentId=${encodeURIComponent(paymentId)}`);
+  params.set("cancel_url", returnUrls?.cancelUrl ?? `${baseUrl}/portal?checkout=cancelled&invoiceId=${encodeURIComponent(invoiceId)}&paymentId=${encodeURIComponent(paymentId)}`);
   params.set("customer_email", row.client.email);
   params.set("line_items[0][quantity]", "1");
   params.set("line_items[0][price_data][currency]", "usd");
@@ -247,12 +340,32 @@ export async function createInvoicePaymentCheckoutSession(
 
   const session = await createStripeCheckoutSession(params);
   const now = new Date().toISOString();
+
+  // Phase 12 (§4.3b — Finding 1 BLOCKER): conditional single-statement CAS. D1 has no
+  // transactions, so between the reuse-read above and this write two concurrent accepts could both
+  // mint. The WHERE clause stores ONLY the first racer's session (the row is still unclaimed —
+  // stripeCheckoutSessionId IS NULL — or still holds the id we observed at reuse-read time, e.g.
+  // an expired-and-reminted session); a losing racer's write matches 0 rows and no-ops. For a
+  // single (non-concurrent) caller the WHERE is satisfied and this is byte-identical to today.
   await db.update(invoicePayments).set({
     stripeCheckoutUrl: session.url,
     stripeCheckoutSessionId: session.id,
     stripeCheckoutStatus: "link_ready",
     updatedAt: now,
-  }).where(eq(invoicePayments.id, paymentId));
+  }).where(and(
+    eq(invoicePayments.id, paymentId),
+    priorCheckoutSessionId
+      ? or(isNull(invoicePayments.stripeCheckoutSessionId), eq(invoicePayments.stripeCheckoutSessionId, priorCheckoutSessionId))
+      : isNull(invoicePayments.stripeCheckoutSessionId),
+  ));
+
+  // RE-READ the row and treat the STORED session as canonical — never the local in-flight
+  // session.url. Every racer therefore returns/redirects to the ONE canonical session; the loser's
+  // freshly-minted Stripe session is never handed to a browser (it later checkout.session.expired's
+  // via the no-op branch, since its id is not the stored/canonical one).
+  const canonicalRow = await db.query.invoicePayments.findFirst({ where: eq(invoicePayments.id, paymentId) });
+  const canonicalCheckoutUrl = canonicalRow?.stripeCheckoutUrl ?? session.url;
+  const canonicalCheckoutSessionId = canonicalRow?.stripeCheckoutSessionId ?? session.id;
 
   await logActivity({
     projectId: row.project.id,
@@ -279,8 +392,9 @@ export async function createInvoicePaymentCheckoutSession(
     invoiceId,
     projectId: row.project.id,
     paymentId: row.payment.id,
-    checkoutUrl: session.url,
-    checkoutSessionId: session.id,
+    // Canonical (re-read) values — the stored session all racers converge on, not the in-flight one.
+    checkoutUrl: canonicalCheckoutUrl,
+    checkoutSessionId: canonicalCheckoutSessionId,
     checkoutStatus: "link_ready",
     clientPayableOpenCents,
     reused: false,

@@ -1,6 +1,8 @@
 import { ClientProposalExperience } from "@/components/ClientProposalExperience";
 import { normalizeProposalSection } from "@/lib/proposal-client-experience";
-import { getProposalPackageByToken } from "@/lib/sales";
+import { getProposalPackageByToken, resolveProposalRetainerCheckout } from "@/lib/sales";
+import { unifiedSignPayEnabled } from "@/lib/finance-flags";
+import { invoicePaymentOpenCents } from "@/lib/invoice-balances";
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 
@@ -11,7 +13,7 @@ export default async function ClientProposalPage({
   searchParams,
 }: {
   params: Promise<{ token: string }>;
-  searchParams: Promise<{ accepted?: string; signature?: string; section?: string }>;
+  searchParams: Promise<{ accepted?: string; signature?: string; section?: string; booked?: string; checkout?: string }>;
 }) {
   const { token } = await params;
   const query = await searchParams;
@@ -23,6 +25,19 @@ export default async function ClientProposalPage({
   const clientName = data.client?.preferredName || data.client?.firstName || "there";
   const location = [data.project.venueName, data.project.city, data.project.state].filter(Boolean).join(" · ");
   const initialSection = normalizeProposalSection(query.section);
+
+  // Phase 12: server-side confirmation state. Only computed when the flag is on so the flag-off
+  // path stays byte-identical (no extra queries, no new panels reachable).
+  const unifiedSignPay = unifiedSignPayEnabled();
+  let retainerDueCents = 0;
+  let allPayableSettled = false;
+  if (unifiedSignPay) {
+    const retainer = await resolveProposalRetainerCheckout(data.proposal.id);
+    retainerDueCents = retainer?.clientPayableOpenCents ?? 0;
+    allPayableSettled = data.invoices
+      .filter((invoice) => invoice.status !== "void")
+      .every((invoice) => invoice.payments.every((payment) => invoicePaymentOpenCents(payment) === 0));
+  }
 
   return (
     <ClientProposalExperience
@@ -44,6 +59,11 @@ export default async function ClientProposalPage({
       clientEmail={data.client?.email ?? null}
       acceptedNotice={query.accepted === "1"}
       signatureError={query.signature ?? null}
+      booked={query.booked === "1"}
+      checkoutCancelled={query.checkout === "cancelled"}
+      unifiedSignPay={unifiedSignPay}
+      retainerDueCents={retainerDueCents}
+      allPayableSettled={allPayableSettled}
       initialSection={initialSection}
       contractTitle={data.proposal.contractTitle}
       contractBody={data.proposal.contractBody}

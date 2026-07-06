@@ -47,3 +47,13 @@ export function financeRefundRecordingEnabled(env?: { FINANCE_REFUND_RECORDING?:
 export function refundInitiationEnabled(env?: { REFUND_INITIATION_ENABLED?: string }): boolean {
   return (env ?? process.env).REFUND_INITIATION_ENABLED === "1";
 }
+
+// Phase 12: unified accept-sign-PAY. Off by default. A SIMPLE boolean (not three-state) — there
+// is no autonomous money movement to gate (the client always completes hosted Stripe Checkout, the
+// same client-initiated mechanism as existing installment pay), so there is no observation window.
+// Parsed strict `=== "1"` (unset, "", "0", "true", "on", any typo → OFF). Read INSIDE the body
+// (never as a default param) to avoid TS2559 on the weak ProcessEnv type. Flag OFF ⇒ the accept
+// route behaves byte-identically to today (sign → ?accepted=1; pay via existing per-installment links).
+export function unifiedSignPayEnabled(env?: { UNIFIED_SIGN_PAY?: string }): boolean {
+  return (env ?? process.env).UNIFIED_SIGN_PAY === "1";
+}

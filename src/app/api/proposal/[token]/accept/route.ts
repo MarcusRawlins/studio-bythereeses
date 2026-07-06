@@ -1,5 +1,7 @@
-import { acceptProposalByToken } from "@/lib/sales";
+import { acceptProposalByToken, proposalBaseUrl, resolveProposalRetainerCheckout } from "@/lib/sales";
 import { normalizeProposalSignature, proposalSignatureConsentText, proposalSignatureConsentVersion } from "@/lib/proposal-client-experience";
+import { unifiedSignPayEnabled } from "@/lib/finance-flags";
+import { createInvoicePaymentCheckoutSession } from "@/lib/stripe-checkout";
 import { NextResponse } from "next/server";
 
 export async function POST(request: Request, { params }: { params: Promise<{ token: string }> }) {
@@ -35,5 +37,35 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
     return NextResponse.json({ error: "Proposal link is invalid, expired, or unavailable." }, { status: 404 });
   }
 
-  return NextResponse.redirect(new URL(`/proposal/${token}?accepted=1`, request.url), 303);
+  // Flag OFF ⇒ byte-identical to today: sign → confirmation, pay via existing per-installment links.
+  if (!unifiedSignPayEnabled()) {
+    return NextResponse.redirect(new URL(`/proposal/${token}?accepted=1`, request.url), 303);
+  }
+
+  // Flag ON: the signature is already committed by acceptProposalByToken (BEFORE the mint), so any
+  // mint failure below leaves a valid signature + a still-due retainer (resumable). The retainer's
+  // invoice/payment ids derive ONLY from the token's own proposal (no request input → no IDOR).
+  try {
+    const retainer = await resolveProposalRetainerCheckout(result.proposalId);
+    if (!retainer) {
+      // No payable retainer ($0 / already paid / no schedule) → skip to the signed confirmation.
+      return NextResponse.redirect(new URL(`/proposal/${token}?accepted=1`, request.url), 303);
+    }
+    const base = proposalBaseUrl().replace(/\/$/, "");
+    const session = await createInvoicePaymentCheckoutSession(retainer.invoiceId, retainer.paymentId, {
+      actorType: "client",
+      actorName: signature.signerName,
+      returnUrls: {
+        successUrl: `${base}/proposal/${token}?booked=1`,
+        cancelUrl: `${base}/proposal/${token}?accepted=1&checkout=cancelled`,
+      },
+    });
+    // session.checkoutUrl is the STORED canonical URL (the mint does the conditional link_ready CAS
+    // write + re-read), so concurrent racers all redirect to the SAME session — never a raw
+    // in-flight session.url.
+    return NextResponse.redirect(session.checkoutUrl, 303);
+  } catch (err) {
+    console.error("Unified sign&pay checkout mint failed; signature stands", err);
+    return NextResponse.redirect(new URL(`/proposal/${token}?accepted=1`, request.url), 303);
+  }
 }
