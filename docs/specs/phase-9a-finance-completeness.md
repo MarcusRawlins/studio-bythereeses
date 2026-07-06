@@ -1,7 +1,19 @@
 # Phase 9a: Finance completeness — refund/dispute recording + bookkeeping export + tax/1099 (NO money moved)
 
-Status: 🔵 speccing → safe to build + deploy dark.
+Status: 🔵 speccing → safe to build + deploy dark. **Fable-reviewed + revised (rev 2).**
 Migration: `0089` (additive; latest applied is `0088_automated_sequences`).
+
+> **Rev 2 (Fable spec-review, REQUEST-CHANGES → addressed):** 2 BLOCKERs + 4 MAJORs + 3 MINORs.
+> (1) D1 has no usable transaction — idempotency rebuilt on per-object convergence, dedupe row
+> written last, existing checkout branch left untouched (§1.2). (2) `"refunded"` treated as a
+> settled status so a later refund never deletes the original period's gross; refund shows only as
+> a period-scoped net subtraction (§1.6 table, §2.2, test 4b). (3) Every `paid`/`waived` branch
+> enumerated for `refunded` — openCents=0, block checkout mint, deliberate invoice status (§1.6
+> table). (4) Unit fix: threshold on `grossCollectedCents` only; service-portion refund for invoice
+> recompute (§1.6). (5) Migration mirrored into `src/db/client.ts` dev `migrate()` too (§1.3).
+> (6) Net subtracts only `succeeded` refunds + divergence flag (§2.2). (7) 1099 method matching is
+> a normalized include-list (§4.2). (8) Agent-writable expenses acknowledged; guard test scoped to
+> new surfaces (§4.2). (9) Orphan-amount absolute sanity clamp (§1.5).
 
 ## Scope boundary (read first)
 
@@ -64,16 +76,35 @@ if (eventType.startsWith("charge.dispute."))     return recordStripeDispute(even
 return { ignored: true, reason: "unsupported_event", eventType };
 ```
 
-### 1.2 Idempotency — dedupe on Stripe event id (mandatory)
+### 1.2 Idempotency — per-object convergence + event-id dedupe (mandatory)
 
 Active-Learning Log: *"Attacker-chosen ids → INSERT ON CONFLICT DO NOTHING, never UPDATE
 from inbound. A replayed webhook doesn't double-record."* Stripe **redelivers** events (at-least-once).
 A replayed `charge.refunded` must not double-count a refund.
 
-New table `stripe_webhook_events` (migration 0089) acts as the dedupe gate for **all**
-webhook event types, including the existing checkout types (retro-hardening — currently
-checkout replays are guarded only by the `status === "paid"` short-circuit, which is
-event-specific; a central event-id ledger is stronger and reusable):
+> **⚠️ D1 has no usable transaction (Fable finding #1, verified).** Cloudflare D1 rejects
+> `begin`/`commit`/`rollback` at runtime; drizzle's `db.transaction()` issues exactly those raw
+> statements (`node_modules/drizzle-orm/d1/session.js`), and **this codebase has never used one**
+> (zero `db.transaction`/`.batch(` in `src/`). Local better-sqlite3 *does* support transactions,
+> so a transaction-based design would pass tests in dev and 500 on every event in prod. **Do NOT
+> use `db.transaction`.** `db.batch()` is the only atomic primitive, and it can't hold this flow
+> (link resolution + invoice recompute need reads *between* writes). Idempotency is therefore built
+> on **per-object convergence**, not a transactional claim.
+
+**Primary safety = idempotent-by-construction writes** (each is safe to replay on its own):
+- `payment_refunds.stripe_refund_id` and `payment_disputes.stripe_dispute_id` are `UNIQUE`;
+  record via `INSERT … ON CONFLICT DO NOTHING` then a follow-up `UPDATE … WHERE stripe_*_id = ?`
+  that sets fields to the **authoritative inbound values** (a set, not an increment — replays
+  converge to the same row state).
+- `charge.refunded` sets `invoice_payments.refunded_amount_cents = clamp(amount_refunded, …)`
+  as a **set-to-authoritative** (Stripe's `amount_refunded` is cumulative), never `+=`. Replays
+  converge; no double-count even without any dedupe.
+- The existing `status === "paid"` short-circuit **stays** as the checkout-settlement guard —
+  do NOT wrap or gate the existing checkout branch behind the new dedupe (Fable finding #1: that
+  would ship a prod regression on the always-on money path).
+
+**Secondary = event-id dedupe row (fast-path skip + audit, written LAST).** New table
+`stripe_webhook_events` (migration 0089):
 
 ```sql
 CREATE TABLE IF NOT EXISTS stripe_webhook_events (
@@ -85,19 +116,20 @@ CREATE TABLE IF NOT EXISTS stripe_webhook_events (
 );
 ```
 
-Gate pattern (fail-closed, race-safe): attempt
-`INSERT INTO stripe_webhook_events (event_id, ...) VALUES (...) ON CONFLICT(event_id) DO
-NOTHING` and check rows-affected. If zero → already processed → return
-`{ ignored: true, reason: "duplicate_event", eventId }` **before** any ledger mutation. The
-`event.id` is validated as a non-empty string first; a missing/blank id is rejected (throw →
-400, Stripe retries — never silent-drop).
+Ordering (**write the dedupe row LAST**, after successful processing):
+1. Validate `event.id` as a non-empty string first; a missing/blank id is rejected (throw →
+   400, Stripe retries — never silent-drop).
+2. Fast-path skip: `SELECT 1 FROM stripe_webhook_events WHERE event_id = ?` — if present,
+   return `{ ignored: true, reason: "duplicate_event", eventId }` before any work.
+3. Process the event through the convergent per-object writes above.
+4. **Only after** step 3 succeeds, `INSERT INTO stripe_webhook_events … ON CONFLICT(event_id)
+   DO NOTHING`.
 
-Note the ordering subtlety: insert the dedupe row *first* (claims the event), then mutate the
-ledger. If the ledger mutation throws after the claim, we return non-2xx so Stripe retries —
-but the claim row now exists and would suppress the retry. Mitigation: perform the claim +
-ledger writes in a **single transaction** so a failed mutation rolls back the claim too
-(SQLite/D1 supports this via `db.transaction`). This keeps "claimed" == "successfully
-recorded". Add a test asserting a mid-write throw leaves *no* dedupe row.
+If step 3 throws, no dedupe row is written → Stripe retries → step 3 re-runs, and because every
+write in step 3 is convergent (UNIQUE insert-or-ignore + set-to-authoritative), reprocessing is
+safe and produces the identical end state. Test #4 asserts: a forced mid-write throw leaves **no**
+`stripe_webhook_events` row, and a subsequent successful replay produces exactly one refund row
+with the correct amount (convergence), not two.
 
 ### 1.3 New schema (migration 0089, additive)
 
@@ -157,9 +189,18 @@ CREATE INDEX IF NOT EXISTS idx_payment_disputes_pi  ON payment_disputes(stripe_p
 CREATE INDEX IF NOT EXISTS idx_payment_disputes_ip  ON payment_disputes(invoice_payment_id);
 ```
 
-Mirror these in `src/db/schema.ts` (`paymentRefunds`, `paymentDisputes` tables + the four
-new `invoicePayments` columns) and add drift/canon assertions in `src/db/studio-canon.test.ts`
-following the existing "external ids uniquely indexed for ledger reconciliation" pattern.
+Mirror these in **three** places (finding #5 — the spec previously named only the first two,
+which would leave the dev/test DB missing the tables and fail the entire tsx test plan):
+1. `src/db/schema.ts` — `paymentRefunds`, `paymentDisputes`, `stripeWebhookEvents`,
+   `mileageLogs` tables + the four new `invoicePayments` columns + the `vendors` tax columns.
+2. `src/db/studio-canon.test.ts` — drift/canon assertions following the existing "external ids
+   uniquely indexed for ledger reconciliation" pattern.
+3. **`src/db/client.ts` local-dev `migrate()`** — the better-sqlite3 dev/test DB converges via
+   the idempotent block there (every migration 0085–0088 has one; see `addColumnIfMissing`
+   calls ~client.ts:586-736). Add: `addColumnIfMissing` × 4 on `invoice_payments`, the `vendors`
+   tax columns, and `CREATE TABLE IF NOT EXISTS` × 4 (`stripe_webhook_events`,
+   `payment_refunds`, `payment_disputes`, `mileage_logs`) + indexes. Without this, local tests
+   and `/finance` fail on missing tables/columns.
 
 ### 1.4 Linking a webhook to our payment row
 
@@ -187,6 +228,10 @@ Even post-signature, treat the JSON as adversarial (Active-Learning Log):
   **cap** each amount at the linked payment's `grossCollectedCents` (a refund cannot exceed
   what we recorded as collected — clamp with `Math.min`, and if it exceeds, still record but
   flag `needs_reconciliation` rather than trusting the number blindly).
+  **Orphaned rows (no linked payment, §1.4 case 3) have no `grossCollectedCents` to cap
+  against — apply an absolute sanity clamp instead** (Fable finding #9): non-negative integer,
+  hard ceiling (e.g. $1,000,000 = 100_000_000 cents); an out-of-range orphan amount is stored
+  clamped and flagged `needs_reconciliation`, never trusted or dropped.
 - `amount_refunded` on `charge.refunded` is authoritative and cumulative — set
   `invoice_payments.refunded_amount_cents = Math.min(clamp(amount_refunded), grossCollectedCents)`
   (idempotent: replays converge to the same value; this is a set-to-authoritative, not an
@@ -196,23 +241,56 @@ Even post-signature, treat the JSON as adversarial (Active-Learning Log):
 
 ### 1.6 Effect on payment/invoice status
 
-`reconciledInvoicePaymentStatus(invoice, paidTotal)` (src/lib/sales.ts:84) currently maps
-paid-total → status. Extend the recording path so that after writing refund/dispute summary
-columns it recomputes and, when fully refunded, transitions the payment status to a new
-terminal `"refunded"` value (the AR aging filter at sales.ts:1590 **already excludes
-`refunded`** — good, this was pre-wired). Rules:
-- `refunded_amount_cents >= grossCollectedCents` (or `>= paidAmountCents`) → payment.status =
-  `"refunded"`, invoice recomputed (a fully-refunded payment no longer counts toward
-  `amountPaidCents`).
-- partial refund → keep `"paid"`, but net-collected math subtracts `refunded_amount_cents`.
-- open dispute → payment.status stays `"paid"` but `dispute_status = "open"` and the row is
-  forced into the reconciliation queue (funds are at risk, not yet lost).
+The full-refund path introduces a new terminal payment status `"refunded"`. **`"refunded"` is a
+SETTLED status, not an open one** — this is the crux of findings #2 and #3. Every code path that
+currently special-cases `"paid"`/`"waived"` must be audited and told how to treat `"refunded"`,
+or the flip will (a) retroactively delete gross revenue and (b) make the payment re-owed and
+re-billable. Do NOT ship the status flip until all of the below are handled.
+
+**Threshold (finding #4 — unit correctness).** `refunded_amount_cents` is capped at
+`grossCollectedCents` (service **+** client card fee). But invoice `amountPaidCents` sums
+`paidAmountCents` (service only — see `settleInvoicePaymentCheckoutSession`:
+`paidAmountCents: serviceOpenCents` vs `grossCollectedCents: amountTotalCents`). So:
+- Full-refund threshold is **`refunded_amount_cents >= grossCollectedCents` only** — drop the
+  `>= paidAmountCents` parenthetical (a $1,000 partial refund on $1,030 gross must NOT flip to
+  terminal `refunded`).
+- For invoice recompute, the refund's **service-portion** is
+  `refundServiceCents = clamp(refunded_amount_cents − clientFeeCents, 0, paidAmountCents)`.
+  Simpler equivalent rule, which the builder may use instead: a **fully-refunded** payment
+  contributes **0** to `amountPaidCents`; a **partial** refund lives only in net figures (§2)
+  and does not alter `amountPaidCents`. Pick one and state it in code comments; do not subtract
+  a gross-based refund from a service-based paid total.
+
+**Status transitions (system-from-webhook only):**
+- `refunded_amount_cents >= grossCollectedCents` → `payment.status = "refunded"`; invoice
+  recomputed with the payment contributing 0 to `amountPaidCents`.
+- partial refund → keep `"paid"`; net-collected math (§2) subtracts the refunded amount; no
+  change to `amountPaidCents`.
+- open dispute → `payment.status` stays `"paid"`, `dispute_status = "open"`, row forced into the
+  reconciliation queue (funds at risk, not yet lost).
 - dispute lost + funds not reinstated → treat disputed amount like a refund for net-collected;
   dispute won / funds_reinstated → net effect reversed.
 
-Recompute the parent invoice: `amountPaidCents` = Σ paid payments minus refunded amounts;
-`status` via `reconciledInvoicePaymentStatus`. This all happens **system-from-webhook**
-(actorType `"system"`, actorName `"Stripe"`), never from an agent or admin form.
+**Every `"paid"`/`"waived"` branch that must also handle `"refunded"` (finding #3 — enumerate,
+do not leave to the builder):**
+
+| Location | Current behavior | Required `"refunded"` behavior |
+| --- | --- | --- |
+| `getBookkeepingReport` paid-rows query (bookkeeping.ts:518, `eq(status,"paid")`) | gross revenue from paid rows scoped by `paidAt` | **treat as settled** — `inArray(status, ["paid","refunded"])`, keep `paidAt` scoping, so the original period's **gross stays immutable** (finding #2). Refund shows up ONLY as the §2.2 net subtraction. |
+| `getPaymentLedgerReport` per-row `paidCents` (sales.ts:1661, `status==="paid" ? paidAmountCents : 0`) | 0 for non-paid | include `"refunded"` so `paidCents` reflects the original gross collection (net is derived separately). |
+| `getPaymentLedgerReport` `openCents` (sales.ts:1670, `paid`\|`waived` → 0) | full amount re-owed otherwise | `"refunded"` → `openCents = 0` (a refunded payment is NOT re-owed). |
+| `invoicePaymentOpenCents` (invoice-balances.ts:55, `paid`\|`waived` → 0) | full amount otherwise | add `"refunded"` → return 0. |
+| `createInvoicePaymentCheckoutSession` (stripe-checkout.ts:194, blocks `paid`\|`waived`) | mintable otherwise | **block on `"refunded"`** — do NOT let a fresh Stripe checkout link be minted for a refunded payment. |
+| `reconciledInvoicePaymentStatus` (sales.ts:84) | maps recomputed paidTotal→status; 0 → `"sent"` | a fully-refunded invoice must NOT resurrect into `"sent"`/dunning. Give it a deliberate invoice-level status (e.g. keep/route to a `"refunded"`-aware terminal) rather than the accidental `"sent"`. |
+| AR aging filter (sales.ts:1590) | **already excludes `refunded`** ✅ | no change (pre-wired). |
+
+Recompute the parent invoice **system-from-webhook** (actorType `"system"`, actorName
+`"Stripe"`), never from an agent or admin form.
+
+The status flip (and only the flip) sits behind the three-state `FINANCE_REFUND_RECORDING` flag
+(§5): at `record_only` the child tables + summary columns are written and surfaced in net
+figures, but `payment.status` is NOT flipped and none of the above branches change behavior — so
+the risky enumerated changes are inert until Tyler flips to `enforce` after an observation window.
 
 ### 1.7 Activity logging
 
@@ -249,12 +327,22 @@ eventId }`. Register the new action strings anywhere activity actions are enumer
 
 ### 2.2 Net figures
 
-`getBookkeepingReport` totals `revenueCents` from `paidRows … paidAmountCents`. Add a parallel
-subtraction: query `payment_refunds` (and lost-not-reinstated disputes) in the same
-period-scope and subtract to produce `netRevenueCents` / `netDepositCents`. Do this as an
-additive field so the bookkeeping summary CSV (section 3) can show both gross and net lines.
-Period-scoping uses the refund/dispute `created_at` (money-event date), consistent with how
-`paidRevenueConditions` scopes on `paidAt`.
+`getBookkeepingReport` totals `revenueCents` from `paidRows … paidAmountCents`. Gross stays
+immutable (§1.6: paid-rows query now matches `["paid","refunded"]` scoped by `paidAt`, so a later
+refund never removes revenue from the original period). Add a **parallel subtraction** to produce
+`netRevenueCents` / `netDepositCents` as **additive** fields (both gross and net lines appear in
+the CSV, section 3; existing gross consumers/tests unchanged):
+
+- Subtract **only `payment_refunds.status = 'succeeded'`** rows (finding #6 — `pending`/`failed`/
+  `canceled` refunds have not moved money and must not be subtracted), plus lost-not-reinstated
+  disputes.
+- Period-scope the subtraction on the refund/dispute **`created_at`** (money-event date),
+  consistent with how `paidRevenueConditions` scopes revenue on `paidAt`. (Net-across-periods is
+  therefore correct: gross booked in the paid period, refund subtracted in the refund period; no
+  period double-removes the same dollars — the finding-#2 failure mode.)
+- **Divergence guard (finding #6):** flag any payment where
+  `refunded_amount_cents ≠ SUM(succeeded child refunds)` as `needs_reconciliation` — catches a
+  dropped/missed event in either stream (the `charge.refunded` summary vs the `refund.*` children).
 
 ### 2.3 Guard stays — agents cannot mutate
 
@@ -351,10 +439,23 @@ payments are reported by the processor on 1099-K, not by us — so exclude
   `vendors.tax_address TEXT` (admin-entered W-9 data; store only last4 of TIN, never the full
   SSN/EIN — PII minimization).
 - New read builder `get1099VendorReport({ year })` in `src/lib/tax.ts`: sum
-  `expenses.amount_cents` per vendor for the year where `status='paid'` and
-  `payment_method NOT IN ('stripe','credit_card')`, flag vendors crossing $600, and mark which
+  `expenses.amount_cents` per vendor for the year where `status='paid'` and the payment method is
+  a **reportable (non-card) method**, flag vendors crossing $600, and mark which
   crossed-threshold vendors are **missing W-9 data** (`legal_name` / `tax_id_last4` null) as a
   reconciliation item.
+  **Method matching must be an include-list over normalized text, not an exact-string exclude
+  list (finding #7):** `expenses.payment_method` is unvalidated free text (`formNullableText`),
+  so `NOT IN ('stripe','credit_card')` would miss `'card'`, `'Credit Card'`, `'visa'`, etc. and
+  over-report 1099 amounts. Normalize (`.trim().toLowerCase()`) and count only a known reportable
+  set (`cash`/`check`/`zelle`/`venmo`/`ach`/`wire`); treat any **unrecognized** method on a
+  ≥$600 vendor as a `needs_reconciliation` flag (don't silently include or exclude an ambiguous
+  method).
+- **Agent-writable input caveat (finding #8):** expenses are already agent-writable via
+  `createExpenseFromAgent`/`updateExpenseFromAgent` (no Tyler-approval guard — consistent with
+  existing authority; not a canonical-money write). Those feed the 1099 tally and quarterly
+  estimate. This is acknowledged, not changed here. The no-agent-write **guard test** (§2.3, §6.2
+  #11) covers the *new* finance-adjacent surfaces only: `vendors` W-9 columns, `mileage_logs`, and
+  the refund/dispute tables + new `invoice_payments` columns.
 - Read-only surface: `/finance/tax` 1099 section + `/api/finance/1099-summary.csv`. Admin can
   enter W-9 fields via a simple guarded form (`/api/finance/vendors` update — admin-only,
   `guardDirectWorkerApiRequest`). Agents cannot write vendor tax data (finance-adjacent) —
@@ -446,11 +547,20 @@ Webhook recording (tsx tests alongside `stripe-checkout` tests):
    `refunded_amount_cents`, writes `payment_refunds`, links via `payment_intent` →
    `external_payment_id`; partial vs full refund → status stays `paid` vs flips `refunded`
    (enforce mode).
-3. **Idempotency** — replay the same `event.id` twice → one `payment_refunds` row, unchanged
-   `refunded_amount_cents`, second call returns `duplicate_event`. Replay a
-   `charge.dispute.created` → one `payment_disputes` row.
-4. **Transaction rollback** — a forced mid-write throw leaves no `stripe_webhook_events` row
-   (retry-safe claim).
+3. **Idempotency (convergence)** — replay the same `event.id` twice → one `payment_refunds` row,
+   unchanged `refunded_amount_cents` (set-to-authoritative, not incremented), second call returns
+   `duplicate_event`. Replay a `charge.dispute.created` → one `payment_disputes` row. Assert
+   convergence holds even if the dedupe row is absent (per-object UNIQUE + set-to-authoritative
+   is the primary safety, not the event-id row).
+4. **Retry-safety (no transaction)** — a forced mid-write throw leaves **no**
+   `stripe_webhook_events` row (it's written last); a subsequent successful replay produces
+   exactly one refund row with the correct amount (not two). Confirms the design does NOT rely on
+   `db.transaction` (which D1 rejects at runtime — finding #1).
+4b. **Cross-period gross immutability** — payment paid $X in period P1, fully refunded in P2:
+   re-running the P1 bookkeeping report shows **unchanged** gross `revenueCents` (the refund does
+   NOT retroactively delete P1 revenue); the refund appears only as the P2 net subtraction; net
+   across P1+P2 nets to $0, not −$X (finding #2). Also assert `openCents`/`invoicePaymentOpenCents`
+   are 0 for the refunded payment and no fresh checkout link can be minted (finding #3).
 5. **Dispute lifecycle** — `created` → open; `closed` won → won + net restored; `closed` lost
    → net reduced; `funds_reinstated` → reinstated flag + net reversed.
 6. **Untrusted fields** — over-cap refund amount (> gross) is clamped/flagged; hostile long
@@ -475,8 +585,8 @@ Webhook recording (tsx tests alongside `stripe-checkout` tests):
 
 | # | Task | Effort | Risk |
 | --- | --- | --- | --- |
-| 1 | Migration 0089: `stripe_webhook_events`, `payment_refunds`, `payment_disputes`, `mileage_logs`; `invoice_payments` + `vendors` columns; indexes. Mirror in `schema.ts`; canon/drift tests. | M | Med (always-on read cols → migration-ordering discipline) |
-| 2 | Event-id dedupe gate (`stripe_webhook_events`, INSERT-ON-CONFLICT + txn claim) wired into `handleStripeCheckoutWebhook`; retro-covers checkout events. | S | Med (txn semantics, retry-safety) |
+| 1 | Migration 0089: `stripe_webhook_events`, `payment_refunds`, `payment_disputes`, `mileage_logs`; `invoice_payments` + `vendors` columns; indexes. Mirror in `schema.ts`, `studio-canon.test.ts`, **and the `src/db/client.ts` local-dev `migrate()` block** (finding #5). | M | Med (always-on read cols → migration-ordering discipline) |
+| 2 | Event-id dedupe (`stripe_webhook_events`, written **last**; per-object convergence is primary safety — **no `db.transaction`**, finding #1) wired into `handleStripeCheckoutWebhook`; do NOT gate the existing checkout branch behind it. | S | Med (retry-safety without transactions) |
 | 3 | `recordStripeChargeRefunded` / `recordStripeRefund` / `recordStripeDispute` in `stripe-refunds.ts`; link resolution; untrusted-field validation/caps; system activity logs. | L | High (money-integrity correctness, untrusted input) |
 | 4 | Status/net recompute: extend `reconciledInvoicePaymentStatus` consumers, `payment.status="refunded"`, invoice recompute; `FINANCE_REFUND_RECORDING` three-state flag. | M | Med (behavior change behind flag) |
 | 5 | Reconciliation surfacing: extend `PaymentLedgerRow`/report totals (refunded/disputed/net), `paymentLedgerNeedsReconciliation`, agent-finance report + `/finance` page. | M | Med (don't break existing tests — add net alongside gross) |
