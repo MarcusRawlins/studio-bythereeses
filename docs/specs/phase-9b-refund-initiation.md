@@ -8,6 +8,21 @@ Pairs with: `phase-9a-finance-completeness.md` (the refund/dispute **recording**
 
 ---
 
+## Rev 2 (Fable spec-review) — changelog
+
+Rev 2 addresses an adversarial Fable review (REQUEST-CHANGES; 0 BLOCKER, 2 MAJOR, 4 MINOR). Each fix was verified against the cited code before landing.
+
+| Finding | Severity | What changed |
+| --- | --- | --- |
+| **M1** — stuck-`submitting` double-refund via 24h idempotency-key expiry; §3.3/§4.5 contradiction; reconciliation gap | MAJOR | **Absolute rule: a `submitting` row is NEVER blind-retried** (removed the §4.5/§3.3 "Stripe's idempotency key makes the retry safe" language — the key **expires after ~24h**, so a re-POST of an old stuck row is a FRESH refund → double-pay). §3.2 now states the ~24h expiry constraint explicitly. §3.3 recovery = **reconcile against Stripe** (query refunds for the PI / match `metadata[initiation_id]`), then manually resolve the row to `succeeded`/`failed` — never re-POST. §4.4 reconciliation extended to surface `submitting` rows older than **~1h** (the money-BLOCKED wedge: a stuck `submitting` row pins `maxRefundable=0` and the old `status='succeeded'`-only query never saw it). |
+| **M2** — §12 didn't verify the auth boundary is ARMED (both guards fail-OPEN when their env is unset) | MAJOR | §12 adds a **hard-blocking, smoke-asserted precondition**: confirm `ORIGIN_PROXY_SECRET` is set at the Worker AND `ADMIN_PROOF_ENFORCE=1` **before** flipping `REFUND_INITIATION_ENABLED` on. Named alongside the webhook-subscription precondition. (`origin-guard.ts:61` returns `false` — no block — when the secret is unset; `adminProofEnforced` is `false` unless the flag is exactly `"1"`, `admin-proxy-auth.test.ts:197`.) |
+| **M3** — amount not pinned between prepare and execute; §3.2 idempotency-key wording wrong | MINOR | §3.2/§4.1: the `submitting`-claim UPDATE now **persists the final `amountCents` onto the row**, and the Stripe POST sends **exactly the row's persisted amount** (not the prepare-time prefill). Corrected §3.2: the amount is **not** in the Idempotency-Key; the real guarantee is Stripe **rejects same-key-different-params with `idempotency_error`**. New test §9.15: two executes, same `initiationId`, different amounts → **exactly one** refund. |
+| **M4** — flag parse + defense-in-depth | MINOR | §8: `refundInitiationEnabled()` parses **strict `=== "1"`** (matches `adminProofEnforced`; `"true"`/`"0"` read as off), and the flag check now also lives **inside** `initiateInvoicePaymentRefund` itself, not only in the routes. |
+| **M5** — dispute-lag race + local `lost`-and-not-reinstated geometry | MINOR | §2 P5: states **Stripe is the backstop** for the just-opened-dispute lag race (Stripe rejects refunds on actively-disputed charges → the initiation lands `failed`, no double-loss); adds a **local block** on `dispute_status="lost" && !fundsReinstated` (the true double-loss shape). |
+| **M6** — `charge.refunded` is the load-bearing subscription; §3.3 lifecycle wording | MINOR | §11/§12 name **`charge.refunded` specifically** as load-bearing: only `recordStripeChargeRefunded` sets `refunded_amount_cents` + drives the status flip; `recordStripeRefund` (`refund.created/updated`) writes child rows + `lastRefundAt` only. §3.3/§4.1 wording made consistent: the lifecycle **INSERTs `pending` at prepare** and **UPDATEs to `submitting` at execute** (no "INSERT the submitting claim"). |
+
+---
+
 ## 1. Scope + the money-movement boundary (restated)
 
 **In scope (9b):** an **admin-only** UI action + endpoint that calls Stripe `POST /v1/refunds` to issue a full or partial refund against an `invoice_payments` row we own; a small **`refund_initiations`** audit/idempotency table (migration 0091) that records every initiation attempt; the safety rails (amount cap, ledger re-check, typed confirmation, Stripe idempotency key, in-flight guard); an OFF-by-default flag; and the interleave with 9a so the canonical ledger stays single-sourced.
@@ -33,10 +48,14 @@ Each row is a decision Tyler is being asked to ratify. The **Recommended default
 | P2 | Refund reason capture | none / internal note / Stripe reason + internal note | **both — internal reason (required, ≥3 chars, capped 500) + Stripe `reason` (default `requested_by_customer`)** | Internal reason is the audit trail (activity log + `refund_initiations.reason`); Stripe `reason` ∈ `requested_by_customer\|duplicate\|fraudulent` is optional metadata on Stripe's side. Reason is never a security decision input. |
 | P3 | Second / typed-amount confirmation | single click / typed-amount confirm | **typed-amount confirm (must type the exact cents/dollar figure, server-validated against the same amount)** | This is the most destructive admin action in the app and it is irreversible. A typed confirmation is cheap and defeats accidental / double-click refunds. |
 | P4 | Approval step vs admin-direct | in-app second approver / admin-direct | **admin-direct** (no separate in-app approver) | Tyler *is* the owner/admin; there is no second human. The "approval" that matters is the money-movement guardrail itself: the OFF flag + the first real refund are Tyler actions (§8, §11). Agents can never initiate (§5). |
-| P5 | Refund a payment with an **OPEN dispute** | allow / block | **BLOCK** | Stripe blocks/complicates refunding a charge under dispute, and refunding during a dispute risks a **double loss** (you refund *and* lose the chargeback). Disputes resolve through the dispute flow (9a records `won`/`lost`/`reinstated`), not a refund. Reject with a clear message when `invoice_payments.dispute_status = "open"`. |
+| P5 | Refund a payment with an **OPEN dispute** | allow / block | **BLOCK** | Stripe blocks/complicates refunding a charge under dispute, and refunding during a dispute risks a **double loss** (you refund *and* lose the chargeback). Disputes resolve through the dispute flow (9a records `won`/`lost`/`reinstated`), not a refund. Reject with a clear message when `invoice_payments.dispute_status = "open"`. **See the P5 dispute-edge notes below the table for the two geometries the local `dispute_status="open"` gate does not by itself close.** |
 | P6 | Refund window limit | app-enforced window / rely on Stripe | **rely on Stripe** (no hard app window) + **soft warn** if the charge is > 120 days old | Stripe already fails very old / insufficient-balance refunds; we surface Stripe's error verbatim (cleaned). Encoding our own window would drift from Stripe's rules. |
 | P7 | Payment eligibility | any status / paid-and-partially-refunded only | **only Stripe-collected `paid` (incl. already-partially-refunded) payments with a non-null `external_payment_id` (pi_…)** | A `waived` payment collected nothing; a cash/check payment has no Stripe charge to refund; a fully-`refunded` payment has `maxRefundable = 0` (rejected by the amount cap). |
 | P8 | Invoice/project state after refund | 9b mutates status / 9a webhook mutates status | **9a owns all status changes** | 9b moves money; the resulting `charge.refunded` webhook lets 9a set `refunded_amount_cents` and (at `FINANCE_REFUND_RECORDING=enforce`) flip a fully-refunded payment to the terminal `refunded` status via the enumerated settled-status handling (9a §1.6). 9b never touches `payment.status` or the invoice. **Consequence Tyler must know:** to have a full refund *reflected in invoice/payment status*, `FINANCE_REFUND_RECORDING` must be at `enforce` (§8, §11). |
+
+**P5 dispute-edge notes — the two geometries the local `dispute_status="open"` gate does not fully close (M5):**
+- **(a) Just-opened-dispute lag race — Stripe is the backstop.** A dispute can open at Stripe in the window between our fresh `dispute_status` read and the `POST /v1/refunds`, so the local check can pass on a charge that is now under dispute. **Stripe is the authoritative backstop:** it rejects a refund on an actively-disputed charge, so the initiation lands `failed` (cleaned Stripe error surfaced, §3.7) — **no double-loss, no money moves.** The local check is the fast/clean path; Stripe is the hard guarantee.
+- **(b) `dispute_status="lost" && !fundsReinstated` — block LOCALLY, don't just lean on Stripe.** When a dispute is `lost` and funds were **not** reinstated, the chargeback has already pulled the funds, yet `grossCollected − refunded` still shows a positive `maxRefundable` — **this is the true double-loss geometry** (refund on top of a chargeback that already took the money). Stripe will typically reject, but the cleaner shape is to **block locally**: reject when `dispute_status="lost" && !fundsReinstated` with a clear "funds already pulled by chargeback" message, rather than depending on Stripe's rejection. (A `won` or `reinstated` dispute leaves the funds with us and is refundable normally, subject to the amount cap.) Fold both `open` and `lost && !fundsReinstated` into the §3.4 eligibility gate.
 
 ---
 
@@ -59,24 +78,32 @@ maxRefundableCents         = max(grossCollectedCents - alreadyRefundedCents, 0)
 - **Reject** if `requestedAmountCents <= 0` or `requestedAmountCents > maxRefundableCents`. A refund can never exceed collected-minus-already-refunded. This is checked against the **fresh** ledger at execution — a refund that landed via webhook between draft and confirm shrinks `maxRefundableCents` and can invalidate a stale draft.
 - **Why `max(webhook, localInFlight)`** (critical, do not omit): if the 9a webhook is lagging or (mis-)configured, `refundedAmountCents` may still be 0 right after a successful refund. Counting this payment's own non-failed `refund_initiations` rows means a second refund is capped correctly **even before the webhook lands**, closing the double-refund window that would otherwise exist during webhook lag. `payment_refunds`/`refunded_amount_cents` remain webhook-owned; this is a *read-side* union for the cap only, not a canonical write.
 
-### 3.2 Stripe idempotency key (double-click / retry cannot double-refund)
-- Every `POST /v1/refunds` is sent with an **`Idempotency-Key`** header equal to the `refund_initiations.id` (a UUID minted once per initiating action; §4). Stripe guarantees at-most-once execution per key — a network retry or a double-submit of the same initiation returns the *same* refund object, never a second refund.
-- The key is **deterministic per (payment, amount, initiating-action)**: it is minted at "prepare" time and persisted, so any retry of that same initiation reuses it. A *deliberate* new refund is a new "prepare" → new id → new key (correctly a distinct refund).
+### 3.2 Stripe idempotency key (double-click / in-window retry cannot double-refund)
+- Every `POST /v1/refunds` is sent with an **`Idempotency-Key`** header equal to the `refund_initiations.id` (a UUID minted once per initiating action; §4). Within Stripe's idempotency-key retention window, Stripe guarantees at-most-once execution per key — a network retry or a double-submit of the same initiation returns the *same* refund object, never a second refund.
+- **The key is minted once per initiating action and persisted** (at "prepare"; §4.1) so any retry of that same initiation *within the window* reuses it. A *deliberate* new refund is a new "prepare" → new id → new key (correctly a distinct refund).
+- **Correction (M3) — what the key actually guarantees.** The key is **not** "deterministic per (payment, amount)": the **amount is not part of the key**. The real guarantee is that Stripe **rejects a request that reuses a key with different parameters** (an `idempotency_error`, HTTP 400) — it does not silently re-run with the new amount, and it does not issue a second refund. This is why §4.1 **pins the amount onto the row at execute** and sends **exactly the row's persisted amount**: the key + the pinned amount together mean a retry is byte-identical (same key, same params → same refund object), while a params drift is a hard 400, never a second money movement.
+- **⚠️ Hard constraint — the idempotency key EXPIRES (~24h) (M1).** Stripe retains idempotency keys for only ~24 hours. After the window lapses, a "retry" that reuses the same key is treated as a **brand-new request** and Stripe will **execute a FRESH refund** → double-pay. Therefore the key is a guard **only against near-term retries/double-clicks**, never against a stale in-flight row hours later. **No future increment may add an automatic retry of an in-flight (`submitting`) row** — recovery is reconcile-against-Stripe, never re-POST (§3.3, §4.4). Treat this ~24h expiry as a load-bearing safety constraint, not an implementation detail.
 
 ### 3.3 In-flight guard (local, belt-and-suspenders to Stripe's key)
 On execute, load the `refund_initiations` row by id:
-- `pending` → proceed (transition to `submitting` **before** the Stripe call).
-- `submitting` or `succeeded` → **do not call Stripe again**; return the existing row's result (idempotent response). This is the local guard against a double-click racing the network.
+- `pending` → proceed. Persist the pinned `amountCents` and transition `pending` → `submitting` in the **same UPDATE**, **before** the Stripe call (§4.1).
+- `succeeded` → **do not call Stripe again**; return the existing row's result (idempotent response). This is the local guard against a double-click racing the network.
+- `submitting` → **do not call Stripe again, and do NOT blind-retry (M1).** A `submitting` row means the Stripe POST may already be in flight or already executed (money may already have moved). Return an "in progress / needs reconciliation" response; recovery is **reconcile against Stripe, never re-POST** (see below + §4.4). **This rule is absolute — a `submitting` row is NEVER auto-retried, no matter how old.**
 - `failed` → terminal for that id; a user "try again" mints a **fresh** initiation (new id/key). Do not silently reuse a failed key from a new user action.
 
-Ordering (no `db.transaction` — D1 rejects it; Active-Learning Log): INSERT the `submitting` claim **before** the network call, UPDATE to `succeeded`/`failed` **after**. If the process dies between claim and response, the row is left `submitting`; a reconciliation surfaces it (§4.4) and Stripe's idempotency key makes any retry safe.
+**Lifecycle ordering (no `db.transaction` — D1 rejects it; Active-Learning Log).** The row is **INSERTed as `pending` at prepare**, then **UPDATEd `pending` → `submitting` at execute, before the network call** (the amount is pinned in this same UPDATE, §4.1), then **UPDATEd to `succeeded`/`failed` after** the Stripe response. There is no "INSERT the submitting claim" step — `submitting` is only ever reached by UPDATE of an existing `pending` row.
+
+**Crash between claim and response (the money-critical case, M1).** If the process dies after the `submitting` UPDATE but before the terminal UPDATE, the row is left `submitting` and **money may or may not have moved.** The recovery is **NOT** a re-POST — Stripe's idempotency key **expires after ~24h** (§3.2), so re-POSTing a stale `submitting` row would issue a **second, fresh refund** → double-pay. Instead:
+1. §4.4's reconciliation/tripwire surfaces any `submitting` row older than **~1h**.
+2. Recovery is **reconcile against Stripe**: query Stripe's refunds for the payment intent (or match `metadata[initiation_id]`, which §7 already sends) to learn whether a refund actually executed.
+3. **Manually resolve the row** to `succeeded` (record the returned `re_…` id) or `failed` — **never by re-POSTing.** This is a deliberate, human-in-the-loop resolution, not an automatic retry.
 
 ### 3.4 Ownership + eligibility check before refunding
 Before any Stripe call, confirm the target is a real payment we own:
 - The `paymentId` resolves to an `invoice_payments` row **and** that row's `invoiceId` matches the route `id` (same defensive check as `createInvoicePaymentCheckoutSession`, stripe-checkout.ts:187).
 - `payment.status === "paid"` (a settled Stripe collection; `waived`/`unpaid`/`pending` are ineligible — P7).
 - `payment.externalPaymentId` is a non-empty `pi_…` (there is a Stripe charge to refund; cash/check payments are rejected).
-- `payment.dispute_status !== "open"` (P5).
+- `payment.dispute_status !== "open"` **and NOT (`dispute_status === "lost" && !fundsReinstated`)** (P5 + M5 — reject the already-charged-back double-loss geometry locally; Stripe is the backstop for the just-opened-dispute lag race).
 - `maxRefundableCents > 0` (§3.1).
 
 ### 3.5 Secret handling — fail-closed, never logged
@@ -105,25 +132,34 @@ The core contract: **9b initiates, 9a records.** 9b never writes `payment_refund
 ```
 1. PREPARE  (admin opens refund dialog)
    → INSERT refund_initiations { id=uuid, invoicePaymentId, stripePaymentIntentId,
-       amountCents=maxRefundableCents (prefill), status='pending', initiatedBy }
+       amountCents=maxRefundableCents (PREFILL only — not the final amount),
+       status='pending', initiatedBy }
    → id is BOTH our row id AND the Stripe Idempotency-Key.
 
-2. EXECUTE  (admin types the confirm amount, submits)
-   → re-check ledger (§3.1), typed-amount == amountCents, eligibility (§3.4)
-   → UPDATE refund_initiations SET status='submitting'          (claim BEFORE network)
-   → POST /v1/refunds  (Idempotency-Key: id)                    (money moves here)
+2. EXECUTE  (admin types the confirm amount, submits { initiationId, amountCents, confirmAmountCents })
+   → re-check ledger (§3.1), typed-amount confirm (confirmAmountCents == amountCents), eligibility (§3.4)
+   → UPDATE refund_initiations SET status='submitting', amount_cents=<final amountCents>
+       WHERE id=initiationId AND status='pending'   (PIN amount + claim, ONE UPDATE, BEFORE network — M3)
+   → POST /v1/refunds  (Idempotency-Key: id, amount = the ROW's just-persisted amount_cents,
+                        NOT the prepare prefill)     (money moves here)
    → UPDATE refund_initiations SET status='succeeded'|'failed',
        stripeRefundId=re_..., errorMessage=..., updatedAt
    → logActivity(initiated | initiation_failed)
 
 3. RECORD  (Stripe → our webhook, seconds later; 9a code, unchanged)
    → refund.created / charge.refunded arrive at /api/stripe/webhook
-   → 9a recordStripeRefund / recordStripeChargeRefunded write the CANONICAL
-     payment_refunds row (dedupe on stripe_refund_id) + set refunded_amount_cents
-     (set-to-authoritative) + (at enforce) flip status to "refunded".
+   → 9a recordStripeRefund (refund.created/updated): writes the child payment_refunds
+     row (dedupe on stripe_refund_id) + lastRefundAt. Does NOT set refunded_amount_cents.
+   → 9a recordStripeChargeRefunded (charge.refunded): the LOAD-BEARING one (M6) — sets
+     invoice_payments.refunded_amount_cents (set-to-authoritative, from the charge's
+     cumulative amount_refunded) + (at enforce) flips status to "refunded".
 ```
 
+**`charge.refunded` is the load-bearing subscription (M6).** Verified against 9a: **only** `recordStripeChargeRefunded` sets `refunded_amount_cents` and drives the status flip; `recordStripeRefund` (`refund.created/updated`) writes only the child rows + `lastRefundAt`. So if `charge.refunded` specifically is not subscribed at Stripe, the summary column and the status flip never happen **even if `refund.*` is subscribed** — the canonical cap-input column and the terminal status silently lag. §11/§12 name `charge.refunded` explicitly as a hard precondition, not just "the refund webhooks."
+
 `refund_initiations` is an **audit + idempotency** table. `payment_refunds` is the **canonical ledger**, webhook-owned. They are joined for display on `stripe_refund_id` but 9b never writes the canonical table.
+
+**Amount pinning (M3).** The `pending` prefill is a UI default only; the **authoritative amount is the value persisted in the `submitting` UPDATE at execute**, and the Stripe POST sends **exactly that persisted value**. This closes two divergences: (a) the §3.1 Σ-cap sums `refund_initiations.amountCents` — if the row still held the stale full-prefill while a smaller amount was actually sent, the cap would over-count and wrongly block later refunds; (b) the audit row would otherwise diverge from what was actually sent to Stripe. Persist-then-send-the-persisted-value keeps row, cap, and Stripe request identical. (The amount is **not** in the idempotency key (§3.2), so a same-key request with a different amount is a hard `idempotency_error`, never a silent second refund.)
 
 ### 4.2 No double-count
 - Because 9b does **not** write `payment_refunds`, there is exactly one canonical row per Stripe refund — the one 9a inserts `ON CONFLICT DO NOTHING` keyed on `stripe_refund_id`.
@@ -136,11 +172,17 @@ The invoice/payment view shows refund state by joining the two:
 - **`payment_refunds`** row + **`refunded_amount_cents`** = webhook-confirmed canonical state — visible when the webhook lands (usually seconds).
 - Display rule: `succeeded` initiation with a matching `payment_refunds` row → "Refunded" (confirmed). `succeeded` initiation with **no** matching webhook row yet → "Refund submitted (awaiting confirmation)". `failed` → show the cleaned Stripe error.
 
-### 4.4 Reconciliation — webhook-never-arrived detection
-A `refund_initiations` row `status='succeeded'` older than a threshold (e.g. 24h) with **no** `payment_refunds` row sharing its `stripe_refund_id` means the recording webhook never arrived (webhook mis-subscribed or dropped). Surface this in the existing **needs_reconciliation** finance view (extend `paymentLedgerNeedsReconciliation` / the agent-finance `reconciliation` block, 9a §2.1) as an **"Initiated refund not yet recorded"** item. This is the tripwire for the "9a webhook not subscribed" failure mode (§11 precondition).
+### 4.4 Reconciliation — two tripwires (webhook-never-arrived AND stuck in-flight)
+Both surface in the existing **needs_reconciliation** finance view (extend `paymentLedgerNeedsReconciliation` / the agent-finance `reconciliation` block, 9a §2.1).
+
+**(1) Webhook-never-arrived** — a `refund_initiations` row `status='succeeded'` older than a threshold (e.g. 24h) with **no** `payment_refunds` row sharing its `stripe_refund_id` means the recording webhook never arrived (webhook mis-subscribed — esp. `charge.refunded` per M6 — or dropped). Surface as an **"Initiated refund not yet recorded"** item. This is the tripwire for the "9a webhook not subscribed" failure mode (§11 precondition).
+
+**(2) Stuck `submitting` (M1 — money-critical).** A `refund_initiations` row still `status='submitting'` older than **~1h** means the execute path crashed between the claim and the terminal UPDATE (§3.3). **Money may or may not have moved**, and the §3.1 Σ-cap counts this row (`status IN ('submitting','succeeded')`), so it **pins that payment's `maxRefundable` at 0 until resolved** — a refundability wedge, not just a display gap. The old `status='succeeded'`-only query never surfaced this row. Surface it as a **"Refund stuck in-flight — reconcile against Stripe"** item. **Resolution is human-in-the-loop reconcile-against-Stripe, NOT a re-POST** (the ~24h key expiry makes a re-POST a fresh double-refund; §3.2, §3.3): query Stripe's refunds for the payment intent or match `metadata[initiation_id]` (§7), then manually set the row to `succeeded` (with the `re_…` id) or `failed`. The ~1h threshold (vs 24h for tripwire 1) is deliberately tight because a stuck `submitting` row both risks an unrecorded money movement and actively blocks further refunds on that payment.
 
 ### 4.5 D1 no-transaction discipline (Active-Learning Log)
-Same as 9a: **no `db.transaction` / `db.batch`** for this flow (D1 rejects them at runtime; passes in dev better-sqlite3, 500s in prod). Each step is an independent convergent write; the `submitting` claim is written before the network call and the `succeeded`/`failed` update after. A crash mid-flow leaves a recoverable `submitting` row, and Stripe's idempotency key makes the retry safe.
+Same as 9a: **no `db.transaction` / `db.batch`** for this flow (D1 rejects them at runtime; passes in dev better-sqlite3, 500s in prod). Each step is an independent convergent write; the `pending` → `submitting` claim (with the pinned amount) is written before the network call and the `succeeded`/`failed` update after.
+
+**A crash mid-flow leaves a `submitting` row that is recovered by reconcile-against-Stripe, NEVER by a blind retry (M1).** Do **not** rely on "Stripe's idempotency key makes the retry safe" — that is false past the ~24h key-retention window (§3.2): a re-POST of a stale `submitting` row is a **fresh** refund → double-pay. Recovery is the §3.3 / §4.4(2) procedure: the ~1h tripwire surfaces the row, an operator reconciles against Stripe (query the PI's refunds / match `metadata[initiation_id]`), and manually resolves the row to `succeeded`/`failed`. The idempotency key protects only near-term retries/double-clicks, not hours-later recovery.
 
 ---
 
@@ -159,6 +201,7 @@ Both mirror the existing admin mutation shape (checkout route, invoices/[id]/sta
 ### 5.2 Library boundary
 - New module `src/lib/stripe-refund-initiation.ts` exporting `initiateInvoicePaymentRefund({ invoiceId, paymentId, initiationId, amountCents, confirmAmountCents, reason, stripeReason, actorType, actorName })`.
 - It takes `actorType` and **throws immediately** if `actorType !== "admin"` (defense-in-depth: even if some future code path tried to call it as `"agent"`/`"system"`, it refuses — this is stricter than the draft-only guard because there is *no approval that unlocks it*).
+- It **also calls `refundInitiationEnabled()` itself and throws before any Stripe call if the flag is off** (M4, §8) — the flag gate is not left solely to the routes, so a future caller that bypassed the route still cannot move money while the flag is off.
 - The module is imported **only** by the two `/api/invoices/*` routes above — never by `src/lib/studio-mcp.ts`, never by any `/api/agent/*` route.
 
 ### 5.3 No agent / MCP surface (stricter than the existing finance guard)
@@ -219,8 +262,10 @@ function stripeSecretKey() {                      // fail-closed, never logged
   return key;
 }
 
-// params: payment_intent=pi_...  amount=<cents>  reason=<stripeReason?>
-//         metadata[invoice_payment_id]=...  metadata[initiation_id]=...
+// params: payment_intent=pi_...  amount=<the ROW's persisted amount_cents, M3>  reason=<stripeReason?>
+//         metadata[invoice_payment_id]=...  metadata[initiation_id]=<initiationId>
+//   metadata[initiation_id] is load-bearing for recovery: it lets an operator match a
+//   Stripe refund back to a stuck `submitting` row during reconcile-against-Stripe (§3.3, §4.4).
 const response = await fetch("https://api.stripe.com/v1/refunds", {
   method: "POST",
   headers: {
@@ -237,7 +282,8 @@ if (!response.ok) throw new Error(stripeErrorMessage(body) ?? "Stripe refund fai
 ```
 
 Notes:
-- Use `payment_intent` (we store `pi_…` in `external_payment_id`); Stripe refunds against that PI's charge. Send an explicit `amount` (never rely on "omit = full" — determinism).
+- Use `payment_intent` (we store `pi_…` in `external_payment_id`); Stripe refunds against that PI's charge. Send an explicit `amount` equal to the **row's persisted `amount_cents`** (pinned in the `submitting` UPDATE, §4.1/M3) — never the prepare-time prefill, and never rely on "omit = full" (determinism + row/cap/request parity).
+- **The `Idempotency-Key` guards only near-term retries (~24h window; §3.2).** It is not a substitute for the in-flight guard (§3.3): a `submitting` row is never re-POSTed, so the key is never the thing standing between a stuck row and a double-refund. The amount is **not** in the key, so a same-key request with a changed amount returns Stripe `idempotency_error` (HTTP 400), never a second refund.
 - Stripe may return `status: "pending"` (async settlement) with a 200 — that is a **success** (the refund is accepted); the 9a webhook will finalize it. Store `succeeded` on our initiation row when the HTTP call is 2xx; the *Stripe* refund status lives in `payment_refunds` via the webhook.
 - Do not build a second Stripe secret accessor if a shared one is extracted; if `stripeSecretKey()` is promoted to a shared `src/lib/stripe-client.ts`, reuse it (keep the checkout path behavior identical).
 
@@ -245,7 +291,8 @@ Notes:
 
 ## 8. Off-by-default flag + dark rollout
 
-- **`REFUND_INITIATION_ENABLED`** (default **OFF**). A hard money gate — a single boolean, read **in the body** (never as a default param — TS2559, Active-Learning Log) via `refundInitiationEnabled()` in `src/lib/finance-flags.ts`. When off, **both** routes short-circuit with a 403 `{ error: "Refund initiation is disabled." }` **before** any Stripe call, and the admin UI hides/disables the refund control. Even a fully authenticated admin cannot move money while the flag is off.
+- **`REFUND_INITIATION_ENABLED`** (default **OFF**). A hard money gate — a single boolean, read **in the body** (never as a default param — TS2559, Active-Learning Log) via `refundInitiationEnabled()` in `src/lib/finance-flags.ts`. **Parse strict `=== "1"`** (M4), exactly matching `adminProofEnforced` (`admin-proxy-auth.test.ts:194–197`): unset, empty, `"0"`, `"true"`, `"on"`, any typo → **OFF**; only the literal `"1"` enables. No fuzzy truthiness on a money gate.
+- **Defense-in-depth: the flag is checked INSIDE the helper, not only in the routes (M4).** `initiateInvoicePaymentRefund` calls `refundInitiationEnabled()` itself and **throws before any Stripe call** if it is off — the same belt-and-suspenders posture as the `actorType !== "admin"` throw (§5.2). So even a future code path that reached the helper without passing through the route flag gate cannot move money while the flag is off. Both routes ALSO short-circuit with a 403 `{ error: "Refund initiation is disabled." }` **before** any Stripe call, and the admin UI hides/disables the refund control. Even a fully authenticated admin cannot move money while the flag is off.
 - **Two Tyler actions gate real money:** (1) flip `REFUND_INITIATION_ENABLED` on; (2) issue the first real refund. Neither is autonomous (guardrails 2 + 3).
 - **Dependency on 9a flags Tyler must set together** (§11): the recording webhook must be **subscribed at Stripe** and `FINANCE_REFUND_RECORDING` should be at `enforce` before the first real refund, or money moves without being recorded / reflected in status.
 - **Migration 0091 applied before the Worker deploy** (discipline), via the idempotent direct `d1 execute --file` pattern (`CREATE TABLE IF NOT EXISTS`), verified, then Worker + Pages-proxy deploy. No `migrations apply --remote` (tracker out of sync — Active-Learning Log).
@@ -261,17 +308,19 @@ All tests spy on `fetch` and assert `api.stripe.com/v1/refunds` call counts.
 2. **Partial refund** — `amountCents < maxRefundableCents` accepted; over-cap partial rejected (see #3).
 3. **Amount over-cap rejected** — `requestedAmountCents > grossCollectedCents - alreadyRefundedCents` → rejected, **zero** Stripe calls, `initiation_failed` logged.
 4. **Ledger re-check uses `max(webhook, local in-flight)`** — with `refundedAmountCents = 0` but a prior `succeeded`/`submitting` `refund_initiations` row summing to the full gross, a second refund is capped/rejected → **zero** Stripe calls (proves the webhook-lag double-refund window is closed).
-5. **Disputed payment rejected** — `dispute_status = "open"` → rejected, zero Stripe calls (P5).
-6. **Idempotency-key prevents double-refund** — two `execute` calls with the same `initiationId`: the first calls Stripe once; the second hits the in-flight guard (`submitting`/`succeeded`) and makes **zero** additional Stripe calls, returning the existing result.
+5. **Disputed payment rejected** — `dispute_status = "open"` → rejected, zero Stripe calls (P5). Also assert `dispute_status = "lost" && !fundsReinstated` → rejected locally, zero Stripe calls (P5 note (b) / M5); and that a `won`/`reinstated` dispute is refundable (subject to the cap).
+6. **In-flight guard prevents double-refund** — two `execute` calls with the same `initiationId`: the first calls Stripe once; the second hits the in-flight guard and makes **zero** additional Stripe calls. Assert both sub-cases: a `succeeded` row returns the existing result; a `submitting` row returns an "in progress / needs reconciliation" response and is **never re-POSTed** regardless of age (M1) — no reliance on the Stripe key past its ~24h window.
 7. **Typed-confirmation mismatch rejected** — `confirmAmountCents !== amountCents` → rejected, zero Stripe calls.
 8. **Eligibility** — non-`paid` status, null `external_payment_id`, or `paymentId`/`invoiceId` mismatch each → rejected, zero Stripe calls.
 9. **Agent/MCP CANNOT initiate** — (a) MCP `tools/list` has no refund-initiation tool; (b) no `/api/agent/*` route imports the initiation module; (c) `initiateInvoicePaymentRefund({ actorType: "agent" })` throws and makes **zero** Stripe calls + writes zero `refund_initiations` rows (extends `agent-finance-guard.test.ts`).
 10. **Admin-only auth** — direct-Worker origin (no origin secret) → `guardDirectWorkerApiRequest` 404, zero Stripe calls; refund routes are **not** in `isPublicOriginBypassApiPath` (extends `origin-guard.test.ts` classifier/drift assertion).
 11. **Fail-closed secret** — `STRIPE_SECRET_KEY` unset → execute throws before any network call; secret never appears in logs/errors.
 12. **No direct `payment_refunds` write** — after a successful initiation, `payment_refunds` and `refunded_amount_cents` are **unchanged** (recording still comes only from the webhook); then simulate the `refund.created`/`charge.refunded` webhook (9a path) and assert exactly one `payment_refunds` row appears (no duplicate from 9b).
-13. **Flag-off blocks initiation** — `REFUND_INITIATION_ENABLED` unset → both routes 403, zero Stripe calls, no `refund_initiations` row.
-14. **Reconciliation tripwire** — a `succeeded` initiation with no matching `payment_refunds` row surfaces in needs_reconciliation (§4.4).
-15. **Build gate** — `npm run build` **exit code 0** (type-check passes), `npm test` green, `npm run lint`; canon/drift updated for `refund_initiations`.
+13. **Flag-off blocks initiation, incl. strict parse + in-helper check (M4)** — assert `refundInitiationEnabled` treats `undefined`, `""`, `"0"`, `"true"`, `"on"` as OFF and only `"1"` as ON (mirror `admin-proxy-auth.test.ts:194–197`). With the flag off: both routes 403, zero Stripe calls, no `refund_initiations` row; **and** a direct call to `initiateInvoicePaymentRefund` with the flag off **throws before any Stripe call** (defense-in-depth, flag checked inside the helper).
+14. **Reconciliation tripwires (both, §4.4)** — (a) a `succeeded` initiation with no matching `payment_refunds` row surfaces as "initiated refund not yet recorded"; (b) a `submitting` row older than ~1h surfaces as "refund stuck in-flight — reconcile against Stripe" (M1), and the Σ-cap pins that payment's `maxRefundable` at 0 while it is stuck.
+15. **Amount pinned + same-key-different-amount is one refund (M3)** — execute pins the row's `amount_cents` in the `submitting` UPDATE and sends **exactly** that to Stripe (assert the POST `amount` equals the persisted row value, not the prepare prefill). Then two executes with the **same `initiationId` but different amounts** → **exactly one** `POST /v1/refunds` (the second is blocked by the in-flight guard before any Stripe call; if it reached Stripe it would be an `idempotency_error`, never a second refund).
+16. **Auth-armed smoke (M2)** — extend `scripts/production-smoke.mjs`: an unauthenticated `POST …/refund/execute` on the `*.workers.dev` origin (no origin secret, no admin proof) returns **404**. This is the pre-enable assertion that `ORIGIN_PROXY_SECRET` is set at the Worker and `ADMIN_PROOF_ENFORCE=1` (both fail-open when unset).
+17. **Build gate** — `npm run build` **exit code 0** (type-check passes), `npm test` green, `npm run lint`; canon/drift updated for `refund_initiations`.
 
 ---
 
@@ -296,13 +345,14 @@ Effort: S ≈ ≤0.5d, M ≈ 0.5–1d, L ≈ 1–2d.
 
 | Log pitfall | How 9b pre-empts it |
 | --- | --- |
-| **D1 has no usable transaction** | No `db.transaction`/`db.batch`. `submitting` claim written before the network call, `succeeded`/`failed` after; Stripe idempotency key makes any retry safe (§3.3, §4.5). |
+| **D1 has no usable transaction** | No `db.transaction`/`db.batch`. `pending`→`submitting` claim (with the pinned amount) written before the network call, `succeeded`/`failed` after. A crash leaves a `submitting` row that is recovered by **reconcile-against-Stripe, never a blind re-POST** — the Stripe key expires ~24h so a re-POST would double-pay (§3.2, §3.3, §4.4(2), §4.5). |
 | **Off-by-default flag** | `REFUND_INITIATION_ENABLED` default OFF; both routes 403 before any Stripe call (§8). Money gate is a hard boolean, flipped only by Tyler. |
 | **Attacker-chosen ids / untrusted input** | Every field validated + capped (reuse 9a's `capId`/`capReason`/`clampAmountCents`); amount re-checked server-side against the fresh ledger; typed-amount confirm; ownership check (§3). |
 | **Agent authority** | Money-movement is **absent** from the agent surface (stricter than the approval guard); `actorType!=="admin"` throw + guard test asserting zero Stripe calls (§5). |
 | **Secrets fail closed** | `stripeSecretKey()` throws when unset; no dev fallback in prod; key never logged (§3.5). |
-| **Never silent-drop / no double-count** | 9b never writes `payment_refunds`; recording comes only from the 9a webhook; `stripeRefundId` cross-ref is read-only; reconciliation tripwire catches a missing webhook (§4). |
+| **Never silent-drop / no double-count** | 9b never writes `payment_refunds`; recording comes only from the 9a webhook — specifically **`charge.refunded`** sets `refunded_amount_cents` (the load-bearing subscription, M6); `stripeRefundId` cross-ref is read-only; both reconciliation tripwires (missing webhook + stuck `submitting`) catch failures (§4.4). |
 | **Origin-guard bypass discipline** | Refund routes use `guardDirectWorkerApiRequest` and are **never** added to `PUBLIC_API_PREFIXES`/`isPublicOriginBypassApiPath`; drift test asserts this (§3.6, §9.10). |
+| **Fail-open guards must be ARMED before a money route ships (M2)** | Both `guardDirectWorkerApiRequest` (no-op when `ORIGIN_PROXY_SECRET` unset, `origin-guard.ts:61`) and admin-proof (enforces only when `ADMIN_PROOF_ENFORCE="1"`) fail OPEN when unset. §12 PRECONDITION AUTH-ARMED + the §9.16 smoke assert both are set **before** `REFUND_INITIATION_ENABLED` flips on, so the route is never unauthenticated-reachable on `*.workers.dev`. |
 | **Prod D1 migrations** | 0091 via idempotent `d1 execute --file`, verified before Worker deploy; no blanket `migrations apply --remote` (§8). |
 | **Deploy rails / reversible** | Backup → rollback version → dark deploy → health-check → instant flag kill-switch (§8). |
 | **Settled-status enumeration** | 9b does NOT introduce or flip any status — status handling stays entirely in 9a's already-enumerated settled-status logic (P8); 9b only moves money and records the initiation. |
@@ -322,9 +372,24 @@ Even after the 9b code is built, Fable-reviewed, and passes the build-exit-code 
 
 3. **Issuing the first real refund** is a Tyler action, performed by Tyler in the admin UI, with the typed-amount confirmation.
 
-**Preconditions Tyler must confirm are true before enabling (or money moves without being recorded/reflected):**
-- **9a recording webhook is subscribed at Stripe** for `charge.refunded` / `refund.*` (9a enable-runbook item 1). If it is not, a 9b refund moves money but 9a never records it — the reconciliation tripwire (§4.4) will fire, but the canonical ledger will lag. The `max(webhook, local in-flight)` cap (§3.1) still prevents a double-refund in that window, but the books will be wrong until the webhook is fixed.
-- **`FINANCE_REFUND_RECORDING = enforce`** (9a enable-runbook item 2), so a full refund actually flips the payment to the terminal `refunded` status and recomputes the invoice. At `record_only`, a full refund still moves money and records the child row + net figures, but the payment stays `paid` in status. Recommended: enforce is on before the first real refund.
-- A **known-safe test target** (e.g. refund a small, recent Stripe test/real charge Tyler controls) for the very first refund, watched end-to-end: initiation `succeeded` → webhook lands → `payment_refunds` row + `refunded_amount_cents` update → (at enforce) status flip.
+**Named, hard-blocking preconditions Tyler must confirm are true before flipping `REFUND_INITIATION_ENABLED` on** (each should be a **smoke assertion in `scripts/production-smoke.mjs`**, not a memory item — the flag flip is blocked until they pass):
+
+- **PRECONDITION AUTH-ARMED (M2 — new, hard-blocking).** Confirm the auth boundary the refund route relies on is actually **ARMED at the Worker before the flag flips**. Both guards **fail OPEN when their env is unset**, and if both are unset in prod with the refund flag on, `POST …/refund/execute` on the `*.workers.dev` origin is reachable **UNAUTHENTICATED** → an attacker can drain up to gross per payment. Verify **both**:
+  - `ORIGIN_PROXY_SECRET` is **set at the Worker** — else `guardDirectWorkerApiRequest` is a **no-op** (`origin-guard.ts:61`: `if (!configuredSecret) return false;` → never blocks a direct-Worker request).
+  - `ADMIN_PROOF_ENFORCE = "1"` — else admin-proof does **not** enforce (`adminProofEnforced` is true only for exactly `"1"`; unset = fail-open, pinned by `admin-proxy-auth.test.ts:197`).
+  - Make this a **smoke assertion**: an unauthenticated `POST …/refund/execute` to the `*.workers.dev` origin (no origin secret, no admin proof) must return **404**, asserted BEFORE `REFUND_INITIATION_ENABLED` is turned on. This precondition sits alongside PRECONDITION WEBHOOK below as a first-class gate, not an afterthought.
+- **PRECONDITION WEBHOOK — `charge.refunded` subscribed at Stripe (M6).** The 9a recording webhook must be subscribed for **`charge.refunded` specifically** (plus `refund.*`) — 9a enable-runbook item 1. `charge.refunded` is **load-bearing**: only `recordStripeChargeRefunded` sets `refunded_amount_cents` (from the charge's cumulative `amount_refunded`) and drives the status flip; `recordStripeRefund` (`refund.created/updated`) writes child rows + `lastRefundAt` **only**. So without `charge.refunded` specifically, the summary column and status flip never happen **even if `refund.*` is subscribed** — a 9b refund moves money but the canonical cap-input column lags. The reconciliation tripwire (§4.4(1)) will fire and the `max(webhook, local in-flight)` cap (§3.1) still prevents a double-refund in that window, but the books stay wrong until the subscription is fixed. Verify the exact event `charge.refunded` is present in the Stripe webhook endpoint's event list, not just "refund events."
+- **PRECONDITION ENFORCE — `FINANCE_REFUND_RECORDING = enforce`** (9a enable-runbook item 2), so a full refund actually flips the payment to the terminal `refunded` status and recomputes the invoice. At `record_only`, a full refund still moves money and records the child row + net figures, but the payment stays `paid` in status (temporarily wrong books — see Risk 2 below). Recommended: enforce is on before the first real refund.
+- **PRECONDITION TEST-TARGET** — a **known-safe test target** (e.g. refund a small, recent Stripe test/real charge Tyler controls) for the very first refund, watched end-to-end: initiation `succeeded` → `charge.refunded` webhook lands → `payment_refunds` row + `refunded_amount_cents` update → (at enforce) status flip.
 
 **Instant rollback at any point:** `wrangler secret delete REFUND_INITIATION_ENABLED` (or set `0`) → no further refund can be initiated; already-issued refunds are unaffected (they are real money movements at Stripe, recorded by 9a). Worker rollback to the captured pre-9b version removes the initiation code entirely.
+
+### 12.1 Risks Tyler should weigh before go (residual, honest)
+
+These are the residual risks that remain **even with every safety rail in this spec built and every precondition above met.** None is a blocker; each is a thing Tyler is accepting by saying "go." Read them as the true cost of turning money-movement on.
+
+1. **Money-out auth is ONE shared boundary, with no per-action credential.** The refund route is protected by the same Pages-proxy admin wall + origin-proxy secret + admin-proof that guards every other admin mutation — there is **no separate, refund-specific credential**. Whoever holds admin access to the app can move money once the flag is on. The typed-amount confirm and the OFF flag are the only refund-specific friction. (This is also why PRECONDITION AUTH-ARMED above is hard-blocking: if that shared boundary is misconfigured fail-open, the most destructive action in the app inherits the hole.)
+2. **At `record_only`, a full refund moves real money but the payment still reads `paid`.** Recording writes the child row + net figures, but the status flip is gated to `enforce`. Until `FINANCE_REFUND_RECORDING = enforce`, the books are **temporarily wrong** (money left, status says paid). Flip to `enforce` first (PRECONDITION ENFORCE) or knowingly accept temporarily-wrong status until you do.
+3. **A crashed `execute` can wedge a payment's refundability until manual reconciliation.** If the process dies between the `submitting` claim and the terminal update, that payment's `maxRefundable` is pinned at 0 (the Σ-cap counts the `submitting` row) and no further refund can be initiated on it **until a human reconciles against Stripe** (§3.3, §4.4(2)). This is a deliberate fail-safe (better to block than to risk a double-refund), but it is manual, human-in-the-loop recovery — there is no auto-retry (by design: the ~24h key expiry makes auto-retry a double-pay risk).
+4. **Refunds are IRREVERSIBLE at Stripe. The kill-switch only stops FUTURE refunds.** `wrangler secret delete REFUND_INITIATION_ENABLED` and the Worker rollback both prevent *new* refunds — neither can claw back a refund already sent. Once `POST /v1/refunds` returns 2xx, the money is gone; the only "undo" is a fresh charge to the client, which is a separate, out-of-scope action. Every real refund is final.
+5. **Stripe does NOT return its processing fee on a refund — every refund costs the fee.** When you refund a charge, Stripe keeps the original processing fee (it is not returned to the balance). So a full refund of a $200 charge returns $200 to the client but leaves the business out the original Stripe fee — every refund has a real, non-recoverable cost. The app surfaces the refunded amount, not this sunk fee; Tyler should factor it into partial-vs-full and "should we refund at all" decisions.
