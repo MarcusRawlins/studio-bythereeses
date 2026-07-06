@@ -217,6 +217,23 @@ async function main() {
   // Net across P1+P2 nets to $0 (gross==service, no fee), not −$30000.
   assert.equal(augReport.totals.netRevenueCents + sepReport.totals.netRevenueCents, 0, "net across both periods nets refunded dollars to zero");
 
+  // ---- Test 4c: payment-ledger surface period attribution (Fable rev-3 #1) -----
+  // pay-period is now "refunded" (flipped in enforce above). Its gross must stay
+  // attributed to its collection month (Aug = paidAt) on the payment-ledger surface too,
+  // NOT re-attributed to dueDate/createdAt. Pre-fix, paymentLedgerDate fell back past the
+  // null paidAt-guard to createdAt (≈now), dropping the row out of the Aug window and
+  // silently moving Aug gross — disagreeing with the (correct) bookkeeping report above.
+  assert.equal(
+    database.prepare("SELECT status FROM invoice_payments WHERE id = 'pay-period'").pluck().get(),
+    "refunded",
+    "pay-period is refunded after the enforce flip (precondition for 4c)",
+  );
+  const augLedger = await getPaymentLedgerReport({ fromDate: "2026-08-01", toDate: "2026-08-31" });
+  assert.ok(
+    augLedger.rows.some((row) => row.sourceId === "pay-period" && row.payment.status === "refunded"),
+    "refunded payment stays attributed to its collection month (paidAt) on the ledger surface",
+  );
+
   // ---- Test 5: dispute lifecycle ------------------------------------------
   seedPaidPayment("disp", { gross: 30000, paid: 30000, clientFee: 0, pi: "pi_disp", paidAt: "2026-04-09T10:00:00.000Z", invoiceNumber: "INV-DISP" });
   await postEvent(disputeEvent("evt_disp_open", "charge.dispute.created", { pi: "pi_disp", disputeId: "dp_disp", amount: 30000, status: "needs_response", created: 1775400000 }));

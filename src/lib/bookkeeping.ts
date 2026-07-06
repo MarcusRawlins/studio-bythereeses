@@ -153,8 +153,9 @@ function paidRevenueConditions(column: typeof invoicePayments.paidAt | typeof sc
   return conditions;
 }
 
-// Phase 9a: period-scope refund/dispute subtractions on the money-event date (our
-// receive time, stored in created_at) rather than the original paidAt.
+// Phase 9a: period-scope refund/dispute subtractions on the money-event date — the
+// Stripe event.created time stored in created_at (receive time only as a fallback when
+// event.created is absent) — rather than the original paidAt.
 function moneyEventPeriodConditions(column: typeof paymentRefunds.createdAt | typeof paymentDisputes.createdAt, input: BookkeepingReportInput) {
   const conditions: SQL[] = [];
   if (input.fromDate) conditions.push(gte(column, isoFloorForDate(input.fromDate)));

@@ -341,7 +341,10 @@ export async function settleInvoicePaymentCheckoutSession(session: Record<string
     }
   }
 
-  if (payment.status === "paid") {
+  if (payment.status === "paid" || payment.status === "refunded") {
+    // Both are settled: a replayed checkout.session.completed on an already-settled payment
+    // is an idempotent no-op. Without the "refunded" case the settle path proceeds and throws
+    // "no longer has an open balance" -> 400 -> Stripe retries to exhaustion (Fable rev-3 #2).
     return {
       ignored: true,
       reason: "invoice_payment_already_paid",

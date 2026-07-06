@@ -15,7 +15,7 @@
 import { db } from "@/db/client";
 import { invoicePayments, invoices, paymentDisputes, paymentRefunds, schedulerBookings, stripeWebhookEvents } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
-import { financeRefundStatusFlipEnabled } from "@/lib/finance-flags";
+import { financeRefundRecordingEnabled, financeRefundStatusFlipEnabled } from "@/lib/finance-flags";
 import { reconciledInvoicePaymentStatus } from "@/lib/sales";
 import { eq } from "drizzle-orm";
 
@@ -486,6 +486,15 @@ function isRefundOrDisputeEvent(eventType: string) {
 export async function dispatchStripeRefundOrDisputeEvent(event: Record<string, unknown>, eventType: string) {
   if (!isRefundOrDisputeEvent(eventType)) {
     return { ignored: true, reason: "unsupported_event", eventType };
+  }
+
+  // `off` is a true kill-switch: record nothing (child tables + summary columns skipped).
+  // `record_only` (default) and `enforce` both record; only the status flip differs (that
+  // is gated separately by financeRefundStatusFlipEnabled). Returning ignored here is safe —
+  // Stripe treats a 2xx as delivered; a later flip to record_only re-records on the next
+  // event, and the divergence flag surfaces any gap (Fable rev-3 #6 — `off` was a no-op).
+  if (!financeRefundRecordingEnabled()) {
+    return { ignored: true, reason: "refund_recording_off", eventType };
   }
 
   // Validate event.id FIRST; a missing/blank id is rejected (throw → non-2xx so Stripe

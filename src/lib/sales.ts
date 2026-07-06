@@ -1591,7 +1591,13 @@ function paymentLedgerSortValue(row: PaymentLedgerRow) {
 }
 
 function paymentLedgerDate(row: PaymentLedgerRow) {
-  return (row.payment.status === "paid" ? row.payment.paidAt : null)
+  // "refunded" is a settled status: a refunded payment keeps its original paidAt so the
+  // ledger surface attributes its gross to the collection period, matching the bookkeeping
+  // report (["paid","refunded"] scoped by paidAt). Falling back to dueDate here would move
+  // original-period gross to the due date when a payment flips refunded (Fable rev-3 #1).
+  return (row.payment.status === "paid" || row.payment.status === "refunded"
+    ? row.payment.paidAt
+    : null)
     ?? row.payment.dueDate
     ?? row.payment.createdAt
     ?? "";
