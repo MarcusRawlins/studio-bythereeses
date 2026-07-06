@@ -1,0 +1,10 @@
+# Cloudflare Workers static-assets header rules.
+# Phase 15 (PWA): pin Cache-Control for the manifest so an updated manifest
+# propagates within an hour. `/sw.js` gets `no-cache` now so that when the
+# service worker ships (deferred behind PWA_SERVICE_WORKER) a kill-switch swap
+# is never pinned by an intermediary cache; it 404s harmlessly until then.
+# Verify honored post-deploy with `curl -sI` (do not assume _headers support).
+/manifest.webmanifest
+  Cache-Control: public, max-age=3600
+/sw.js
+  Cache-Control: no-cache

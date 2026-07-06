@@ -8,6 +8,12 @@ import {
   isSchedulePublicPath,
   isStudioPublicPath,
 } from "../../pages-proxy/_worker.js";
+// Origin-guard bypass predicates — pinned NEGATIVE so the Phase 15 allowlist
+// additions provably do NOT widen the sensitive direct-origin bypass surface.
+import {
+  isPublicOriginBypassApiPath,
+  isPublicOriginBypassPath,
+} from "./origin-guard";
 
 // --------------------------------------------------------------------------
 // Studio-host public surfaces: the classifier must NOT require an admin proof,
@@ -34,6 +40,8 @@ const studioPublic = [
   "/favicon.ico",
   "/_next/static/chunk.js",
   "/brand/logo.svg",
+  "/manifest.webmanifest", // Phase 15: PWA manifest (static, non-sensitive)
+  "/sw.js", // Phase 15: service worker path (static; 404s until the deferred SW ships)
 ];
 for (const path of studioPublic) {
   assert.equal(adminProofRequired(path), false, `${path} must be public (no admin proof)`);
@@ -59,6 +67,32 @@ assert.equal(isStudioPublicPath("/api/twilio/status"), true, "/api/twilio/status
 // unsubscribe, a compliance failure) fails loudly.
 assert.equal(adminProofRequired("/api/email/unsubscribe"), false, "/api/email/unsubscribe must be admin-proof-exempt");
 assert.equal(isStudioPublicPath("/api/email/unsubscribe"), true, "/api/email/unsubscribe must be proxy-public");
+
+// Phase 15 (PWA): the manifest + sw path are static, non-sensitive assets that
+// must load UNAUTHENTICATED (a login-walled manifest = broken install), added in
+// lockstep to the proxy `isPublicAssetPath` and the app `isStaticAssetPath`.
+// `isPublicAssetPath` is not exported from the proxy, so pin via the exported
+// composite `isStudioPublicPath` (which folds it in) instead.
+for (const path of ["/manifest.webmanifest", "/sw.js"]) {
+  assert.equal(adminProofRequired(path), false, `${path} must be admin-proof-exempt (static asset)`);
+  assert.equal(isStudioPublicPath(path), true, `${path} must be proxy-public on the studio host`);
+}
+// CRITICAL non-widening: the Phase 15 additions must NOT touch origin-guard.
+// The direct-*.workers.dev bypass lists stay unchanged, so both new paths are
+// NOT bypass-exempt (they are middleware-excluded static assets served by ASSETS,
+// they need no origin bypass, and adding one would widen the sensitive surface).
+for (const path of ["/manifest.webmanifest", "/sw.js"]) {
+  assert.equal(
+    isPublicOriginBypassPath(path),
+    false,
+    `${path} must NOT be an origin-guard page bypass (no direct-origin widening)`,
+  );
+  assert.equal(
+    isPublicOriginBypassApiPath(path),
+    false,
+    `${path} must NOT be an origin-guard api bypass (no direct-origin widening)`,
+  );
+}
 
 // The client portal proposal detail and the magic-link surfaces are kept public
 // by the classifier (client-reachable) — assert the classifier decisions

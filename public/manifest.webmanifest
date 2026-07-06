@@ -1,0 +1,18 @@
+{
+  "id": "/",
+  "name": "The Reeses Studio",
+  "short_name": "Reese Studio",
+  "description": "Private CRM and executive assistant studio for The Reeses.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fbf8f2",
+  "theme_color": "#fbf8f2",
+  "icons": [
+    { "src": "/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/brand/pwa-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/brand/pwa-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/brand/pwa-192-maskable.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" }
+  ]
+}

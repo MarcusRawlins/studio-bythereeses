@@ -182,6 +182,8 @@ function isPublicAssetPath(pathname) {
     pathname === "/favicon.ico" ||
     pathname === "/icon.png" ||
     pathname === "/apple-icon.png" ||
+    pathname === "/manifest.webmanifest" || // Phase 15: PWA manifest (static, non-sensitive)
+    pathname === "/sw.js" || // Phase 15: service worker (static; add now, file lands with the deferred SW drop)
     pathname.startsWith("/_next/static/") ||
     pathname.startsWith("/brand/") ||
     pathname.startsWith("/fonts/")

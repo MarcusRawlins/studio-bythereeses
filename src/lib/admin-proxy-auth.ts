@@ -169,6 +169,8 @@ function isStaticAssetPath(path: string): boolean {
     path === "/favicon.ico" ||
     path === "/icon.png" ||
     path === "/apple-icon.png" ||
+    path === "/manifest.webmanifest" || // Phase 15: PWA manifest (static, non-sensitive)
+    path === "/sw.js" || // Phase 15: service worker (static; file lands with the deferred SW drop)
     path.startsWith("/_next/static/") ||
     path.startsWith("/_next/image") ||
     path.startsWith("/brand/") ||
