@@ -8,6 +8,22 @@ Pairs with: `phase-9a-finance-completeness.md` (the refund/dispute **recording**
 
 ---
 
+## Rev 3 (owner refund policy) — changelog
+
+Rev 3 encodes **Tyler's stated refund policy** into the spec's rails, product decisions, and tests. Tyler's words (verbatim): *"For refunds, refunds are only ever issued if service isn't rendered. No refunds on the initial retainer of services. No refunds on the initial retainer of services. All processing fees I want passed to the client."* Each change below is grounded in the real schema/code (read before writing) and, where the code signal is weak or a business meaning had to be interpreted, that interpretation is **stated explicitly for Tyler to confirm at the deploy gate** rather than guessed silently.
+
+| Tyler's rule | Encoded as | Where |
+| --- | --- | --- |
+| **"Refunds only ever issued if service isn't rendered."** The system cannot verify whether service was rendered, so this is a **policy gate the admin affirms**, not an automated check. | Execute payload gains a **required** `service_not_rendered_confirmed: true` boolean **and** a required free-text `reason`; the helper **refuses server-side if either is absent/false** (not just UI). Both are persisted on the `refund_initiations` audit row. | §2 P10, §3.1/§3.4, §3.9 (new), §4.1, §5.1/§5.2, §6, §9.17 |
+| **"No refunds on the initial retainer of services."** | The retainer payment is **HARD-BLOCKED server-side** from refund initiation. Because the schema has **no** `payment_type`/deposit-flag column, the predicate reuses the codebase's existing `isRetainerPaymentLabel` **and** unions it with "earliest payment on the invoice" (safest robust rule given a weak label-only signal). | §2 P9, §3.4, §3.8 (new), §9.16 |
+| **"All processing fees I want passed to the client."** | The refundable ceiling is redefined to the **SERVICE portion the studio actually keeps** (`paidAmountCents`), **not** gross (`grossCollectedCents` = service + client card fee). The client never gets the processing/card fee back. Every ceiling reference is moved off gross onto the service basis. | §2 P11, §3.1 (rewritten), §4.1, §7, §9.3/§9.4/§9.18/§9.19 |
+
+**Interpretations flagged for Tyler's confirmation at the deploy gate (Rev 3 did NOT guess these):**
+1. **"Initial retainer" = which payment row?** There is no retainer/deposit column in `invoice_payments`; the only signals are the free-text `label` and payment ordering. Rev 3 blocks **(a)** any payment whose label matches the existing `isRetainerPaymentLabel` (`/\b(retainer|deposit)\b/i`, sales.ts:102) **OR (b)** the earliest payment on the invoice. If Tyler names retainers differently, rule (b) still catches the first installment. **Confirm this predicate matches how you label retainers.** (§3.8, Risk 6.)
+2. **"Pass processing fees to the client" = refund only the service portion.** Rev 3 interprets this as: the refundable ceiling is `paidAmountCents` (service kept), so the client bears their own card fee on a refund; the studio never returns the fee it collected. Stripe *also* does not return its own processing fee on a refund (existing Risk 5), so refunding only the service portion keeps the studio whole on service while the client bears their card fee. **Confirm the ceiling should be service, not gross.** (§3.1, Risk 7.)
+
+---
+
 ## Rev 2 (Fable spec-review) — changelog
 
 Rev 2 addresses an adversarial Fable review (REQUEST-CHANGES; 0 BLOCKER, 2 MAJOR, 4 MINOR). Each fix was verified against the cited code before landing.
@@ -25,7 +41,7 @@ Rev 2 addresses an adversarial Fable review (REQUEST-CHANGES; 0 BLOCKER, 2 MAJOR
 
 ## 1. Scope + the money-movement boundary (restated)
 
-**In scope (9b):** an **admin-only** UI action + endpoint that calls Stripe `POST /v1/refunds` to issue a full or partial refund against an `invoice_payments` row we own; a small **`refund_initiations`** audit/idempotency table (migration 0091) that records every initiation attempt; the safety rails (amount cap, ledger re-check, typed confirmation, Stripe idempotency key, in-flight guard); an OFF-by-default flag; and the interleave with 9a so the canonical ledger stays single-sourced.
+**In scope (9b):** an **admin-only** UI action + endpoint that calls Stripe `POST /v1/refunds` to issue a full or partial refund against an `invoice_payments` row we own; a small **`refund_initiations`** audit/idempotency table (migration 0091) that records every initiation attempt; the safety rails (SERVICE-portion amount cap, ledger re-check, typed confirmation, retainer hard-block, service-not-rendered affirmation, Stripe idempotency key, in-flight guard); an OFF-by-default flag; and the interleave with 9a so the canonical ledger stays single-sourced.
 
 **Explicitly OUT of scope (do NOT build in 9b):**
 - **Writing `payment_refunds` / `refunded_amount_cents` directly.** The canonical refund ledger is owned by the 9a inbound webhook. 9b initiates; 9a records. One source of truth (§4).
@@ -40,11 +56,11 @@ Rev 2 addresses an adversarial Fable review (REQUEST-CHANGES; 0 BLOCKER, 2 MAJOR
 
 ## 2. Product decisions to surface for Tyler (explicit choices + recommended defaults)
 
-Each row is a decision Tyler is being asked to ratify. The **Recommended default** is what the build will implement unless Tyler says otherwise.
+Each row is a decision Tyler is being asked to ratify. The **Recommended default** is what the build will implement unless Tyler says otherwise. **Rows tagged `ADOPTED — owner policy` (P9–P11) are no longer "defaults"** — they encode Tyler's verbatim refund policy (Rev 3) and are hard rails, not toggles. P1–P8 remain the recommended defaults for the mechanics around that policy.
 
 | # | Decision | Options | **Recommended default** | Rationale |
 | --- | --- | --- | --- | --- |
-| P1 | Full vs partial refunds | full-only / full+partial | **full + partial** | Real-world refunds are often partial (retainer kept, balance returned). UI pre-fills the **full remaining refundable** amount; admin may reduce it. |
+| P1 | Full vs partial refunds | full-only / full+partial | **full + partial (within the SERVICE ceiling, P11)** | Real-world refunds are often partial. UI pre-fills the **full remaining refundable SERVICE** amount (`maxRefundableCents`, §3.1); admin may reduce it. Note: "retainer kept, balance returned" is now stronger than a default — the retainer row itself is hard-blocked (P9). |
 | P2 | Refund reason capture | none / internal note / Stripe reason + internal note | **both — internal reason (required, ≥3 chars, capped 500) + Stripe `reason` (default `requested_by_customer`)** | Internal reason is the audit trail (activity log + `refund_initiations.reason`); Stripe `reason` ∈ `requested_by_customer\|duplicate\|fraudulent` is optional metadata on Stripe's side. Reason is never a security decision input. |
 | P3 | Second / typed-amount confirmation | single click / typed-amount confirm | **typed-amount confirm (must type the exact cents/dollar figure, server-validated against the same amount)** | This is the most destructive admin action in the app and it is irreversible. A typed confirmation is cheap and defeats accidental / double-click refunds. |
 | P4 | Approval step vs admin-direct | in-app second approver / admin-direct | **admin-direct** (no separate in-app approver) | Tyler *is* the owner/admin; there is no second human. The "approval" that matters is the money-movement guardrail itself: the OFF flag + the first real refund are Tyler actions (§8, §11). Agents can never initiate (§5). |
@@ -52,6 +68,9 @@ Each row is a decision Tyler is being asked to ratify. The **Recommended default
 | P6 | Refund window limit | app-enforced window / rely on Stripe | **rely on Stripe** (no hard app window) + **soft warn** if the charge is > 120 days old | Stripe already fails very old / insufficient-balance refunds; we surface Stripe's error verbatim (cleaned). Encoding our own window would drift from Stripe's rules. |
 | P7 | Payment eligibility | any status / paid-and-partially-refunded only | **only Stripe-collected `paid` (incl. already-partially-refunded) payments with a non-null `external_payment_id` (pi_…)** | A `waived` payment collected nothing; a cash/check payment has no Stripe charge to refund; a fully-`refunded` payment has `maxRefundable = 0` (rejected by the amount cap). |
 | P8 | Invoice/project state after refund | 9b mutates status / 9a webhook mutates status | **9a owns all status changes** | 9b moves money; the resulting `charge.refunded` webhook lets 9a set `refunded_amount_cents` and (at `FINANCE_REFUND_RECORDING=enforce`) flip a fully-refunded payment to the terminal `refunded` status via the enumerated settled-status handling (9a §1.6). 9b never touches `payment.status` or the invoice. **Consequence Tyler must know:** to have a full refund *reflected in invoice/payment status*, `FINANCE_REFUND_RECORDING` must be at `enforce` (§8, §11). |
+| **P9** | Refund the **initial retainer** | allow / hard-block | **ADOPTED — owner policy: HARD-BLOCK (server-side).** | Tyler: *"No refunds on the initial retainer of services."* The initiate endpoint **refuses** if the target payment is the retainer, with a clear reason. Enforced in the helper (§3.8), not just the UI. Predicate (schema has no retainer column): the payment is a retainer if its label matches `isRetainerPaymentLabel` (`/\b(retainer\|deposit)\b/i`, sales.ts:102) **OR** it is the earliest payment on the invoice (§3.8). |
+| **P10** | Require a **"service not rendered"** affirmation | none / required affirmation + reason | **ADOPTED — owner policy: REQUIRED affirmation + required reason.** | Tyler: *"refunds are only ever issued if service isn't rendered."* The system can't verify service delivery, so this is a **policy gate the admin affirms**: execute requires `service_not_rendered_confirmed === true` **and** a non-empty `reason`, both server-validated (refuse if absent/false) and both stored on the audit row (§3.9). |
+| **P11** | What the refund ceiling is measured against | gross collected / **service portion** | **ADOPTED — owner policy: SERVICE portion (`paidAmountCents`), NOT gross.** | Tyler: *"All processing fees I want passed to the client."* The client never gets the card/processing fee back, so `maxRefundableCents` is computed against the **service** the studio kept, not gross (service + client fee). Two cases (§3.1): client-pays-fee → ceiling = service < gross; `studio_absorbs` → no separate client fee, so service == gross and the ceiling is unchanged. |
 
 **P5 dispute-edge notes — the two geometries the local `dispute_status="open"` gate does not fully close (M5):**
 - **(a) Just-opened-dispute lag race — Stripe is the backstop.** A dispute can open at Stripe in the window between our fresh `dispute_status` read and the `POST /v1/refunds`, so the local check can pass on a charge that is now under dispute. **Stripe is the authoritative backstop:** it rejects a refund on an actively-disputed charge, so the initiation lands `failed` (cleaned Stripe error surfaced, §3.7) — **no double-loss, no money moves.** The local check is the fast/clean path; Stripe is the hard guarantee.
@@ -63,20 +82,28 @@ Each row is a decision Tyler is being asked to ratify. The **Recommended default
 
 All rails are **server-side** and enforced in the initiation helper, not the client. The client UI mirrors them for UX only.
 
-### 3.1 Amount validation + hard server-side ledger re-check at execution time
+### 3.1 Amount validation + hard server-side ledger re-check at execution time — SERVICE-portion ceiling (P11)
+
+**Ceiling is the SERVICE portion the studio kept, not gross (Rev 3 / P11 / Tyler: "all processing fees passed to the client").** The client does **not** get the processing/card fee back on a refund, so the ceiling is measured against `paidAmountCents` (the service the studio actually keeps), **never** `grossCollectedCents` (service + client card fee). This is grounded in the real settle path (`settleInvoicePaymentCheckoutSession`, stripe-checkout.ts:374–390): `paidAmountCents = serviceOpenCents`, `grossCollectedCents = amountTotalCents`, `clientFeeCents = max(amountTotalCents − serviceOpenCents, 0)`.
+
 At **execution** (not draft, not client), re-read the payment row fresh and compute:
 
 ```
-grossCollectedCents        = payment.grossCollectedCents            // authoritative collected total
-webhookRefundedCents       = payment.refundedAmountCents            // 9a webhook set-to-authoritative
-localInFlightRefundedCents = Σ refund_initiations.amountCents        // THIS payment's own
+serviceCollectedCents      = payment.paidAmountCents               // SERVICE the studio kept (NOT gross)
+webhookRefundedCents       = payment.refundedAmountCents           // 9a webhook set-to-authoritative
+localInFlightRefundedCents = Σ refund_initiations.amountCents       // THIS payment's own
                               WHERE status IN ('submitting','succeeded')
-alreadyRefundedCents       = max(webhookRefundedCents, localInFlightRefundedCents)
-maxRefundableCents         = max(grossCollectedCents - alreadyRefundedCents, 0)
+alreadyRefundedServiceCents = max(webhookRefundedCents, localInFlightRefundedCents)
+maxRefundableCents         = max(serviceCollectedCents - alreadyRefundedServiceCents, 0)
 ```
 
-- **Reject** if `requestedAmountCents <= 0` or `requestedAmountCents > maxRefundableCents`. A refund can never exceed collected-minus-already-refunded. This is checked against the **fresh** ledger at execution — a refund that landed via webhook between draft and confirm shrinks `maxRefundableCents` and can invalidate a stale draft.
+**Two fee-policy cases (both handled by the single formula above — `paidAmountCents` already encodes them):**
+- **Client-pays-fee** (`invoices.card_fee_policy` adds a fee; `clientFeeCents > 0`): `paidAmountCents < grossCollectedCents`. The ceiling is the **service** amount; the client's card fee is excluded. Example: a $200 service collected as $205.90 gross (`clientFeeCents = 590`) has `maxRefundableCents = 20000`, not `20590` — the $5.90 fee is never refunded.
+- **`studio_absorbs`** (no separate client fee added at checkout; `clientFeeCents = 0`): `paidAmountCents == grossCollectedCents`, so **service == gross** and the ceiling is numerically unchanged from the pre-Rev-3 gross rule. Nothing to exclude because the client was never charged a separate fee.
+
+- **Reject** if `requestedAmountCents <= 0` or `requestedAmountCents > maxRefundableCents`. A refund can never exceed **service-collected-minus-already-refunded**. This is checked against the **fresh** ledger at execution — a refund that landed via webhook between draft and confirm shrinks `maxRefundableCents` and can invalidate a stale draft.
 - **Why `max(webhook, localInFlight)`** (critical, do not omit): if the 9a webhook is lagging or (mis-)configured, `refundedAmountCents` may still be 0 right after a successful refund. Counting this payment's own non-failed `refund_initiations` rows means a second refund is capped correctly **even before the webhook lands**, closing the double-refund window that would otherwise exist during webhook lag. `payment_refunds`/`refunded_amount_cents` remain webhook-owned; this is a *read-side* union for the cap only, not a canonical write.
+- **Basis consistency of the union (Rev 3 note, flagged for Tyler).** Both union terms are treated as a **cents-refunded-on-the-service-basis** quantity. `localInFlightRefundedCents` is exactly that by construction — 9b only ever sends service-portion amounts (it never refunds the fee). `webhookRefundedCents` (`refunded_amount_cents`, set from the charge's cumulative `amount_refunded`) also equals the service basis **as long as every refund on this charge went through 9b**. If a refund were issued **outside 9b** (e.g. a full-gross refund from the Stripe dashboard), `refunded_amount_cents` could exceed the service ceiling — which drives `maxRefundableCents` to 0 (clamped), the **safe** direction (it blocks, never over-permits). No unsafe divergence exists; the only effect is a possibly-too-conservative cap, which is correct for a money-out gate.
 
 ### 3.2 Stripe idempotency key (double-click / in-window retry cannot double-refund)
 - Every `POST /v1/refunds` is sent with an **`Idempotency-Key`** header equal to the `refund_initiations.id` (a UUID minted once per initiating action; §4). Within Stripe's idempotency-key retention window, Stripe guarantees at-most-once execution per key — a network retry or a double-submit of the same initiation returns the *same* refund object, never a second refund.
@@ -104,7 +131,9 @@ Before any Stripe call, confirm the target is a real payment we own:
 - `payment.status === "paid"` (a settled Stripe collection; `waived`/`unpaid`/`pending` are ineligible — P7).
 - `payment.externalPaymentId` is a non-empty `pi_…` (there is a Stripe charge to refund; cash/check payments are rejected).
 - `payment.dispute_status !== "open"` **and NOT (`dispute_status === "lost" && !fundsReinstated`)** (P5 + M5 — reject the already-charged-back double-loss geometry locally; Stripe is the backstop for the just-opened-dispute lag race).
-- `maxRefundableCents > 0` (§3.1).
+- **The payment is NOT the retainer (P9 / §3.8).** Reject with a clear reason if the target payment is identified as the initial retainer. This is a **hard block** — no amount, no confirmation, and no flag override refunds a retainer.
+- **The "service not rendered" affirmation is present (P10 / §3.9).** Reject if `service_not_rendered_confirmed !== true` or if `reason` is empty. This is validated **server-side**, before any Stripe call, independent of the UI.
+- `maxRefundableCents > 0` (§3.1, **service basis** — P11).
 
 ### 3.5 Secret handling — fail-closed, never logged
 - The Stripe secret key is read via a fail-closed accessor (`STRIPE_SECRET_KEY?.trim()`, throw if unset — identical to `stripeSecretKey()` in stripe-checkout.ts:17). No dev fallback in production.
@@ -121,6 +150,30 @@ Before any Stripe call, confirm the target is a real payment we own:
 - `invoice.payment_refund_initiation_failed` — on a rejected pre-check or a Stripe error, with `{ paymentId, amountCents, errorMessage (capped), initiationId }`.
 Register both action strings wherever activity actions are enumerated/formatted (`formatActivityAction`).
 
+### 3.8 Retainer hard-block (P9 — Tyler: "No refunds on the initial retainer of services")
+Before any Stripe call, the helper **refuses** if the target `invoice_payments` row is the initial retainer. Reject with a clear message (e.g. *"The initial retainer is non-refundable and cannot be refunded."*) and log `invoice.payment_refund_initiation_failed`. This is a **server-side hard block** — it is not gated by the amount cap, the typed confirmation, or the OFF flag; even a fully-authorized admin with the flag on cannot refund a retainer.
+
+**Retainer-identification predicate (grounded in the real schema — read before writing).** `invoice_payments` has **no** `payment_type` / `kind` / deposit-flag / installment-sequence column (schema.ts:513–543). The only available signals are the free-text `label` and payment ordering (`dueDate`, then `createdAt`). The label signal alone is **weak** (an admin can name a payment anything), so Rev 3 uses a **union of the two most reliable signals** and blocks if **either** matches:
+
+```
+isRetainer(payment, allPaymentsOnInvoice) =
+     isRetainerPaymentLabel(payment.label)          // reuse sales.ts:102 — /\b(retainer|deposit)\b/i
+  OR payment.id === earliestPaymentOnInvoice(allPaymentsOnInvoice).id
+
+// earliestPaymentOnInvoice: min by (dueDate NULLS LAST), tie-break min createdAt, tie-break id
+// (a total, deterministic order so "earliest" is unambiguous even with equal/absent dueDates)
+```
+
+- **Reuse `isRetainerPaymentLabel`** (do not re-invent the regex) so the block stays consistent with the existing `retainer_paid` stage-advance semantics (`autoAdvanceProjectStageForRetainerPayment`, sales.ts:106–116) — the same rows that advance a project to `retainer_paid` are the rows that are non-refundable. Consistency here is the point: "the retainer" means the same thing in both places.
+- **The earliest-payment arm is the safety net for the weak label signal.** If Tyler labels a retainer as "Booking payment", "Payment 1", etc., the label arm misses it but the earliest-payment arm still catches the first installment. This is the safest rule available given the schema; its residual weakness (a single-payment invoice — see below — and label ambiguity) is flagged for Tyler in Risk 6.
+- **Single-payment invoices (flagged interpretation).** On a one-payment invoice the sole payment **is** the earliest, so it is treated as the retainer and blocked. This matches Tyler's intent (a paid-in-full-up-front booking is retainer-like and service may not be rendered), but it means a lump-sum payment cannot be refunded through 9b. **Flagged for Tyler's confirmation** (Risk 6): if he wants lump-sum invoices refundable, narrow the earliest-payment arm to invoices with ≥2 payments. Rev 3's default is the stricter (block) reading, because the policy is "no refunds on the retainer" and over-blocking is the safe direction for a money-out gate.
+
+### 3.9 "Service not rendered" affirmation (P10 — Tyler: "refunds are only ever issued if service isn't rendered")
+The app **cannot** verify whether service was actually rendered — there is no delivery/completion signal that is authoritative enough to gate money movement on. So this rule is encoded as a **policy gate the admin affirms**, captured in the audit trail, not as an automated check:
+- The **execute** payload must carry `service_not_rendered_confirmed: boolean` **and** a non-empty `reason` (the existing required internal reason, P2). The helper **refuses (server-side, before any Stripe call)** if `service_not_rendered_confirmed !== true` or `reason` is blank — this is not a UI-only affordance; a direct call to `initiateInvoicePaymentRefund` without the affirmation throws.
+- Both are **persisted on the `refund_initiations` audit row** (`service_not_rendered_confirmed`, `reason`) and included in the `invoice.payment_refund_initiated` activity metadata, so every refund carries a durable, attributable record that the admin affirmed service was not rendered and why.
+- The UI presents the affirmation as an explicit checkbox/typed acknowledgement alongside the typed-amount confirm (P3); it is a distinct affirmation from the amount confirmation and both must pass.
+
 ---
 
 ## 4. Interleave with 9a recording (one source of truth, idempotent across both systems)
@@ -131,14 +184,21 @@ The core contract: **9b initiates, 9a records.** 9b never writes `payment_refund
 
 ```
 1. PREPARE  (admin opens refund dialog)
+   → RE-CHECK: reject here too if the payment is the retainer (§3.8) so the dialog never
+     opens on a non-refundable payment (the hard block also re-runs at execute).
    → INSERT refund_initiations { id=uuid, invoicePaymentId, stripePaymentIntentId,
-       amountCents=maxRefundableCents (PREFILL only — not the final amount),
+       amountCents=maxRefundableCents (SERVICE-basis PREFILL only, §3.1 — not the final amount),
        status='pending', initiatedBy }
    → id is BOTH our row id AND the Stripe Idempotency-Key.
 
-2. EXECUTE  (admin types the confirm amount, submits { initiationId, amountCents, confirmAmountCents })
-   → re-check ledger (§3.1), typed-amount confirm (confirmAmountCents == amountCents), eligibility (§3.4)
-   → UPDATE refund_initiations SET status='submitting', amount_cents=<final amountCents>
+2. EXECUTE  (admin types the confirm amount + affirms service-not-rendered, submits
+            { initiationId, amountCents, confirmAmountCents, reason,
+              service_not_rendered_confirmed, stripeReason? })
+   → re-check ledger (§3.1, SERVICE ceiling), typed-amount confirm (confirmAmountCents == amountCents),
+     eligibility (§3.4) incl. RETAINER hard-block (§3.8) + SERVICE-NOT-RENDERED affirmation (§3.9:
+     refuse if service_not_rendered_confirmed !== true OR reason is blank)
+   → UPDATE refund_initiations SET status='submitting', amount_cents=<final amountCents>,
+       reason=<reason>, service_not_rendered_confirmed=1
        WHERE id=initiationId AND status='pending'   (PIN amount + claim, ONE UPDATE, BEFORE network — M3)
    → POST /v1/refunds  (Idempotency-Key: id, amount = the ROW's just-persisted amount_cents,
                         NOT the prepare prefill)     (money moves here)
@@ -194,12 +254,12 @@ Two-phase to support the typed-confirmation + persisted idempotency key:
 | Method + path | Purpose | Guard |
 | --- | --- | --- |
 | `POST /api/invoices/[id]/payments/[paymentId]/refund/prepare` | Mint a `refund_initiations` row (`pending`), return `{ initiationId, maxRefundableCents, currency }`. | `guardDirectWorkerApiRequest` + admin-proof/proxy admin session + flag check |
-| `POST /api/invoices/[id]/payments/[paymentId]/refund/execute` | Body `{ initiationId, amountCents, confirmAmountCents, reason, stripeReason? }`. Validate, re-check ledger, call Stripe, update row. | same |
+| `POST /api/invoices/[id]/payments/[paymentId]/refund/execute` | Body `{ initiationId, amountCents, confirmAmountCents, reason (required), service_not_rendered_confirmed (required, must be true — §3.9), stripeReason? }`. Validate (incl. retainer hard-block §3.8 + service-not-rendered affirmation §3.9), re-check ledger (SERVICE ceiling §3.1), call Stripe, update row. | same |
 
 Both mirror the existing admin mutation shape (checkout route, invoices/[id]/status route): `const blocked = guardDirectWorkerApiRequest(request); if (blocked) return blocked;` first line, then the flag gate, then the helper, then a 303/JSON response. No new auth primitive — reuse the exact origin-guard + Pages-proxy admin wall every other admin mutation uses (this is the same trust boundary as `/api/invoices/[id]/payments/[paymentId]/checkout`).
 
 ### 5.2 Library boundary
-- New module `src/lib/stripe-refund-initiation.ts` exporting `initiateInvoicePaymentRefund({ invoiceId, paymentId, initiationId, amountCents, confirmAmountCents, reason, stripeReason, actorType, actorName })`.
+- New module `src/lib/stripe-refund-initiation.ts` exporting `initiateInvoicePaymentRefund({ invoiceId, paymentId, initiationId, amountCents, confirmAmountCents, reason, serviceNotRenderedConfirmed, stripeReason, actorType, actorName })`. The helper **throws server-side** (before any Stripe call) if `serviceNotRenderedConfirmed !== true` or `reason` is blank (§3.9), or if the target payment is the retainer (§3.8) — these are enforced in the library boundary, not only the route.
 - It takes `actorType` and **throws immediately** if `actorType !== "admin"` (defense-in-depth: even if some future code path tried to call it as `"agent"`/`"system"`, it refuses — this is stricter than the draft-only guard because there is *no approval that unlocks it*).
 - It **also calls `refundInitiationEnabled()` itself and throws before any Stripe call if the flag is off** (M4, §8) — the flag gate is not left solely to the routes, so a future caller that bypassed the route still cannot move money while the flag is off.
 - The module is imported **only** by the two `/api/invoices/*` routes above — never by `src/lib/studio-mcp.ts`, never by any `/api/agent/*` route.
@@ -227,7 +287,8 @@ CREATE TABLE IF NOT EXISTS refund_initiations (
   stripe_payment_intent_id TEXT,                        -- pi_... snapshot at initiation
   amount_cents             INTEGER NOT NULL DEFAULT 0,
   currency                 TEXT NOT NULL DEFAULT 'usd',
-  reason                   TEXT,                         -- internal reason (audit; capped 500)
+  reason                   TEXT,                         -- internal reason (audit; capped 500); REQUIRED at execute (§3.9)
+  service_not_rendered_confirmed INTEGER NOT NULL DEFAULT 0, -- P10/§3.9: admin affirmed service was NOT rendered (1) before the money-moving call
   stripe_reason            TEXT,                         -- requested_by_customer | duplicate | fraudulent
   status                   TEXT NOT NULL DEFAULT 'pending', -- pending | submitting | succeeded | failed
   stripe_refund_id         TEXT,                         -- re_... returned by Stripe (read-only cross-ref)
@@ -283,6 +344,7 @@ if (!response.ok) throw new Error(stripeErrorMessage(body) ?? "Stripe refund fai
 
 Notes:
 - Use `payment_intent` (we store `pi_…` in `external_payment_id`); Stripe refunds against that PI's charge. Send an explicit `amount` equal to the **row's persisted `amount_cents`** (pinned in the `submitting` UPDATE, §4.1/M3) — never the prepare-time prefill, and never rely on "omit = full" (determinism + row/cap/request parity).
+- **Stripe refunds against the CHARGE (gross); we deliberately refund only the SERVICE portion (P11).** Stripe's own refundable ceiling on a charge is the **gross** amount collected (service + client card fee), because that is what the customer was actually charged. Our `amountCents` is capped at the **service** portion (`paidAmountCents`, §3.1), which is **always ≤ gross**, so the amount we send is **always valid at Stripe** — we are choosing to never refund the fee portion, not being forced to. Framed as `refund = min(requestedServiceAmount, whatStripeAllows)`: because `requestedServiceAmount ≤ serviceCollected ≤ grossCollected = Stripe's ceiling`, the `min` is always the service amount. No Stripe-side rejection arises from the fee exclusion. (Stripe also keeps its own processing fee on any refund — existing Risk 5 — so refunding only the service portion is what keeps the studio whole on service while the client bears their card fee.)
 - **The `Idempotency-Key` guards only near-term retries (~24h window; §3.2).** It is not a substitute for the in-flight guard (§3.3): a `submitting` row is never re-POSTed, so the key is never the thing standing between a stuck row and a double-refund. The amount is **not** in the key, so a same-key request with a changed amount returns Stripe `idempotency_error` (HTTP 400), never a second refund.
 - Stripe may return `status: "pending"` (async settlement) with a 200 — that is a **success** (the refund is accepted); the 9a webhook will finalize it. Store `succeeded` on our initiation row when the HTTP call is 2xx; the *Stripe* refund status lives in `payment_refunds` via the webhook.
 - Do not build a second Stripe secret accessor if a shared one is extracted; if `stripeSecretKey()` is promoted to a shared `src/lib/stripe-client.ts`, reuse it (keep the checkout path behavior identical).
@@ -304,10 +366,10 @@ Notes:
 
 All tests spy on `fetch` and assert `api.stripe.com/v1/refunds` call counts.
 
-1. **Happy path (mocked Stripe)** — prepare → execute a full refund → exactly **one** `POST /v1/refunds` with `Idempotency-Key = initiationId` and `amount = maxRefundableCents`; `refund_initiations` row `succeeded` with `stripe_refund_id`; activity `invoice.payment_refund_initiated` logged.
+1. **Happy path (mocked Stripe)** — prepare → execute a full refund on a **non-retainer** payment with `service_not_rendered_confirmed = true` and a non-empty `reason` → exactly **one** `POST /v1/refunds` with `Idempotency-Key = initiationId` and `amount = maxRefundableCents` (SERVICE basis, §3.1); `refund_initiations` row `succeeded` with `stripe_refund_id`, `service_not_rendered_confirmed = 1`, and the `reason` persisted; activity `invoice.payment_refund_initiated` logged (metadata includes `reason` + `service_not_rendered_confirmed`).
 2. **Partial refund** — `amountCents < maxRefundableCents` accepted; over-cap partial rejected (see #3).
-3. **Amount over-cap rejected** — `requestedAmountCents > grossCollectedCents - alreadyRefundedCents` → rejected, **zero** Stripe calls, `initiation_failed` logged.
-4. **Ledger re-check uses `max(webhook, local in-flight)`** — with `refundedAmountCents = 0` but a prior `succeeded`/`submitting` `refund_initiations` row summing to the full gross, a second refund is capped/rejected → **zero** Stripe calls (proves the webhook-lag double-refund window is closed).
+3. **Amount over-cap rejected (SERVICE basis — P11)** — `requestedAmountCents > paidAmountCents - alreadyRefundedServiceCents` → rejected, **zero** Stripe calls, `initiation_failed` logged. Explicitly assert a request for the **gross** amount on a client-pays-fee payment (service + fee) is **rejected** — the ceiling is the service portion, not gross.
+4. **Ledger re-check uses `max(webhook, local in-flight)`** — with `refundedAmountCents = 0` but a prior `succeeded`/`submitting` `refund_initiations` row summing to the full **service** amount, a second refund is capped/rejected → **zero** Stripe calls (proves the webhook-lag double-refund window is closed).
 5. **Disputed payment rejected** — `dispute_status = "open"` → rejected, zero Stripe calls (P5). Also assert `dispute_status = "lost" && !fundsReinstated` → rejected locally, zero Stripe calls (P5 note (b) / M5); and that a `won`/`reinstated` dispute is refundable (subject to the cap).
 6. **In-flight guard prevents double-refund** — two `execute` calls with the same `initiationId`: the first calls Stripe once; the second hits the in-flight guard and makes **zero** additional Stripe calls. Assert both sub-cases: a `succeeded` row returns the existing result; a `submitting` row returns an "in progress / needs reconciliation" response and is **never re-POSTed** regardless of age (M1) — no reliance on the Stripe key past its ~24h window.
 7. **Typed-confirmation mismatch rejected** — `confirmAmountCents !== amountCents` → rejected, zero Stripe calls.
@@ -319,8 +381,12 @@ All tests spy on `fetch` and assert `api.stripe.com/v1/refunds` call counts.
 13. **Flag-off blocks initiation, incl. strict parse + in-helper check (M4)** — assert `refundInitiationEnabled` treats `undefined`, `""`, `"0"`, `"true"`, `"on"` as OFF and only `"1"` as ON (mirror `admin-proxy-auth.test.ts:194–197`). With the flag off: both routes 403, zero Stripe calls, no `refund_initiations` row; **and** a direct call to `initiateInvoicePaymentRefund` with the flag off **throws before any Stripe call** (defense-in-depth, flag checked inside the helper).
 14. **Reconciliation tripwires (both, §4.4)** — (a) a `succeeded` initiation with no matching `payment_refunds` row surfaces as "initiated refund not yet recorded"; (b) a `submitting` row older than ~1h surfaces as "refund stuck in-flight — reconcile against Stripe" (M1), and the Σ-cap pins that payment's `maxRefundable` at 0 while it is stuck.
 15. **Amount pinned + same-key-different-amount is one refund (M3)** — execute pins the row's `amount_cents` in the `submitting` UPDATE and sends **exactly** that to Stripe (assert the POST `amount` equals the persisted row value, not the prepare prefill). Then two executes with the **same `initiationId` but different amounts** → **exactly one** `POST /v1/refunds` (the second is blocked by the in-flight guard before any Stripe call; if it reached Stripe it would be an `idempotency_error`, never a second refund).
-16. **Auth-armed smoke (M2)** — extend `scripts/production-smoke.mjs`: an unauthenticated `POST …/refund/execute` on the `*.workers.dev` origin (no origin secret, no admin proof) returns **404**. This is the pre-enable assertion that `ORIGIN_PROXY_SECRET` is set at the Worker and `ADMIN_PROOF_ENFORCE=1` (both fail-open when unset).
-17. **Build gate** — `npm run build` **exit code 0** (type-check passes), `npm test` green, `npm run lint`; canon/drift updated for `refund_initiations`.
+16. **Retainer refused (P9 / §3.8)** — a payment identified as the retainer is **rejected**, **zero** Stripe calls, `initiation_failed` logged. Assert **both** predicate arms independently: (a) a payment whose `label` matches `isRetainerPaymentLabel` (e.g. "Retainer", "Deposit") is refused even if it is not the earliest; (b) the **earliest** payment on an invoice (min dueDate, tie-break createdAt) is refused even when its label does **not** match (e.g. "Payment 1"). Also assert a clearly-non-retainer, non-earliest payment (e.g. a labeled "Final balance" that is not first) is **allowed** (subject to the cap). Assert prepare **and** execute both block (§4.1).
+17. **Missing service-not-rendered affirmation refused (P10 / §3.9)** — execute with `service_not_rendered_confirmed` absent or `false` → **rejected**, zero Stripe calls, `initiation_failed`; and execute with a blank/whitespace `reason` → rejected, zero Stripe calls. Assert a **direct** call to `initiateInvoicePaymentRefund` without the affirmation **throws before any network call** (server-side, not UI-only). Assert the happy path (both present + true) stores `service_not_rendered_confirmed=1` and the `reason` on the `refund_initiations` row and in the activity metadata.
+18. **Service-portion ceiling excludes the client card fee (P11, client-pays)** — a payment with `paidAmountCents = 20000`, `grossCollectedCents = 20590`, `clientFeeCents = 590`: the max refundable is **20000**, not 20590. A request for `20000` succeeds; a request for `20001`…`20590` is **rejected** (zero Stripe calls); the successful `POST /v1/refunds` sends `amount = 20000` (service), never gross.
+19. **`studio_absorbs` ceiling equals gross == service (P11)** — a payment with `card_fee_policy = 'studio_absorbs'`, `clientFeeCents = 0`, `paidAmountCents == grossCollectedCents = 20000`: max refundable is **20000** and a full refund sends `amount = 20000`. Confirms the single service-basis formula (§3.1) leaves the no-separate-fee case numerically unchanged.
+20. **Auth-armed smoke (M2)** — extend `scripts/production-smoke.mjs`: an unauthenticated `POST …/refund/execute` on the `*.workers.dev` origin (no origin secret, no admin proof) returns **404**. This is the pre-enable assertion that `ORIGIN_PROXY_SECRET` is set at the Worker and `ADMIN_PROOF_ENFORCE=1` (both fail-open when unset).
+21. **Build gate** — `npm run build` **exit code 0** (type-check passes), `npm test` green, `npm run lint`; canon/drift updated for `refund_initiations`.
 
 ---
 
@@ -330,9 +396,9 @@ All tests spy on `fetch` and assert `api.stripe.com/v1/refunds` call counts.
 | --- | --- | --- | --- |
 | 1 | Migration `0091` `refund_initiations`; mirror in `schema.ts`, `studio-canon.test.ts`, `client.ts` `migrate()`. | S | Low (additive, not always-on) |
 | 2 | `refundInitiationEnabled()` in `finance-flags.ts` (single OFF boolean, read in body). | S | Low |
-| 3 | `src/lib/stripe-refund-initiation.ts`: `initiateInvoicePaymentRefund` — eligibility + ledger re-check (§3.1, `max(webhook,local)`), `refund_initiations` lifecycle, Stripe call with Idempotency-Key, fail-closed secret, no-log, activity logs, `actorType!=="admin"` throw. | **L** | **High (moves real money — correctness of cap/idempotency/eligibility is load-bearing)** |
-| 4 | Two admin routes `refund/prepare` + `refund/execute` (`guardDirectWorkerApiRequest` + flag gate + admin-proof), typed-confirmation validation. | M | Med (most sensitive admin mutation) |
-| 5 | Admin UI: refund control on the invoice/payment view (full prefill + partial + reason + typed-amount confirm), pending→succeeded display joining `refund_initiations` + `payment_refunds`. | M | Med |
+| 3 | `src/lib/stripe-refund-initiation.ts`: `initiateInvoicePaymentRefund` — eligibility + **SERVICE-basis** ledger re-check (§3.1, `max(webhook,local)` on `paidAmountCents`), **retainer hard-block (§3.8, reuse `isRetainerPaymentLabel`)**, **service-not-rendered affirmation + required reason (§3.9)**, `refund_initiations` lifecycle, Stripe call with Idempotency-Key, fail-closed secret, no-log, activity logs, `actorType!=="admin"` throw. | **L** | **High (moves real money — correctness of cap/idempotency/eligibility/retainer-block is load-bearing)** |
+| 4 | Two admin routes `refund/prepare` + `refund/execute` (`guardDirectWorkerApiRequest` + flag gate + admin-proof), typed-confirmation + service-not-rendered affirmation validation. | M | Med (most sensitive admin mutation) |
+| 5 | Admin UI: refund control on the invoice/payment view (SERVICE-basis prefill + partial + required reason + typed-amount confirm + **service-not-rendered affirmation checkbox**; retainer rows show the control **disabled** with "retainer is non-refundable"), pending→succeeded display joining `refund_initiations` + `payment_refunds`. | M | Med |
 | 6 | Reconciliation surfacing: "initiated refund not yet recorded" tripwire in the needs_reconciliation view (extend 9a §2.1). | S | Low |
 | 7 | Guard tests (no agent/MCP surface, `actorType` throw, origin-guard, flag-off) + full test plan §9 + build-exit-code gate. | M | Med (the safety net) |
 | 8 | Deploy **dark**: backup → apply 0091 → verify → deploy Worker + proxy → health-check → rollback-ready; `REFUND_INITIATION_ENABLED` unset. **Hold for Tyler's go before this step runs.** | S | **Gated — money-movement pause** |
@@ -349,10 +415,11 @@ Effort: S ≈ ≤0.5d, M ≈ 0.5–1d, L ≈ 1–2d.
 | **Off-by-default flag** | `REFUND_INITIATION_ENABLED` default OFF; both routes 403 before any Stripe call (§8). Money gate is a hard boolean, flipped only by Tyler. |
 | **Attacker-chosen ids / untrusted input** | Every field validated + capped (reuse 9a's `capId`/`capReason`/`clampAmountCents`); amount re-checked server-side against the fresh ledger; typed-amount confirm; ownership check (§3). |
 | **Agent authority** | Money-movement is **absent** from the agent surface (stricter than the approval guard); `actorType!=="admin"` throw + guard test asserting zero Stripe calls (§5). |
+| **Owner refund policy enforced server-side, not in the UI (Rev 3)** | All three of Tyler's rules are **library-boundary** gates, not UI affordances: retainer hard-block (§3.8), required service-not-rendered affirmation + reason (§3.9), and the SERVICE-portion ceiling (§3.1). A direct call to `initiateInvoicePaymentRefund` that skips the UI still cannot refund a retainer, refund without the affirmation, or exceed the service ceiling. Retainer identity reuses the existing `isRetainerPaymentLabel` (sales.ts:102) unioned with earliest-payment so it can't be defeated by a relabel. |
 | **Secrets fail closed** | `stripeSecretKey()` throws when unset; no dev fallback in prod; key never logged (§3.5). |
 | **Never silent-drop / no double-count** | 9b never writes `payment_refunds`; recording comes only from the 9a webhook — specifically **`charge.refunded`** sets `refunded_amount_cents` (the load-bearing subscription, M6); `stripeRefundId` cross-ref is read-only; both reconciliation tripwires (missing webhook + stuck `submitting`) catch failures (§4.4). |
 | **Origin-guard bypass discipline** | Refund routes use `guardDirectWorkerApiRequest` and are **never** added to `PUBLIC_API_PREFIXES`/`isPublicOriginBypassApiPath`; drift test asserts this (§3.6, §9.10). |
-| **Fail-open guards must be ARMED before a money route ships (M2)** | Both `guardDirectWorkerApiRequest` (no-op when `ORIGIN_PROXY_SECRET` unset, `origin-guard.ts:61`) and admin-proof (enforces only when `ADMIN_PROOF_ENFORCE="1"`) fail OPEN when unset. §12 PRECONDITION AUTH-ARMED + the §9.16 smoke assert both are set **before** `REFUND_INITIATION_ENABLED` flips on, so the route is never unauthenticated-reachable on `*.workers.dev`. |
+| **Fail-open guards must be ARMED before a money route ships (M2)** | Both `guardDirectWorkerApiRequest` (no-op when `ORIGIN_PROXY_SECRET` unset, `origin-guard.ts:61`) and admin-proof (enforces only when `ADMIN_PROOF_ENFORCE="1"`) fail OPEN when unset. §12 PRECONDITION AUTH-ARMED + the §9.20 smoke assert both are set **before** `REFUND_INITIATION_ENABLED` flips on, so the route is never unauthenticated-reachable on `*.workers.dev`. |
 | **Prod D1 migrations** | 0091 via idempotent `d1 execute --file`, verified before Worker deploy; no blanket `migrations apply --remote` (§8). |
 | **Deploy rails / reversible** | Backup → rollback version → dark deploy → health-check → instant flag kill-switch (§8). |
 | **Settled-status enumeration** | 9b does NOT introduce or flip any status — status handling stays entirely in 9a's already-enumerated settled-status logic (P8); 9b only moves money and records the initiation. |
@@ -374,7 +441,7 @@ Even after the 9b code is built, Fable-reviewed, and passes the build-exit-code 
 
 **Named, hard-blocking preconditions Tyler must confirm are true before flipping `REFUND_INITIATION_ENABLED` on** (each should be a **smoke assertion in `scripts/production-smoke.mjs`**, not a memory item — the flag flip is blocked until they pass):
 
-- **PRECONDITION AUTH-ARMED (M2 — new, hard-blocking).** Confirm the auth boundary the refund route relies on is actually **ARMED at the Worker before the flag flips**. Both guards **fail OPEN when their env is unset**, and if both are unset in prod with the refund flag on, `POST …/refund/execute` on the `*.workers.dev` origin is reachable **UNAUTHENTICATED** → an attacker can drain up to gross per payment. Verify **both**:
+- **PRECONDITION AUTH-ARMED (M2 — new, hard-blocking).** Confirm the auth boundary the refund route relies on is actually **ARMED at the Worker before the flag flips**. Both guards **fail OPEN when their env is unset**, and if both are unset in prod with the refund flag on, `POST …/refund/execute` on the `*.workers.dev` origin is reachable **UNAUTHENTICATED** → an attacker can drain up to the **service ceiling** (§3.1) per payment (the retainer and non-retainer non-earliest payments still subject to §3.8; the server-side cap and gates run even without auth, but an unauthenticated refund is still catastrophic). Verify **both**:
   - `ORIGIN_PROXY_SECRET` is **set at the Worker** — else `guardDirectWorkerApiRequest` is a **no-op** (`origin-guard.ts:61`: `if (!configuredSecret) return false;` → never blocks a direct-Worker request).
   - `ADMIN_PROOF_ENFORCE = "1"` — else admin-proof does **not** enforce (`adminProofEnforced` is true only for exactly `"1"`; unset = fail-open, pinned by `admin-proxy-auth.test.ts:197`).
   - Make this a **smoke assertion**: an unauthenticated `POST …/refund/execute` to the `*.workers.dev` origin (no origin secret, no admin proof) must return **404**, asserted BEFORE `REFUND_INITIATION_ENABLED` is turned on. This precondition sits alongside PRECONDITION WEBHOOK below as a first-class gate, not an afterthought.
@@ -392,4 +459,6 @@ These are the residual risks that remain **even with every safety rail in this s
 2. **At `record_only`, a full refund moves real money but the payment still reads `paid`.** Recording writes the child row + net figures, but the status flip is gated to `enforce`. Until `FINANCE_REFUND_RECORDING = enforce`, the books are **temporarily wrong** (money left, status says paid). Flip to `enforce` first (PRECONDITION ENFORCE) or knowingly accept temporarily-wrong status until you do.
 3. **A crashed `execute` can wedge a payment's refundability until manual reconciliation.** If the process dies between the `submitting` claim and the terminal update, that payment's `maxRefundable` is pinned at 0 (the Σ-cap counts the `submitting` row) and no further refund can be initiated on it **until a human reconciles against Stripe** (§3.3, §4.4(2)). This is a deliberate fail-safe (better to block than to risk a double-refund), but it is manual, human-in-the-loop recovery — there is no auto-retry (by design: the ~24h key expiry makes auto-retry a double-pay risk).
 4. **Refunds are IRREVERSIBLE at Stripe. The kill-switch only stops FUTURE refunds.** `wrangler secret delete REFUND_INITIATION_ENABLED` and the Worker rollback both prevent *new* refunds — neither can claw back a refund already sent. Once `POST /v1/refunds` returns 2xx, the money is gone; the only "undo" is a fresh charge to the client, which is a separate, out-of-scope action. Every real refund is final.
-5. **Stripe does NOT return its processing fee on a refund — every refund costs the fee.** When you refund a charge, Stripe keeps the original processing fee (it is not returned to the balance). So a full refund of a $200 charge returns $200 to the client but leaves the business out the original Stripe fee — every refund has a real, non-recoverable cost. The app surfaces the refunded amount, not this sunk fee; Tyler should factor it into partial-vs-full and "should we refund at all" decisions.
+5. **Stripe does NOT return its processing fee on a refund — every refund costs the fee.** When you refund a charge, Stripe keeps the original processing fee (it is not returned to the balance). So a full refund of a $200 charge returns $200 to the client but leaves the business out the original Stripe fee — every refund has a real, non-recoverable cost. The app surfaces the refunded amount, not this sunk fee; Tyler should factor it into partial-vs-full and "should we refund at all" decisions. **(Rev 3 note:** the service-portion ceiling (P11) means the client already bears their card fee — the studio never *adds* the fee to a refund — so the studio's only unrecovered cost on a refunded charge is Stripe's own kept fee, minimized by refunding the service portion only.)
+6. **The retainer block leans on a WEAK schema signal — confirm the predicate matches how you label retainers (Rev 3 / P9).** `invoice_payments` has **no** retainer/deposit/type column; the block identifies the retainer by **label match** (`/\b(retainer\|deposit)\b/i`) **OR earliest payment on the invoice** (§3.8). This is the safest available rule, but two edges are Tyler's to confirm: (a) a retainer labeled with none of those words *and* not the earliest payment would slip the label arm (the earliest arm is the backstop — so name the retainer first, or use "retainer"/"deposit"); (b) on a **single-payment invoice** the sole payment is treated as the retainer and is therefore **non-refundable through 9b** (§3.8) — if Tyler wants lump-sum invoices refundable, the earliest-payment arm must be narrowed to ≥2-payment invoices. Rev 3 defaults to the stricter (over-block) reading; **confirm at the gate.**
+7. **The "pass fees to the client" ceiling is an INTERPRETATION — confirm it means "refund service only" (Rev 3 / P11).** Tyler said *"all processing fees I want passed to the client."* Rev 3 encodes this as: the refundable ceiling is the **service portion** (`paidAmountCents`), so a refund never returns the card/processing fee the client paid, and (combined with Risk 5) the studio stays whole on service. The alternative reading — refund gross and separately absorb/recover the fee — is **not** what Rev 3 builds. If Tyler actually wants the client made whole on gross (fee included), the ceiling reverts to `grossCollectedCents` and P11/§3.1 must change. **Confirm the service-portion ceiling at the gate before the first real refund.**
