@@ -47,9 +47,25 @@ the health page, not alerted.
 
 | Signal | Source | Cadence | Healthy | Threshold | Severity |
 |---|---|---|---|---|---|
-| Reminders cron ran + succeeded | heartbeat `job_runs['scheduler-reminders']`, written by `POST /api/cron/scheduler-reminders` (`sendDueSchedulerReminders`) | hourly (`0 * * * *`, `wrangler.scheduler-reminders.jsonc`) | `last_success_at` within ~2h | > 2h stale → WARN; > 6h stale → **CRITICAL** | **CRITICAL** (this is the job that silently died) |
+| Reminders cron ran + succeeded **and actually sent what was due** | heartbeat `job_runs['scheduler-reminders']`, written by `POST /api/cron/scheduler-reminders` (`sendDueSchedulerReminders` → `{checked, due, sent, failed}`) | hourly (`0 * * * *`, `wrangler.scheduler-reminders.jsonc`) | `last_success_at` within ~2h **and** not a "due>0, sent=0" run (that is recorded as FAILURE, §2.3); transient `failed>0 && sent>0` → WARN only | > 2h stale → WARN; > 6h stale → **CRITICAL**; `due>0 && sent===0` recorded FAILURE → escalates via `consecutive_failures` | **CRITICAL** (this is the job that silently died — staleness **and** silent-non-send both count) |
 | Sequence runner ran + succeeded | heartbeat `job_runs['sequence-runner']`, written by `POST /api/cron/sequences` (`runDueSequences`) | daily 14:00 UTC (`0 14 * * *`, `wrangler.sequence-runner.jsonc`) | `last_success_at` within ~26h. Note: `{skipped:'flag_off'}` is a **successful run** — record `ok:true` | > 26h stale → WARN; > 50h stale → CRITICAL | WARN (daily granularity; escalates to CRITICAL when very stale) |
 | Systems monitor itself ran | heartbeat `job_runs['systems-monitor']` (self-write) + the **dead-man's-switch** (§4.3) | hourly | ran within ~2h | > 2h stale (visible only from outside — see §4.3) | CRITICAL (external) |
+
+**Required-cadence jobs — a missing `job_runs` row is a maximally-stale signal, not green.**
+The three rows above (`scheduler-reminders`, `sequence-runner`, `systems-monitor`) are the
+**REQUIRED set**: they are supposed to run on a fixed schedule from the moment they are enabled. For
+these, `computeSystemHealth` treats **a missing row OR a NULL `last_success_at` exactly like a
+maximally-stale `last_success_at`** — it clocks staleness from the job's **deploy/enablement
+timestamp** (a small config constant per job, set when the cron is wired) and applies the *same*
+WARN→CRITICAL thresholds. This closes the exact target failure class: a cron whose trigger is broken
+from day one, or a table wipe/restore that drops the heartbeat row, must **not** render green just
+because there is no row to read. (Only `backup-d1` had missing-row semantics before; this generalizes
+it to the required crons with the opposite default — absent = stale, not absent = not-configured.)
+
+**Event-driven jobs default the other way.** The webhook/inbound handlers below and the backup
+heartbeat are **NOT** in the required set: they only run when an external event arrives (or when Tyler
+wires backup), so a missing row is genuinely `not-configured` (INFO), never a stale/failed alarm. See
+§4.1 for where this branch lives and §8 test 2 for the missing-row unit test.
 
 ### Webhook / inbound handlers (event-driven → error-rate is the signal, NOT staleness)
 
@@ -92,7 +108,7 @@ The authoritative backup gate remains `deploy:preflight` + the quarterly `drill:
 **Decision: in-DB heartbeat, not Cloudflare Workers Analytics.** Workers logs/analytics are
 not queryable from the app, not owned by Tyler, and cannot express "reminders succeeded but
 sent nothing." A D1 table that each job writes on every run (success **or** failure) is
-queryable, owned, and is exactly what the digest and `/api/health` read.
+queryable, owned, and is exactly what the digest and `/api/agent/health` read.
 
 ### 2.1 `job_runs` table (current-state, one row per job, upserted)
 
@@ -141,9 +157,12 @@ Rules:
   outcome and then **preserve the original HTTP status / re-raise** so the fixed fail-loud
   crons still return non-2xx and the cron worker still throws. Monitoring is additive; it never
   masks the failure it observes.
-- **`error` is a cleaned message, never a raw secret.** Callers pass the same
-  already-cleaned message they log today (e.g. `stripeErrorMessage(...)`). `last_error` feeds
-  the digest, so it must not carry secrets (see the secret-redaction test, §7).
+- **`error` is a cleaned message, never a raw secret — and `recordJobRun` re-sanitizes it
+  itself, never trusting the caller.** Callers pass the same already-cleaned message they log
+  today (e.g. `stripeErrorMessage(...)`), but the secret-redaction + ≤500-char cap runs
+  **inside `recordJobRun`** as a defense-in-depth backstop (a future careless caller cannot
+  land a raw secret or an unbounded blob in `last_error`). `last_error` feeds the digest, so it
+  must not carry secrets (see the secret-redaction test, §7).
 - No agent/MCP export. `recordJobRun` is imported only by the job entry points below.
 
 ### 2.3 Which jobs call it, and exactly where
@@ -154,12 +173,54 @@ canceled on Workers).
 
 | Caller (file) | ok call | fail call |
 |---|---|---|
-| `src/app/api/cron/scheduler-reminders/route.ts` | after `sendDueSchedulerReminders()` resolves | `try/catch` around it → record fail, then return 500 (unchanged fail-loud) |
+| `src/app/api/cron/scheduler-reminders/route.ts` | after `sendDueSchedulerReminders()` resolves — **but see the "ran but sent nothing" rule below**: record FAILURE (not ok) when `due > 0 && sent === 0` | `try/catch` around it → record fail, then return 500 (unchanged fail-loud) |
 | `src/app/api/cron/sequences/route.ts` | after `runDueSequences()` (incl. `{skipped:'flag_off'}` = ok) | `try/catch` → record fail, re-raise |
-| `src/app/api/stripe/webhook/route.ts` | in the success branch before `NextResponse.json({received:true})` | in the existing `catch` before returning 400 |
-| `src/app/api/twilio/status/route.ts` | before `twiml(200)` | in the `catch` before the 500 |
-| `src/app/api/twilio/inbound/route.ts` | on success | on handled failure |
+| `src/app/api/stripe/webhook/route.ts` | in the success branch before `NextResponse.json({received:true})` | **only for errors raised AFTER signature verification succeeds** (see the signature-reject carve-out below) |
+| `src/app/api/twilio/status/route.ts` | before `twiml(200)` | in the `catch` around `handleStatusCallback` before the 500 (already after the 403 signature gate — correct) |
+| `src/app/api/twilio/inbound/route.ts` | on success | on handled failure (already after the 403 signature gate — correct) |
 | `src/app/api/inbound/inquiry-email/route.ts` | after `ingestInboundInquiry` resolves | in the `catch` before the 500 |
+
+**Stripe signature-reject carve-out (do NOT poison the CRITICAL counter).**
+`/api/stripe/webhook` is in origin-guard `PUBLIC_API_PREFIXES` (`origin-guard.ts:24`), so on
+`*.workers.dev` it is reachable **unauthenticated** by any scanner. `handleStripeCheckoutWebhook`
+calls `verifyStripeWebhookPayload({ rawBody, signatureHeader })` **first** (`stripe-checkout.ts:693`),
+which **throws** on a missing/invalid signature; the route's single `catch` then returns `400`
+(`route.ts:9-15`). If that catch recorded a webhook FAILURE, three junk POSTs from any scanner
+would push `consecutive_failures ≥ 3` and fire the CRITICAL "money state drift" email —
+attacker-triggerable griefing + cry-wolf.
+
+Therefore the stripe wiring **must not** treat a pre-verification reject as a monitored failure.
+Implement one of:
+- **Split the try** so `verifyStripeWebhookPayload` runs *before* the recorded region: a throw from
+  verification returns `400` **unrecorded** (or recorded under a separate, **non-alerting** key such
+  as `stripe-webhook-rejected` that is NOT in the CRITICAL catalog); only a throw from *processing a
+  successfully-verified event* records a `stripe-webhook` FAILURE.
+- **Or classify the thrown error type** in the catch: signature/verification errors → skip the
+  heartbeat FAILURE (return 400 as today); all other (post-verify processing) errors → record
+  FAILURE, then return 400.
+
+Either way: a real **verified-event-then-processing-throws** failure still counts toward
+`consecutive_failures` and can legitimately escalate to CRITICAL; a pre-verify reject never does.
+
+**Twilio note (already correct, no change needed).** Both Twilio routes return `403` from the
+signature gate **before** the `try/catch` that records the failure (`twilio/status/route.ts:35,50`
+return before the `catch` at `:58`; `twilio/inbound/route.ts:40,57` likewise). So Twilio's
+signature-reject paths already cannot reach the recorded catch — the §2.3 wiring for them is sound
+as written.
+
+**"Ran but sent nothing" rule (scheduler-reminders — close the original incident class).**
+`sendDueSchedulerReminders` (`scheduler.ts:1246-1275`) swallows every send failure
+(`if (!emailed) continue;`) and resolves `{checked, sent}` — it **cannot throw** for email
+failures, and `resendRequest` returns `delivered:false` (no throw) when `RESEND_API_KEY` is
+missing/revoked. So persistent Resend breakage on this job would keep the heartbeat green forever
+while reminders go silently unsent — the original 2-month incident via a different mechanism
+(booking reminders have no other failure signal, unlike sequences/SMS). Fix:
+- Extend the function's return to `{ checked, due, sent, failed }` where `due` = bookings eligible
+  to send this run and `failed` = sends that returned `delivered:false`.
+- In the reminders route, **record the run as FAILURE when `due > 0 && sent === 0`** (persistent
+  provider breakage), and pass a cleaned reason. Transient single-send blips (`failed > 0` but
+  `sent > 0`) stay self-healing (retried next hour) and are surfaced as **WARN** in
+  `computeSystemHealth` rather than a hard failure. See the health-signal catalog (§1) and test §8.
 
 The **cron Workers** (`workers/*.ts`) do **not** call `recordJobRun` — they have no D1 binding
 (their `Env` is only the endpoint + `CRON_SECRET`). The heartbeat is written CRM-side inside
@@ -251,7 +312,19 @@ It reads: `job_runs` (staleness + consecutive_failures vs the §1 thresholds),
 counts over `sequence_sends` (`claimed`/`failed`) and `project_communications`
 (failed delivery). **No new queries invented** where an existing one exists. Pure read; no
 writes; no flag (always callable). This single module feeds the digest, the immediate-alert
-scan, `/api/health`, and the `/system-status` page.
+scan, `/api/agent/health`, and the `/system-status` page.
+
+**Required-cadence missing-row branch (per §1).** `computeSystemHealth` carries a small
+`REQUIRED_JOBS` map — `scheduler-reminders`, `sequence-runner`, `systems-monitor` — each with its
+enablement timestamp. For a required job, **`job_runs` row absent OR `last_success_at` NULL** is
+evaluated as *maximally stale*, clocked from that enablement timestamp against the same §1
+WARN→CRITICAL thresholds (so a broken-from-day-one trigger or a restored/empty table surfaces
+instead of rendering green). Non-required jobs (webhook/inbound handlers, `backup-d1`) keep the
+opposite default: absent row → `not-configured` (INFO). A required job whose latest recorded run is
+a FAILURE (e.g. reminders' "due>0, sent=0", or a post-verify Stripe processing failure) is evaluated
+on `last_status`/`consecutive_failures`, not just staleness. For reminders specifically, a run with
+`failed > 0 && sent > 0` (transient blips, self-healing next hour) is surfaced as **WARN** rather
+than a hard failure.
 
 ### 4.2 The monitor cron worker (fail-loud pattern, reused verbatim)
 
@@ -290,13 +363,23 @@ but there is nobody left to notice. Two layers:
    Document loudly (in this spec + the deploy record + the digest footer): **"If you did not
    get the daily Systems email, that itself is the alarm — investigate."** A missing email = a
    dead monitor. This is zero-infrastructure and owner-appropriate.
-2. **Optional external uptime ping (true dead-man's-switch).** At the end of a successful run
+2. **Recommended external uptime ping (true dead-man's-switch).** At the end of a successful run
    the monitor route POSTs an **outbound** ping to a Tyler-configured `DEADMAN_PING_URL`
    (e.g. a free healthchecks.io / UptimeRobot "expect a ping every 24h" check). If the ping
    stops, the *external* service — which survives the whole CRM being down — emails/SMSes
-   Tyler. This is **outbound only**: we expose **no** inbound public health endpoint (no new
+   Tyler. This is the **only layer that survives a full-stack death** (layer 1 rests entirely on
+   Tyler *noticing an absent email* — the exact bet that lost two months), so it is **promoted
+   from optional to a RECOMMENDED enablement step**: it is free and ~5 minutes on
+   healthchecks.io. Until it is armed the gap stays **visible**, not silent:
+   - the daily digest **footer** states whether the external ping is armed
+     (`external dead-man ping: armed` vs `NOT armed — recommended, see §4.3`);
+   - `/system-status` renders `deadman: not-configured (WARN-level advice)` while
+     `DEADMAN_PING_URL` is unset, so the unclosed gap is surfaced every time Tyler looks.
+
+   This is **outbound only**: we expose **no** inbound public health endpoint (verified — no new
    attack surface; Active-Learning-Log: no unauthenticated surfaces). Configurable, off when
-   `DEADMAN_PING_URL` is unset.
+   `DEADMAN_PING_URL` is unset (in which case the ping simply does not fire, but the
+   footer/`/system-status` advisory above keeps the gap in view).
 
 ### 4.4 Immediate critical alert + dedupe
 
@@ -332,7 +415,7 @@ test, §7).
 
 ---
 
-## 5. Admin health page + `/api/health`
+## 5. Admin health page + `/api/agent/health`
 
 - **Admin page — extend the existing `/system-status`** rather than add a new page (maximal
   reuse of `getStudioSystemStatus` + `StatusGrid` in `src/app/system-status/page.tsx`). Add an
@@ -340,11 +423,19 @@ test, §7).
   the existing `StatusGrid` (tone map `ok→emerald`, `warn→amber`, add a `critical→red` tone).
   The page is already admin-only (behind the Pages-proxy Google gate; `force-dynamic`). A
   `/admin/health` alias route is optional and not required.
-- **Machine `/api/health`** — new route returning `computeSystemHealth()` as JSON. **Admin-only:
-  bearer `STUDIO_AGENT_API_TOKEN`** (same guard shape as `/api/agent/*`; 401 on missing/bad,
-  503 if token unset). Read-only, no flag. This is the surface the extended production smoke
-  (§8) and any on-demand check hit. It is **not** public — external liveness is the outbound
-  ping (§4.3), so no operational detail is exposed unauthenticated.
+- **Machine `/api/agent/health`** — new route returning `computeSystemHealth()` as JSON.
+  **Path matters: it MUST live under `/api/agent/` so it is reachable in prod with zero proxy
+  changes.** The Pages proxy already treats `/api/agent/*` as `isStudioTrustedAgentApiPath`
+  (`_worker.js:204-205`, folded into `isStudioPublicPath` at `:208`), so it passes through the
+  studio host **without** a `303 → /admin/login`; it inherits the `agentApi` rate bucket and the
+  `STUDIO_AGENT_API_TOKEN` bearer guard (`guardAgentApiRequest`, `agent-api.ts:14`; 401 on
+  missing/bad, 503 if token unset). A bare `/api/health` would ship **dead**: not in
+  `isStudioPublicPath` → `303` login via the studio host, and not in origin-guard
+  `PUBLIC_API_PREFIXES` → `404` via `*.workers.dev`, so the §8 smoke could never pass. Read-only,
+  no flag. **Not** exported as an agent MCP tool (per §2.2 — no agent/MCP surface for monitoring
+  internals); it is only an authenticated JSON route the smoke and on-demand checks hit. It is
+  **not** public — external liveness is the outbound ping (§4.3), so no operational detail is
+  exposed unauthenticated.
 
 Both surfaces are always-on reads; only the autonomous **email** is flag-gated.
 
@@ -355,15 +446,16 @@ Both surfaces are always-on reads; only the autonomous **email** is flag-gated.
 **Off-by-default flags (three-state where it changes runtime):**
 
 - `MONITOR_ENABLED` (default off; `"1"` on) — gates the monitor route's **email + ping**
-  behavior only. Off → route returns `{skipped:'flag_off'}`, no email. Reads (`/api/health`,
+  behavior only. Off → route returns `{skipped:'flag_off'}`, no email. Reads (`/api/agent/health`,
   `/system-status`) are unaffected.
 - `ALERT_EMAIL` — Tyler's address. Unset → digest un-wired (cannot deliver).
-- `DEADMAN_PING_URL` — optional external uptime ping (off when unset).
+- `DEADMAN_PING_URL` — **recommended** external uptime ping (§4.3; off when unset, but the
+  digest footer + `/system-status` flag it as an open gap until set).
 - `CRON_SECRET` — already exists; reused for the monitor + heartbeat routes (fail-closed 503).
 
 **Ships dark:** migration 0092 applied (additive), `recordJobRun` wired into the six existing
 job entry points (writes heartbeats but changes no behavior), `system-health.ts`,
-`/api/health`, and the `/system-status` section all deployed. `workers/systems-monitor.ts` +
+`/api/agent/health`, and the `/system-status` section all deployed. `workers/systems-monitor.ts` +
 `wrangler.systems-monitor.jsonc` are committed **but the Worker is not deployed/scheduled** and
 `MONITOR_ENABLED` is off — zero autonomous email until Tyler enables.
 
@@ -373,7 +465,9 @@ job entry points (writes heartbeats but changes no behavior), `system-health.ts`
 2. Deploy the monitor Worker: `wrangler deploy --config wrangler.systems-monitor.jsonc`; set
    its `CRON_SECRET` secret; confirm the cron schedule + `MONITOR_ENDPOINT` = workers.dev
    origin.
-3. (Optional) create a healthchecks.io/UptimeRobot check, set `DEADMAN_PING_URL`.
+3. **(Recommended — the only layer that survives a full-stack death, §4.3)** create a
+   healthchecks.io/UptimeRobot "expect a ping every 24h" check, set `DEADMAN_PING_URL`. Free,
+   ~5 min. Until done, the digest footer + `/system-status` flag it as an open gap.
 4. (Optional) wire the launchd backup script to POST `/api/cron/heartbeat` after
    `backup:data`.
 5. Watch for the first daily green digest; confirm a deliberately-staled job (e.g. pause the
@@ -400,7 +494,7 @@ job entry points (writes heartbeats but changes no behavior), `system-health.ts`
 **Relationship to provider-config verification (separate recommendation #2):** that work is a
 **one-shot preflight** ("is `RESEND_API_KEY`/`STRIPE_WEBHOOK_SECRET`/`CRON_SECRET` set, are the
 webhooks subscribed"). This phase is the **runtime heartbeat** ("did the jobs actually run and
-succeed today"). They meet at `/api/health`: config-verification can assert the endpoint
+succeed today"). They meet at `/api/agent/health`: config-verification can assert the endpoint
 returns 200 + green structure; the runtime digest is what catches a job that was configured
 correctly and then silently broke (the reminders scenario). Keep them distinct; do not fold
 config checks into the digest.
@@ -418,9 +512,24 @@ Unit tests (tsx, local better-sqlite3):
    `last_success_at` set; a `fail` sets `last_status='error'`, increments
    `consecutive_failures`, sets `last_error`; a following `ok` resets failures to 0 and clears
    `last_error`. `last_success_at` is unchanged by a `fail`.
-2. **Stale job → digest flags it** — seed `job_runs['scheduler-reminders']` with
-   `last_success_at` 7h ago → `computeSystemHealth()` marks it CRITICAL; 3h ago → WARN;
-   30 min ago → ok (green).
+2. **Stale job → digest flags it, AND a missing required-job row is not green** — seed
+   `job_runs['scheduler-reminders']` with `last_success_at` 7h ago → `computeSystemHealth()`
+   marks it CRITICAL; 3h ago → WARN; 30 min ago → ok (green). **Missing-row case (new):** with
+   **no** `job_runs` row at all for a REQUIRED job (`scheduler-reminders` / `sequence-runner` /
+   `systems-monitor`) and an enablement timestamp > the CRITICAL window ago → `computeSystemHealth()`
+   marks it maximally stale (CRITICAL / WARN per threshold), **not** green and **not**
+   `not-configured`. Contrast: a missing row for a non-required job (`stripe-webhook`, `backup-d1`)
+   → `not-configured` (INFO), no alarm.
+2b. **Reminders "ran but sent nothing" → FAILURE, transient blip → WARN (MEDIUM 5)** — with a
+   heartbeat recorded from a `{due>0, sent:0}` run, `computeSystemHealth()` treats reminders as
+   failing (escalating via `consecutive_failures`), even though `last_run_at` is fresh; a
+   `{due:2, sent:1, failed:1}` run surfaces as WARN only (self-healing). Guards the original
+   incident class (persistent Resend breakage keeps the job "running" but silent).
+2c. **Stripe signature-reject does not poison the CRITICAL counter (MAJOR 1)** — three
+   pre-verification rejects (invalid/missing signature → `verifyStripeWebhookPayload` throws → 400)
+   leave `job_runs['stripe-webhook'].consecutive_failures` unchanged (or increment only a separate
+   non-alerting key), so no CRITICAL "money state drift" email fires; a verified-event-then-
+   processing-throws failure DOES increment `consecutive_failures` and can escalate.
 3. **Healthy run → green** — all heartbeats fresh + zero reconciliation rows →
    `overall === 'green'`, digest subject is the all-green line.
 4. **Alert on CRITICAL** — a `stuckSubmitting` refund fixture → a `critical` signal present;
@@ -448,10 +557,12 @@ Unit tests (tsx, local better-sqlite3):
     false, no send.
 
 Extend `scripts/production-smoke.mjs` (config-verification companion): add a check that
-`GET /api/health` returns 200 with bearer auth and an `overall` field in
-`{green,warn,critical}` (do not fail the smoke on `warn`/`critical` — that's a real signal, not
-a smoke failure; assert only that the endpoint is live + shaped). Follows the existing
-`fetchJson` + `evaluateProductionSmoke` pattern.
+`GET /api/agent/health` returns 200 with the `STUDIO_AGENT_API_TOKEN` bearer and an `overall`
+field in `{green,warn,critical}` (do not fail the smoke on `warn`/`critical` — that's a real
+signal, not a smoke failure; assert only that the endpoint is live + shaped). The `/api/agent/`
+path is what makes this reachable through the proxy at all (§5); a bare `/api/health` would
+`303`/`404` and the smoke could never pass. Follows the existing `fetchJson` +
+`evaluateProductionSmoke` pattern.
 
 ---
 
@@ -464,9 +575,9 @@ a smoke failure; assert only that the endpoint is live + shaped). Follows the ex
 | 3 | Wire `recordJobRun` into the 6 existing job routes | M | **Med** | Must preserve fail-loud status + await before return; don't mask failures |
 | 4 | `src/lib/system-health.ts` — `computeSystemHealth()` over §1 signals (reuse existing queries) | M | Low | Pure read; thresholds live here |
 | 5 | `sendAdminAlertEmail` in `email.ts` (owner-only, no unsubscribe footer, fail-closed) | S | Low | Reuses `resendRequest` |
-| 6 | Monitor route `/api/cron/systems-monitor` (bearer, flag-gated email, digest + critical scan + dedupe + self-heartbeat + optional dead-man ping) | M | Med | Off-by-default; origin-guard bypass entry |
+| 6 | Monitor route `/api/cron/systems-monitor` (bearer, flag-gated email, digest + critical scan + dedupe + self-heartbeat + recommended dead-man ping, §4.3) | M | Med | Off-by-default; origin-guard bypass entry; digest footer + `/system-status` flag an unset `DEADMAN_PING_URL` |
 | 7 | `workers/systems-monitor.ts` + `wrangler.systems-monitor.jsonc` (fail-loud copy) | S | Low | Ships un-wired |
-| 8 | Extend `/system-status` page with the health section + `critical` tone; add `/api/health` (admin bearer) | M | Low | Reuse `StatusGrid` |
+| 8 | Extend `/system-status` page with the health section + `critical` tone; add `/api/agent/health` (agent bearer, `/api/agent/` path → zero proxy changes; NOT an MCP tool) | M | Low | Reuse `StatusGrid` |
 | 9 | (Optional) `/api/cron/heartbeat` + backup-script wiring | S | Low | Enablement follow-up |
 | 10 | Tests §7 + extend `production-smoke.mjs` | M | Low | Build exit-code gate |
 | 11 | Deploy dark (backup → capture versions → deploy → smoke → rollback-ready); write deploy record; queue Tyler enablement runbook | M | Med | Guardrails 1/2/4 |
@@ -492,8 +603,11 @@ a smoke failure; assert only that the endpoint is live + shaped). Follows the ex
 - **Proxy composition for any new endpoint.** `/api/cron/systems-monitor` (+ optional
   `/api/cron/heartbeat`) are added to `origin-guard` `PUBLIC_API_PREFIXES` with the bearer
   secret as the trust boundary — Fable-review the new routes against the **live**
-  proxy/origin-guard/admin-proof boundary, not just their own files. `/api/health` stays
-  admin-authed (bearer); external liveness is an **outbound** ping (no inbound public surface).
+  proxy/origin-guard/admin-proof boundary, not just their own files. `/api/agent/health` needs
+  **no** proxy/origin-guard edit: the `/api/agent/` prefix already passes the proxy
+  (`isStudioTrustedAgentApiPath`, `_worker.js:204`) under the `STUDIO_AGENT_API_TOKEN` bearer
+  guard. A bare `/api/health` would have shipped dead (studio host `303`, workers.dev `404`).
+  External liveness is an **outbound** ping (no inbound public surface).
 - **Workers deferred-work cancellation.** All heartbeat/email writes are `await`ed inside the
   request, not fired-and-forgotten after the response.
 - **Migration ordering.** 0092 is additive + non-canonical + not on an always-on business read
@@ -502,4 +616,27 @@ a smoke failure; assert only that the endpoint is live + shaped). Follows the ex
   blanket `migrations apply --remote`.
 - **Secret redaction.** The digest body is built only from whitelisted fields and cleaned,
   capped error messages; a test asserts no env secret value ever appears in a rendered digest.
-```
+  The cap + redaction run **inside `recordJobRun`** (defense-in-depth; the helper does not trust
+  each caller to pre-clean).
+
+---
+
+## 11. Changelog
+
+### Rev 2 (Fable spec-review) — 2026-07-06
+
+Five review findings folded in (all localized; no architecture change). Each verified against the
+cited code before editing.
+
+| Finding | Severity | Fix (where) | Verified against |
+|---|---|---|---|
+| Stripe signature-reject poisons the CRITICAL counter (attacker-triggerable / cry-wolf) | MAJOR 1 | §2.3 stripe row + new "signature-reject carve-out": record a `stripe-webhook` FAILURE **only for errors raised after `verifyStripeWebhookPayload` succeeds** (split-the-try, or classify the thrown error); pre-verify rejects unrecorded or under a separate non-alerting key. Added §8 test 2c. Noted the Twilio wiring is already correct. | `/api/stripe/webhook` in `PUBLIC_API_PREFIXES` (`origin-guard.ts:24`); `verifyStripeWebhookPayload` runs first (`stripe-checkout.ts:693`); route catch → 400 (`route.ts:9-15`); Twilio 403 gates return before the recorded catch (`twilio/status/route.ts:35,50` vs catch `:58`; `twilio/inbound/route.ts:40,57`) |
+| `/api/health` as spec'd is unreachable in prod (dead endpoint; §8 smoke can never pass) | MAJOR 2 | Renamed to **`/api/agent/health`** throughout (§5, §8 smoke, §9 task 8, §10, plus §2/§4.1/§6 mentions). Inherits `isStudioTrustedAgentApiPath` proxy pass-through, the `agentApi` bucket, and the `STUDIO_AGENT_API_TOKEN` guard with ZERO proxy changes; kept OUT of the agent MCP tool export. | proxy: `isStudioPublicPath`/`isStudioTrustedAgentApiPath` (`_worker.js:204-214`); guard: `STUDIO_AGENT_API_TOKEN` (`agent-api.ts:14`) |
+| Missing `job_runs` row for a required-cadence job renders green ("never ran at all" is invisible) | MEDIUM 3 | §1 + §4.1: defined a **REQUIRED set** (`scheduler-reminders`, `sequence-runner`, `systems-monitor`) for which **missing row OR NULL `last_success_at` = maximally stale** (WARN→CRITICAL, clocked from deploy/enablement timestamp). Event-driven webhooks + `backup-d1` stay INFO when absent. Added §8 test 2 missing-row case. | `backup-d1` was the only prior missing-row semantics (§1 backup row) |
+| Watcher-liveness rests on Tyler noticing an ABSENT email (the exact 2-month bet), marked "Optional" | MEDIUM 4 | §4.3: promoted `DEADMAN_PING_URL` from optional to **RECOMMENDED** (free, ~5 min, healthchecks.io). Digest footer states whether the ping is armed; `/system-status` renders `deadman: not-configured (WARN-level advice)` until set. Updated §6 flags + runbook step 3 + §9 task 6. Outbound-only, no inbound surface. | §4.3 dead-man's-switch is the only layer surviving a full-stack death |
+| `scheduler-reminders` records ok when it "ran but sent nothing" (the spec's OWN motivating sub-class) | MEDIUM 5 | §2.3 "ran but sent nothing" rule + §1 reminders row + §4.1: extend `sendDueSchedulerReminders` return to `{checked, due, sent, failed}`; record **FAILURE when `due>0 && sent===0`**; surface `failed>0 && sent>0` transient blips as WARN (self-healing). Added §8 test 2b. | `sendDueSchedulerReminders` swallows send failures (`if (!emailed) continue;`) and returns `{checked, sent}` (`scheduler.ts:1246-1275`); `resendRequest` returns `delivered:false` without throwing on missing `RESEND_API_KEY` |
+
+Build-hardening (non-blocking, from the review's "clean" section): the secret-redaction + ≤500-char
+cap now lives **inside `recordJobRun`** (§2.2, §10 — not trusting each caller); the
+record-then-preserve-status rule (§2.2) is retained so the heartbeat never masks a fail-loud
+outcome.
