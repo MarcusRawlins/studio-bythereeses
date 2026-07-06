@@ -64,6 +64,8 @@ const smsSendErrorMessages: Record<string, string> = {
   not_draft: "This SMS was already sent, or is not a sendable outbound draft.",
   not_found: "That SMS draft could not be found.",
   not_sms: "That communication is not an SMS.",
+  too_long: "This SMS draft is over the character limit. Shorten it and try again.",
+  send_failed: "The SMS could not be sent due to a delivery error. Nothing was sent; please try again.",
 };
 
 // Read-only reasons the UI shows next to a draft SMS so Tyler doesn't attempt a

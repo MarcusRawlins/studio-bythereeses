@@ -346,7 +346,7 @@ export async function updateProjectCommunicationFromForm(projectId: string, comm
 
 export type SendApprovedSmsResult =
   | { ok: true; communicationId: string; result: Extract<SmsSendResult, { ok: true }> }
-  | { ok: false; reason: "not_found" | "not_sms" | "not_draft" | "hash_mismatch" | "no_consent" | "bad_number" | "suppressed" | "flag_off"; message: string };
+  | { ok: false; reason: "not_found" | "not_sms" | "not_draft" | "too_long" | "hash_mismatch" | "no_consent" | "bad_number" | "suppressed" | "flag_off"; message: string };
 
 /** Exported so the admin project page can compute the SAME hash of the body it
  * renders to Tyler, to submit as the `approvedBodyHash` hidden field (B1a content
@@ -382,6 +382,16 @@ export async function sendApprovedProjectSms(input: {
   // "sent" back to them, which would also clobber its providerMessageId.
   if (communication.status !== "draft" || communication.direction !== "outbound") {
     return { ok: false, reason: "not_draft", message: "Only an unsent outbound SMS draft can be sent." };
+  }
+  // Belt-and-braces: a legacy draft created before the shared length cap could
+  // exceed SMS_BODY_MAX_LENGTH. Refuse with a friendly reason here rather than
+  // let it fail at Twilio's transport with a raw 400 (Fable code-review #3).
+  if ((communication.body ?? "").length > SMS_BODY_MAX_LENGTH) {
+    return {
+      ok: false,
+      reason: "too_long",
+      message: `This SMS draft exceeds the ${SMS_BODY_MAX_LENGTH}-character limit. Shorten it and try again.`,
+    };
   }
 
   const storedHash = sha256Hex(communication.body ?? "");

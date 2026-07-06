@@ -94,10 +94,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     return redirectToProject(request, id, { saved: "sms_sent" });
   } catch (error) {
+    // Thrown paths (e.g. TWILIO_* unset in prod → SmsConfigError, or a Twilio
+    // transport failure). Redirect back with a generic reason instead of a raw
+    // JSON 400 to a browser form POST (Fable code-review #2). Never put the raw
+    // error message in the URL — it can carry provider/PII detail; log it only.
     console.error("Approved SMS send failed", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "SMS send failed." },
-      { status: 400 },
-    );
+    return redirectToProject(request, id, { smsError: "send_failed" });
   }
 }
