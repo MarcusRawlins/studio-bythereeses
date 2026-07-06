@@ -36,7 +36,7 @@ reviewer prompt is seeded with the **Active-Learning Log** below.
 | 8c | Automated sequences (dunning/nudges/reviews) | ✅ deployed 2026-07-05 (dark) — Worker `3b78372e`, proxy `2913d3b4`, migration 0088 |
 | 9a | Finance completeness — refund/dispute WEBHOOK recording + QBO/Xero export + tax/1099 (NO money moved) | ✅ deployed 2026-07-06 (dark) — Worker `d29fe5c6` (rollback `3b78372e`), migration 0089, `FINANCE_REFUND_RECORDING` default `record_only` (status-flip off). Spec Fable-gated ×2, code Fable-gated ×1. |
 | 9b | Refund INITIATION (admin-triggered Stripe refund — MOVES money) | 🅣 MONEY-MOVEMENT PAUSE — build allowed, deploy needs Tyler's explicit go |
-| 10 | Intelligence + forecasting | ⏭️ spec → build |
+| 10 | Intelligence + forecasting | ✅ deployed 2026-07-06 (dark) — Worker `1ae4b9cb` (rollback `d29fe5c6`), migration 0090. Read-only analytics (revenue forecast, conversion, lead-source, package-value, seasonal) + `studio_get_business_review` MCP read tool. Spec Fable-gated ×2, code Fable-gated ×1. No dashboard tile in MVP (no always-on runtime change); weekly-review Worker deferred. |
 | 11 | Multi-user + RBAC | ⏭️ deferred until a real 2nd user |
 | — | Enablement flips (M4 log→enforce, CSP report→enforce, feature flags) | 🅣 Tyler runbook (deploy-record + per-phase) |
 | — | **9a enable (Tyler):** (1) subscribe Stripe webhook to `charge.refunded`/`refund.*`/`charge.dispute.*` (dashboard config — nothing fires without it); (2) after an observation window, flip `FINANCE_REFUND_RECORDING=enforce` to allow the `refunded` status transition; (3) enter finance rate settings (tax set-aside %, mileage ¢, 1099 threshold) + vendor W-9 data | 🅣 Tyler |
