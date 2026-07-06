@@ -12,6 +12,7 @@ import {
   parseNameAndEmail,
   sanitizeBody,
   sanitizeLine,
+  stripHtmlToText,
   type InboundEmailPayload,
 } from "@/lib/inbound-inquiry";
 import { verifyProjectReplyToken } from "@/lib/project-reply-token";
@@ -139,7 +140,15 @@ export async function ingestInboundProjectEmail(payload: InboundEmailPayload): P
 
   // 3. Sanitize EVERY field with the 8a sanitizers (never render inbound HTML —
   //    only the text projection is stored/displayed).
-  const subject = sanitizeLine(payload.subject, MAX_SUBJECT_LENGTH);
+  // Neutralize HTML in the subject the SAME way the body is (strip tags,
+  // entities, javascript:/data:) BEFORE folding to a single line — so a hostile
+  // subject like `<img src=x onerror=…>` is stored display-safe regardless of
+  // any current or future render/notify surface (Fable M1). sanitizeLine alone
+  // strips control chars but leaves `<`/`>`/tags intact.
+  const subject = sanitizeLine(
+    payload.subject != null ? stripHtmlToText(payload.subject) : null,
+    MAX_SUBJECT_LENGTH,
+  );
   const bodyText = sanitizeBody(extractPlainTextFromRaw(payload.raw), MAX_BODY_TEXT_LENGTH);
   const messageId = sanitizeLine(payload.messageId, MAX_MESSAGE_ID_LENGTH);
   const headerFrom = sanitizeLine(payload.headerFrom, MAX_ADDRESS_LENGTH);

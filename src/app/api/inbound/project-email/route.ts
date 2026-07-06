@@ -40,7 +40,10 @@ export async function POST(request: NextRequest) {
   }
 
   const rawBody = await request.text();
-  if (rawBody.length > MAX_INBOUND_JSON_BYTES) {
+  // Compare BYTES, not UTF-16 code units — the cap is a byte ceiling, and a
+  // multibyte payload could slip past a `.length` check (Fable m2). The Worker
+  // already byte-caps the raw MIME; this is the origin-side match.
+  if (Buffer.byteLength(rawBody, "utf8") > MAX_INBOUND_JSON_BYTES) {
     return NextResponse.json({ error: "Payload too large." }, { status: 413 });
   }
 

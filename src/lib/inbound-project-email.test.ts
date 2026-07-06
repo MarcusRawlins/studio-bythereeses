@@ -108,7 +108,7 @@ async function main() {
   const r4 = await ingestInboundProjectEmail({
     envelopeTo: envelopeFor(tokenA),
     headerFrom: "Mallory <mallory@evil.example>",
-    subject: "Subject with\r\na newline and control",
+    subject: "Subject with\r\na newline <img src=x onerror=alert(1)> & control",
     messageId: "<hostile-1@evil.example>",
     authResults: "mx.cloudflare.net; spf=fail; dkim=none; dmarc=fail",
     raw: [
@@ -120,7 +120,8 @@ async function main() {
   assert.ok(r4.attached, "hostile-but-valid-token message attaches");
   const hostileRow = database.prepare("SELECT subject, body FROM project_communications WHERE inbound_message_id = '<hostile-1@evil.example>'").get() as { subject: string; body: string };
   assert.ok(!/[\r\n]/.test(hostileRow.subject), "subject CRLF stripped");
-  assert.equal(hostileRow.subject, "Subject with a newline and control", "subject folded to a single line with collapsed whitespace");
+  assert.ok(!/<[a-z]|onerror=|javascript:/i.test(hostileRow.subject), "HTML/tags/handlers neutralized in subject (Fable M1)");
+  assert.equal(hostileRow.subject, "Subject with a newline & control", "subject HTML-stripped then folded to a single line");
   assert.ok(!/<script|javascript:/i.test(hostileRow.body), "HTML/script/javascript neutralized in body");
   assert.ok(!/<[a-z]/i.test(hostileRow.body), "no raw HTML tags stored");
 
