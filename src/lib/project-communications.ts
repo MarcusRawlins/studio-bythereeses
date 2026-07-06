@@ -2,13 +2,29 @@ import { db } from "@/db/client";
 import { clients, projectCommunications, projectParticipants, projects } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { requireProjectSourceForTask } from "@/lib/agent-sources";
-import { SmsConsentError, sendProjectSms, type SmsSendResult } from "@/lib/sms";
+import { SMS_OPT_OUT_LANGUAGE, SmsConsentError, sendProjectSms, type SmsSendResult } from "@/lib/sms";
 import { and, asc, desc, eq } from "drizzle-orm";
 import { createHash } from "node:crypto";
 
 const communicationDirections = ["outbound", "inbound", "internal"] as const;
 const communicationChannels = ["email", "sms", "call", "note"] as const;
 const communicationStatuses = ["draft", "queued", "sent", "archived"] as const;
+
+// Twilio's own hard ceiling for a single (concatenated) outbound SMS is 1600
+// characters (spec §4.3, mirrored from the inbound-field cap). The send helper
+// (`sms.ts`) appends mandatory opt-out language before transport, so the STORED/
+// COMPOSED body is capped a bit lower to guarantee the body-plus-opt-out-language
+// never exceeds Twilio's ceiling even when the caller's text doesn't already
+// contain a `STOP` token. Enforced here (not just the UI) so every caller —
+// admin compose form, agent draft tool, generic MCP tool — is bound by the same
+// cap; a client-side maxLength is a UX nicety, not the gate.
+const SMS_BODY_MAX_LENGTH = 1600 - (SMS_OPT_OUT_LANGUAGE.length + 2); // "\n\n" + opt-out language
+
+function assertSmsBodyLength(channel: string, body: string) {
+  if (channel === "sms" && body.length > SMS_BODY_MAX_LENGTH) {
+    throw new Error(`SMS message body exceeds the ${SMS_BODY_MAX_LENGTH}-character limit.`);
+  }
+}
 
 type CreateProjectCommunicationInput = {
   clientId?: string | null;
@@ -152,6 +168,7 @@ async function createProjectCommunication(projectId: string, input: CreateProjec
   // per-tool convention. Email (and non-agent actors) are UNAFFECTED — the
   // narrowing is the `sms` channel for the agent actor only.
   const status = actor.actorType === "agent" && channel === "sms" ? "draft" : requestedStatus;
+  assertSmsBodyLength(channel, body);
   const communication = {
     id: crypto.randomUUID(),
     projectId,
@@ -217,6 +234,7 @@ async function updateProjectCommunication(
     actor.actorType === "agent" && nextChannel === "sms" && (requestedStatus === "sent" || requestedStatus === "queued")
       ? "draft"
       : requestedStatus;
+  assertSmsBodyLength(nextChannel, nextBody);
   const nextSentAt = hasOwn(input, "sentAt") ? cleanText(input.sentAt) : communication.sentAt;
   const nextSourceType = hasOwn(input, "sourceType") ? cleanText(input.sourceType) : communication.sourceType;
   const nextSourceId = hasOwn(input, "sourceId") ? cleanText(input.sourceId) : communication.sourceId;
@@ -330,7 +348,11 @@ export type SendApprovedSmsResult =
   | { ok: true; communicationId: string; result: Extract<SmsSendResult, { ok: true }> }
   | { ok: false; reason: "not_found" | "not_sms" | "not_draft" | "hash_mismatch" | "no_consent" | "bad_number" | "suppressed" | "flag_off"; message: string };
 
-function sha256Hex(value: string): string {
+/** Exported so the admin project page can compute the SAME hash of the body it
+ * renders to Tyler, to submit as the `approvedBodyHash` hidden field (B1a content
+ * binding, spec §3.0a) — the send action recomputes this hash of the STORED row
+ * and refuses on mismatch. */
+export function sha256Hex(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 

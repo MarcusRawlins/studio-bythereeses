@@ -7,11 +7,13 @@ import { getProject } from "@/lib/crm";
 import { formatActivityAction, formatDate, formatMoney } from "@/lib/format";
 import { isGalleryUrlSafe } from "@/lib/gallery";
 import { projectWorkingNotes } from "@/lib/project-notes";
+import { sha256Hex } from "@/lib/project-communications";
 import { getProjectFinancialSummary } from "@/lib/project-finance";
 import { listProjectWorkflowRuns, sixFigureAutomationSteps } from "@/lib/project-workflow-automation";
 import { listProjectQuestionnaireResponses, listQuestionnaires, questionnaireResponseStatus } from "@/lib/questionnaires";
 import { listProjectBookingLinks } from "@/lib/scheduler";
 import { listProjectSequenceEnrollments } from "@/lib/sequences";
+import { isNumberSuppressed, smsEnabled, toE164 } from "@/lib/sms";
 import { Bot, CalendarCheck, CalendarPlus, CheckCircle2, ClipboardEdit, ClipboardList, Copy, ExternalLink, Eye, FileQuestion, FileSignature, Images, Landmark, Mail, MapPin, NotebookPen, Pencil, ReceiptText, Send, Sparkles, UsersRound } from "lucide-react";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
@@ -49,6 +51,46 @@ const communicationStatusLabels: Record<string, string> = {
   sent: "Sent",
   archived: "Archived",
 };
+
+// Phase 8b follow-up (task #27): reasons the admin "Send SMS" action surfaces
+// back to Tyler, mirroring the typed refusal reasons `sendApprovedProjectSms`
+// returns (src/lib/project-communications.ts) — no silent drops (spec §2.3).
+const smsSendErrorMessages: Record<string, string> = {
+  no_consent: "That client has not opted in to SMS. Nothing was sent.",
+  bad_number: "The client's phone number is not a valid SMS destination. Nothing was sent.",
+  suppressed: "That number has texted STOP and is suppressed. Nothing was sent.",
+  flag_off: "SMS sending is currently disabled. The draft is saved but nothing was sent.",
+  hash_mismatch: "This SMS draft changed after it was reviewed. Re-review the message and try again.",
+  not_draft: "This SMS was already sent, or is not a sendable outbound draft.",
+  not_found: "That SMS draft could not be found.",
+  not_sms: "That communication is not an SMS.",
+};
+
+// Read-only reasons the UI shows next to a draft SMS so Tyler doesn't attempt a
+// send that the server-side gate (src/lib/sms.ts) will refuse anyway. The
+// server-side gate remains authoritative; this is a display convenience.
+const smsConsentReasonLabels: Record<string, string> = {
+  ok: "Consented — ready to send",
+  no_client: "No linked client on this draft",
+  no_consent: "Client has not opted in to SMS",
+  bad_number: "Client phone is not a valid SMS number",
+  suppressed: "Number replied STOP — suppressed",
+};
+
+type SmsConsentCheck = { ok: boolean; reason: keyof typeof smsConsentReasonLabels };
+
+async function checkSmsDraftConsent(
+  communication: { clientId: string | null },
+  clientsById: Map<string, { smsOptIn: boolean; phone: string | null }>,
+): Promise<SmsConsentCheck> {
+  const client = communication.clientId ? clientsById.get(communication.clientId) : undefined;
+  if (!client) return { ok: false, reason: "no_client" };
+  if (client.smsOptIn !== true) return { ok: false, reason: "no_consent" };
+  const normalized = toE164(client.phone);
+  if (!normalized) return { ok: false, reason: "bad_number" };
+  if (await isNumberSuppressed(normalized)) return { ok: false, reason: "suppressed" };
+  return { ok: true, reason: "ok" };
+}
 
 function mapsUrl(...parts: Array<string | null | undefined>) {
   const query = parts.filter(Boolean).join(", ");
@@ -130,10 +172,10 @@ export default async function ProjectDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ portalLink?: string; saved?: string; error?: string }>;
+  searchParams: Promise<{ portalLink?: string; saved?: string; error?: string; smsError?: string }>;
 }) {
   const { id } = await params;
-  const { portalLink, saved, error } = await searchParams;
+  const { portalLink, saved, error, smsError } = await searchParams;
   if (id.startsWith("seed-project-")) {
     redirect("/projects?pageSize=200");
   }
@@ -141,6 +183,14 @@ export default async function ProjectDetailPage({
   const data = await getProject(id);
   if (!data) notFound();
   const workingNotes = projectWorkingNotes(data.project.notes);
+  const clientsById = new Map(data.clients.map((client) => [client.id, client]));
+  const smsSendingEnabled = smsEnabled();
+  const smsConsentByCommunicationId = new Map<string, SmsConsentCheck>();
+  for (const communication of data.communications) {
+    if (communication.channel === "sms" && communication.status === "draft" && communication.direction === "outbound") {
+      smsConsentByCommunicationId.set(communication.id, await checkSmsDraftConsent(communication, clientsById));
+    }
+  }
 
   const primaryClient = data.clients[0];
   const hasEngagementSession = data.events.some((event) => event.type === "engagement");
@@ -272,6 +322,18 @@ export default async function ProjectDetailPage({
         {saved === "communication" && (
           <div className="rounded-md border border-[var(--accent)] bg-[#edf6f1] p-4 text-sm font-semibold text-[var(--accent-strong)]">
             Project communication saved. Studio and agent tools now share this same record.
+          </div>
+        )}
+
+        {saved === "sms_sent" && (
+          <div className="rounded-md border border-[var(--accent)] bg-[#edf6f1] p-4 text-sm font-semibold text-[var(--accent-strong)]">
+            SMS sent to the client.
+          </div>
+        )}
+
+        {smsError && (
+          <div className="rounded-md border border-[var(--danger)] bg-[#fff5f2] p-4 text-sm font-semibold text-[var(--danger)]">
+            {smsSendErrorMessages[smsError] ?? "The SMS could not be sent."}
           </div>
         )}
 
@@ -999,8 +1061,12 @@ export default async function ProjectDetailPage({
                 </label>
                 <label className="space-y-1.5 text-sm font-medium">
                   Message
-                  <textarea name="body" required rows={6} placeholder="Write the follow-up, call recap, or internal note." className={inputClass} />
+                  <textarea name="body" required rows={6} maxLength={1600} placeholder="Write the follow-up, call recap, or internal note." className={inputClass} />
                 </label>
+                <p className="-mt-2 text-xs text-[var(--ink-3)]">
+                  SMS: save as Draft here, then use Send SMS below once it clears the consent check. Opt-out language
+                  and Twilio&apos;s character limit are applied automatically at send time.
+                </p>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="space-y-1.5 text-sm font-medium">
                     Recipient name
@@ -1056,12 +1122,20 @@ export default async function ProjectDetailPage({
                       <div className="mt-3 flex flex-wrap gap-3 text-xs text-[var(--ink-3)]">
                         {communication.sentAt && <span>Sent {new Date(communication.sentAt).toLocaleString()}</span>}
                         {communication.scheduledFor && <span>Scheduled {new Date(communication.scheduledFor).toLocaleString()}</span>}
+                        {communication.channel === "sms" && communication.deliveryStatus && (
+                          <span>Twilio status: {communication.deliveryStatus}</span>
+                        )}
                         {taskSourceLabel(communication.sourceType, communication.sourceId, data.sources) && (
                           <span>Source: {taskSourceLabel(communication.sourceType, communication.sourceId, data.sources)}</span>
                         )}
                       </div>
                     </div>
-                    {communication.status !== "sent" && (
+                    {/* SMS is never "mark sent" — it must actually go through the
+                        Twilio-backed send gate below. The generic mark-sent
+                        shortcut stays available for email/call/note, where
+                        "sent" only ever meant "logged as sent", not "we texted
+                        them" (that would be a false-success write for SMS). */}
+                    {communication.status !== "sent" && communication.channel !== "sms" && (
                       <form action={`/api/projects/${data.project.id}/communications`} method="post">
                         <input type="hidden" name="communicationId" value={communication.id} />
                         <input type="hidden" name="direction" value={communication.direction} />
@@ -1079,6 +1153,37 @@ export default async function ProjectDetailPage({
                       </form>
                     )}
                   </div>
+
+                  {communication.channel === "sms" && communication.status === "draft" && communication.direction === "outbound" && (() => {
+                    const consent = smsConsentByCommunicationId.get(communication.id) ?? { ok: false, reason: "no_client" as const };
+                    const canSend = consent.ok && smsSendingEnabled;
+                    return (
+                      <form
+                        action={`/api/projects/${data.project.id}/communications/send-sms`}
+                        method="post"
+                        className="mt-3 flex flex-col gap-2 rounded-md border border-[var(--line)] bg-[var(--paper-2)] p-3 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div className="text-xs">
+                          <span className={consent.ok ? "font-semibold text-[var(--accent-strong)]" : "font-semibold text-[var(--danger)]"}>
+                            {smsConsentReasonLabels[consent.reason]}
+                          </span>
+                          {consent.ok && !smsSendingEnabled && (
+                            <span className="ml-2 text-[var(--ink-3)]">SMS sending is currently disabled.</span>
+                          )}
+                        </div>
+                        <input type="hidden" name="communicationId" value={communication.id} />
+                        <input type="hidden" name="approvedBodyHash" value={sha256Hex(communication.body)} />
+                        <button
+                          type="submit"
+                          disabled={!canSend}
+                          className="brand-primary-button inline-flex items-center justify-center gap-2 rounded-sm px-4 py-2 text-sm transition disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <Send className="h-4 w-4" />
+                          Send SMS
+                        </button>
+                      </form>
+                    );
+                  })()}
 
                   <details className="mt-4 rounded-md border border-[var(--line)] bg-[var(--paper-2)]">
                     <summary className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm font-semibold">

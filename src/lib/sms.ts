@@ -89,7 +89,10 @@ export function maskNumber(e164: string): string {
   return `${e164.slice(0, 5)}…${e164.slice(-4)}`;
 }
 
-async function isNumberSuppressed(e164: string): Promise<boolean> {
+/** Exported so the admin UI can reflect suppression state (read-only) next to an
+ * SMS draft without duplicating the query — the send gate below remains the
+ * authoritative check; this is a display-only convenience. */
+export async function isNumberSuppressed(e164: string): Promise<boolean> {
   const row = await db.query.smsSuppressions.findFirst({ where: eq(smsSuppressions.phoneE164, e164) });
   return Boolean(row);
 }
