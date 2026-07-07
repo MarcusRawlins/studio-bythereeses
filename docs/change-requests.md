@@ -110,3 +110,29 @@ see `docs/handoff-build-state.md` for the full list):
   z-30) — `src/components/QuickFind.tsx`. Straight bug fix restoring intended behavior, so it
   ships UNFLAGGED (the dark-flag rule covers new capabilities, not repairs). Verified via the
   component test + full gate; Fable diff review runs with the next batch.
+
+### CR-4 — Scheduler: meeting links (Zoom vs Google Meet decision + wiring)
+- Status: SPEC (investigating current wiring)
+- Screen: /scheduler — meeting types; /book/:slug — public booking + confirmation; reminder emails
+- Host: both
+- Priority: P1 (needed to start using the scheduler for real consults)
+- Now: (under investigation) — where a meeting "location/link" lives today, what the client sees.
+- Want: Tyler asked whether to keep a Zoom link or switch to Google Meet, and for the system to be
+  great either way — the client should always get a working video link in confirmation + reminders.
+- Why: Consult calls are the top of the booking funnel; a broken/missing link is a lost consult.
+- Money/risk: no money; touches client-facing email content (existing send paths).
+- Notes: Recommendation pending investigation (Google Calendar OAuth already exists in-house, which
+  likely favors auto-generated per-booking Meet links over a static Zoom room).
+
+### CR-5 — Questionnaires: responses auto-fill project details + timeline details
+- Status: SPEC (investigating current flow)
+- Screen: /questionnaires/:id/responses; /projects/:id (details + timeline)
+- Host: admin (responses arrive from clients via portal/public link)
+- Priority: P1
+- Now: (under investigation) — responses are viewable; unclear what flows into project/timeline.
+- Want: When a client submits a questionnaire, the answers should (safely) populate project details
+  (venue, addresses, key times, contacts) and draft the wedding-day timeline.
+- Why: Eliminates re-typing client answers into the project — the whole point of questionnaires.
+- Money/risk: no money, BUT responses are CLIENT-SUBMITTED (untrusted) — the standing guardrail
+  applies: no canonical mutation from untrusted input. Autofill must be DRAFT-then-APPROVE (the
+  system proposes field updates + timeline items; Tyler approves with one click).
