@@ -5,10 +5,16 @@ Copy-paste runbook for deploying everything currently built-but-undeployed on br
 deploy is a zero-behavior-change no-op until you flip flags later. Run from the canonical working
 copy (`/Volumes/reeseai-memory/04_Code/reese-photography-crm`), where the Cloudflare token lives.
 
-**What this deploys:** Phase 14 (two-way project email, dark) + Phase 21 (observability, dark) +
-Phase 22 / CR-1 (project progress timeline, dark) + CR-2 (settings nav group, dark) + the CR-3
-quick-find fix (unflagged bug repair — live on deploy) + the golden-path E2E test, config preflight,
-and docs. Phases 12/15 are already live-dark from the previous deploy.
+**What this deploys (all dark unless noted):** Phase 14 (two-way project email) + Phase 21
+(observability) + Phase 22 / CR-1 (project progress timeline) + CR-2 (settings nav group) +
+CR-4 (scheduler Google Meet links) + CR-5 / Phase 23 (questionnaire autofill review) + Phase 17
+(kanban pipeline board) + CR-6 / Phase 24 (Resend bounce/complaint webhook → suppressions) +
+Phase 18 (AI daily brief) + Phase 19 (embeddable lead form) + Phase 20 (structured meeting notes) +
+the CR-3 quick-find fix (unflagged bug repair — live on deploy) + the golden-path E2E test, config
+preflight, and docs. Phases 12/15 are already live-dark from the previous deploy.
+
+Every flag below is **off**, so this remains a zero-behavior-change no-op until you flip flags. The
+only visible change on deploy is the CR-3 quick-find repair.
 
 ---
 
@@ -50,13 +56,18 @@ npx wrangler d1 execute studio-bythereeses --remote --file migrations/0092_inbou
 npx wrangler d1 execute studio-bythereeses --remote --file migrations/0093_observability_heartbeat.sql
 npx wrangler d1 execute studio-bythereeses --remote --file migrations/0094_scheduler_meet_link.sql
 npx wrangler d1 execute studio-bythereeses --remote --file migrations/0095_questionnaire_autofill_review.sql
+npx wrangler d1 execute studio-bythereeses --remote --file migrations/0096_daily_brief_narration.sql
+npx wrangler d1 execute studio-bythereeses --remote --file migrations/0097_lead_form_config.sql
+npx wrangler d1 execute studio-bythereeses --remote --file migrations/0098_meeting_notes_booking_link.sql
 ```
 
-All four are additive + idempotent (`IF NOT EXISTS` / new columns + indexes): 0092 inbound-email
-column, 0093 observability tables, 0094 `scheduler_bookings.meeting_join_url` (CR-4), 0095
-`questionnaire_questions.semantic_key` + `questionnaire_responses.suggested_changes_json`/
-`computed_at`/`content_hash` (Phase 23). Order: migrations BEFORE the Worker deploy so the new code
-never sees a missing column.
+All seven are additive + safe while dark: 0092 inbound-email column, 0093 observability tables,
+0094 `scheduler_bookings.meeting_join_url` (CR-4), 0095 `questionnaire_questions.semantic_key` +
+`questionnaire_responses.suggested_changes_json`/`computed_at`/`content_hash` (Phase 23), 0096
+`daily_brief_narrations` table (Phase 18), 0097 `app_settings.lead_form_config_json` (Phase 19),
+0098 `project_communications.booking_id` + index (Phase 20). Order: migrations BEFORE the Worker
+deploy so the new code never sees a missing column. (Phase 17 kanban and Phase 24 Resend webhook add
+NO migration — they ship in the app-Worker deploy below.)
 
 ## 3. Deploy the app Worker (OpenNext)
 
@@ -65,7 +76,9 @@ npm run deploy
 ```
 
 Ships (all inert while flags are off): Phase 14 send/inbound endpoints + UI, Phase 21 heartbeats +
-`/api/agent/health` + `/system-status` health section.
+`/api/agent/health` + `/system-status` health section, Phase 17 kanban board, Phase 18 daily-brief
+section + `/api/agent/daily-brief-narrative`, Phase 19 `/embed/lead*` + `/api/lead-form/*` routes,
+Phase 20 meeting-note composers, and the Phase 24 `/api/resend/webhook` route (no migration).
 
 ## 4. Deploy the Phase 14 inbound-email Worker (ships disabled)
 
@@ -80,11 +93,18 @@ npx wrangler secret put INBOUND_PROJECT_EMAIL_SECRET
 Its `INTAKE_ENABLED` var is `"false"` — it forwards nothing and ingests nothing until enabled.
 (The Email Routing rule in the Cloudflare dashboard is an enablement step, NOT part of this deploy.)
 
-## 5. Deploy the Pages proxy (Phase 14 touched proxy composition)
+## 5. Deploy the Pages proxy (Phase 14 AND Phase 19 touched proxy composition)
 
 ```bash
 npm run deploy:pages-proxy
 ```
+
+Required this round: **Phase 19** adds the lead-form classification to `pages-proxy/_worker.js` —
+three exact paths in `isSchedulePublicPath` (`/embed/lead`, `/embed/lead/thanks`,
+`/api/lead-form/submit`), the `leadForm` + `leadFormPage` rate kinds, and the `frame-ancestors`
+carve-out (self + `bythereeses.com` only) that lets the embed pages be iframed on Tyler's marketing
+site. All inert until `LEAD_FORM_ENABLED` is set, but the proxy must ship so the routing/headers are
+in place before the flag flips.
 
 ## 6. Smoke
 
@@ -118,11 +138,28 @@ heartbeats (this checks config-at-rest; Phase 21 checks whether jobs actually ra
 - `wrangler.systems-monitor.jsonc` — the Phase 21 monitor cron Worker ships **un-wired** by design.
   Deploying it is step 2 of the Phase 21 enablement runbook (`docs/specs/phase-21-observability-alerting.md`
   §6), after you set `ALERT_EMAIL` + `MONITOR_ENABLED=1`.
-- Any flag flips. Everything stays dark: `EMAIL_SENDING_ENABLED`, `INBOUND_PROJECT_EMAIL_ENABLED`,
-  `MONITOR_ENABLED`, `UNIFIED_SIGN_PAY`, `PROJECT_PROGRESS_TIMELINE`, `SETTINGS_NAV_GROUP`,
-  `SCHEDULER_MEET_LINKS`, `QUESTIONNAIRE_AUTOFILL_REVIEW`, `PROJECTS_BOARD_VIEW`,
-  refund/9b flags — all off. (The CR-3 quick-find fix is the one unflagged change: a bug repair
-  that goes live with the deploy.)
+- Any flag flips. Everything stays dark. Full off-by-default flag list as of this deploy:
+  - `EMAIL_SENDING_ENABLED`, `INBOUND_PROJECT_EMAIL_ENABLED` (Phase 14) — read as `=== "true"`
+  - `MONITOR_ENABLED` (Phase 21), `DAILY_BRIEF_ENABLED` (Phase 18, sub-toggle under MONITOR) — `=== "1"`
+  - `UNIFIED_SIGN_PAY` (Phase 12), `PROJECT_PROGRESS_TIMELINE` (Phase 22/CR-1),
+    `SETTINGS_NAV_GROUP` (CR-2), `SCHEDULER_MEET_LINKS` (CR-4),
+    `QUESTIONNAIRE_AUTOFILL_REVIEW` (Phase 23/CR-5), `PROJECTS_BOARD_VIEW` (Phase 17),
+    `MEETING_NOTES_ENABLED` (Phase 20) — all `=== "1"`
+  - `LEAD_FORM_ENABLED` (Phase 19) — read as `=== "true"` (intake-family idiom, sibling of
+    `isInquiryIntakeEnabled`); flag off ⇒ `/embed/lead*` + `/api/lead-form/submit` all 404
+  - refund / Phase 9b money flags — all off (money-gated; first live refund waits for your go)
+  - **Note the two idioms:** the intake family (`EMAIL_SENDING_ENABLED`,
+    `INBOUND_PROJECT_EMAIL_ENABLED`, `LEAD_FORM_ENABLED`, Worker `INTAKE_ENABLED`) reads `"true"`;
+    everything else reads `"1"`. This is pre-existing and intentional, not a typo.
+  - (The CR-3 quick-find fix is the one unflagged change: a bug repair that goes live with the deploy.)
+
+- **Phase 24 (Resend bounce/complaint webhook) is dark by config, not a flag.** It ships with the
+  app Worker (no migration). To enable: (1) `wrangler secret put RESEND_WEBHOOK_SECRET` (the
+  `whsec_…` signing secret from the Resend dashboard) on the app Worker; (2) in the Resend dashboard,
+  subscribe a webhook for `email.bounced` + `email.complained` pointed at
+  `https://studio.bythereeses.com/api/resend/webhook` (the proxied studio host, NOT the workers.dev
+  origin). Until the secret is set the route 503s (recorded under the non-alerting
+  `resend-webhook-unconfigured` key) — surfaced by `npm run config:preflight`, never a false alert.
 
 ## Rollback
 

@@ -58,15 +58,31 @@ deploy **dark** → Tyler enables.
   Tyler runs mini-sessions before enabling; cheap to ship dark.**
 
 ### Tier 3 — UX / reach
-- **Phase 17 — Kanban pipeline board.** Data model + stage-count strip exist; add a visual
-  drag-and-drop lead→booked board. UI-only, low risk.
-- **Phase 18 — AI daily brief.** A rule-based daily "what needs you" exists; add an AI-narrated daily
-  digest (priority leads to answer, overdue, upcoming shoots, stuck items) + optional push. Builds on
-  the dashboard action items + Phase 10; the deferred daily-brief Worker.
-- **Phase 19 — Embeddable lead-capture form.** Booking page + email intake exist; add a customizable
-  inquiry form the photographer embeds on their own site (→ inquiry intake pipeline).
-- **Phase 20 — Structured meeting/consult notes.** Per-booking/consult notes surface distinct from
-  questionnaires (today: single `project.notes` + note-channel rows).
+- **Phase 17 — Kanban pipeline board.** ✅ **BUILT + Fable-reviewed + pushed dark** behind
+  `PROJECTS_BOARD_VIEW`. Visual drag-and-drop lead→booked board over the existing stage data
+  (`listProjectBoardIndex`: count(distinct) + `BOARD_MAX_ROWS` cap + dedupe; login-bounce success
+  predicate). UI-only, no migration.
+- **Phase 18 — AI daily brief.** ✅ **BUILT + Fable-reviewed (APPROVE WITH FIXES, MAJOR-1 applied) +
+  pushed dark 2026-07-07** (commit `19438a2`) behind `DAILY_BRIEF_ENABLED` (a sub-toggle under
+  `MONITOR_ENABLED`). An AI-narrated "what needs you today" folded into the Phase 21 systems digest —
+  no second cron/Worker/email. Narration arrives out-of-band via a bearer-authed
+  `/api/agent/daily-brief-narrative` (control-char-strip → secret-redact → cap, so a self-narrated
+  secret can't reach the email); milestone signal pages `listProjectIndex` in full (no truncation);
+  zero canonical writes (guard-tested). Migration `0096_daily_brief_narration.sql`.
+- **Phase 19 — Embeddable lead-capture form.** ✅ **BUILT + two Fable spec reviews + Fable diff
+  review (APPROVE, MINORs applied) + pushed dark 2026-07-07** (commit `688a8b9`) behind
+  `LEAD_FORM_ENABLED`. A public, iframe-embeddable inquiry form on the schedule host feeding the exact
+  existing intake pipeline via `ingestWebFormInquiry` — staging row + authority-less review task only,
+  never a canonical project. Token in a `?t=` query param (dot-free paths so the middleware matcher
+  isn't bypassed); every user-visible POST outcome is a 303 to a carve-out-matched embed path (nothing
+  blanks the iframe); escaped-only config render; `rev`-counter revocation. Migration
+  `0097_lead_form_config.sql`. **Highest-risk surface in the backlog — built on Opus, reviewed hardest.**
+- **Phase 20 — Structured meeting/consult notes.** ✅ **BUILT + Fable-reviewed (APPROVE, MINORs
+  applied) + pushed dark 2026-07-07** (commit `bad0717`) behind `MEETING_NOTES_ENABLED`. Per-consult
+  notes tied to the specific `scheduler_bookings` row, on both the project and booking pages, reusing
+  `project_communications` "note" rows + one nullable `booking_id` link column. The linkage authority
+  is never agent-writable at create OR update (a shared-core guard blocks an agent from forging a
+  booking-linked note). Migration `0098_meeting_notes_booking_link.sql`.
 
 ## Confidence foundation (cross-cutting, not a parity feature)
 - **Phase 21 — Observability + failure alerting.** ✅ **BUILT + Fable-reviewed + pushed dark 2026-07-07**
