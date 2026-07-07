@@ -118,6 +118,20 @@ assert.equal(
   "the client-facing unsubscribe endpoint must NOT bypass the origin guard (it belongs on the proxy path)",
 );
 
+// Phase 21: the systems-monitor cron + optional out-of-Worker heartbeat reach the origin
+// directly, bearer-authed on CRON_SECRET (read-only + non-canonical heartbeat writes only).
+// Pin the bypass so a future edit that drops it (silently login-walling every run) fails loudly.
+assert.equal(
+  isPublicOriginBypassApiPath("/api/cron/systems-monitor"),
+  true,
+  "the systems-monitor cron endpoint must bypass the origin guard (bearer secret is the trust boundary)",
+);
+assert.equal(
+  isPublicOriginBypassApiPath("/api/cron/heartbeat"),
+  true,
+  "the out-of-Worker heartbeat endpoint must bypass the origin guard (bearer secret is the trust boundary)",
+);
+
 assert.equal(
   isPublicOriginBypassApiPath("/api/scheduler/meeting-types"),
   false,

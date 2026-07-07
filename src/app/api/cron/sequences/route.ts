@@ -1,3 +1,4 @@
+import { recordJobRun } from "@/lib/job-runs";
 import { runDueSequences, sequencesEnabled } from "@/lib/sequences";
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
@@ -24,10 +25,21 @@ export async function POST(request: NextRequest) {
   }
 
   // Guaranteed no-op on a dark deploy: a registered cron with the flag off moves
-  // zero rows (defense-in-depth; runDueSequences also self-guards).
+  // zero rows (defense-in-depth; runDueSequences also self-guards). Phase 21: a
+  // flag-off run is a SUCCESSFUL run — record ok:true so staleness does not alarm.
   if (!sequencesEnabled()) {
+    await recordJobRun("sequence-runner", true);
     return NextResponse.json({ skipped: "flag_off" });
   }
 
-  return NextResponse.json(await runDueSequences());
+  // Phase 21 heartbeat: record then PRESERVE the fail-loud contract — a throw records a
+  // FAILURE and is re-raised (Next returns 500) rather than being masked into a 2xx.
+  try {
+    const result = await runDueSequences();
+    await recordJobRun("sequence-runner", true);
+    return NextResponse.json(result);
+  } catch (error) {
+    await recordJobRun("sequence-runner", false, error instanceof Error ? error.message : "Sequence runner threw.");
+    throw error;
+  }
 }

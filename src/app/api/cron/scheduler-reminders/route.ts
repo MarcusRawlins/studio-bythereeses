@@ -1,3 +1,4 @@
+import { recordJobRun } from "@/lib/job-runs";
 import { sendDueSchedulerReminders } from "@/lib/scheduler";
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
@@ -22,6 +23,41 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const result = await sendDueSchedulerReminders();
+  // Phase 21 heartbeat. Record the outcome, then PRESERVE the fail-loud contract: a thrown
+  // job records a FAILURE and STILL returns 500 (monitoring is additive, never masks a
+  // failure into a 2xx). await the write before returning (Workers cancel post-response
+  // promises).
+  let result;
+  try {
+    result = await sendDueSchedulerReminders();
+  } catch (error) {
+    await recordJobRun("scheduler-reminders", false, error instanceof Error ? error.message : "Reminder job threw.");
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Reminder job failed." },
+      { status: 500 },
+    );
+  }
+
+  // "Ran but sent nothing" rule (§2.3): due > 0 with sent === 0 is persistent provider
+  // breakage (e.g. RESEND_API_KEY revoked) — record a FAILURE even though the call resolved.
+  // A transient blip (failed > 0 but sent > 0) is self-healing next hour → recorded as ok
+  // (computeSystemHealth surfaces it as WARN, not a hard failure).
+  if (result.due > 0 && result.sent === 0) {
+    await recordJobRun(
+      "scheduler-reminders",
+      false,
+      `Reminders ran but sent nothing: ${result.due} due, ${result.failed} failed to deliver.`,
+    );
+  } else if (result.failed > 0 && result.sent > 0) {
+    // Transient partial-send blip — self-healing next hour. Recorded as SUCCESS with an
+    // advisory note so computeSystemHealth surfaces WARN (not a hard failure).
+    await recordJobRun(
+      "scheduler-reminders",
+      true,
+      `Transient: ${result.failed} of ${result.due} reminders failed to deliver (retries next hour).`,
+    );
+  } else {
+    await recordJobRun("scheduler-reminders", true);
+  }
   return NextResponse.json(result);
 }

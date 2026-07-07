@@ -24,7 +24,13 @@ async function main() {
     },
   }));
   assert.equal(authorized.status, 200);
-  assert.deepEqual(await authorized.json(), { checked: 0, sent: 0 });
+  // Phase 21: extended return shape {checked, due, sent, failed}. No bookings → all zero, and
+  // the route records a successful heartbeat.
+  assert.deepEqual(await authorized.json(), { checked: 0, due: 0, sent: 0, failed: 0 });
+
+  const { readJobRun } = await import("@/lib/job-runs");
+  const heartbeat = await readJobRun("scheduler-reminders");
+  assert.ok(heartbeat && heartbeat.lastStatus === "ok", "an empty successful run records an ok heartbeat");
 
   console.log("scheduler reminders cron route tests passed");
 }

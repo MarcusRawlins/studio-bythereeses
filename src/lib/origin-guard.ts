@@ -19,6 +19,15 @@ const PUBLIC_API_PREFIXES = [
   // endpoint — the bearer secret at the origin is the trust boundary (identical
   // shape to /api/cron/scheduler-reminders).
   "/api/cron/sequences",
+  // Phase 21: the systems-monitor cron (and the optional out-of-Worker heartbeat endpoint)
+  // reach the app Worker origin DIRECTLY over *.workers.dev, bearer-authed on CRON_SECRET
+  // (fail-closed 503 unset / 401 wrong, constant-time), so the Pages proxy's /api/cron/*
+  // login-wall (303 -> /admin/login 200) can't silently drop them. NOT unauthenticated
+  // mutation endpoints — the bearer secret at the origin is the trust boundary, and both are
+  // read-only + NON-CANONICAL heartbeat writes only (job_runs / health_alerts), never a
+  // canonical mutation (identical trust shape to /api/cron/sequences).
+  "/api/cron/systems-monitor",
+  "/api/cron/heartbeat",
   "/api/proposal/",
   "/api/scheduler/bookings",
   "/api/stripe/webhook",

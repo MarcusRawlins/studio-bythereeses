@@ -162,6 +162,24 @@ export async function sendSequenceEmail(input: {
   return { ok: false, reason: "unknown" }; // 5xx or no-key — ambiguous, never auto-retry
 }
 
+// Phase 21 — owner-only ops alert sender (the daily digest + immediate critical email). The
+// recipient is ALWAYS process.env.ALERT_EMAIL (Tyler's OWN address) — a FIXED config value,
+// NEVER anything derived from client data. This is the structural guarantee that the monitor
+// cannot email a client or leak data outward. No List-Unsubscribe footer (transactional ops
+// mail to the owner, not bulk marketing). Fail-closed on config: ALERT_EMAIL unset → return
+// false + no send (the digest is considered un-wired until Tyler sets it). Uses the private
+// resendRequest, which returns false (never throws) when RESEND_API_KEY is unset.
+export async function sendAdminAlertEmail(input: { subject: string; text: string }): Promise<boolean> {
+  const to = process.env.ALERT_EMAIL?.trim();
+  if (!to) return false; // fail-closed: no owner address configured → no send, no false success.
+  try {
+    const result = await resendRequest({ to, subject: input.subject, text: input.text });
+    return result.delivered;
+  } catch {
+    return false; // thrown after dispatch — treat as not-delivered (never a false success).
+  }
+}
+
 // Phase 6.5: self-service portal magic-link email. One email per request
 // regardless of project count; the body lists a "View {project}" link per
 // active project. Reuses the private Resend sender (returns false, never throws,

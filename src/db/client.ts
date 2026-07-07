@@ -1252,6 +1252,31 @@ function migrate(database: LocalDatabase) {
     CREATE INDEX IF NOT EXISTS idx_scheduler_bookings_external_payment ON scheduler_bookings(external_payment_id);
     CREATE INDEX IF NOT EXISTS idx_scheduler_bookings_project_payment ON scheduler_bookings(project_id, payment_status, paid_at);
   `);
+
+  // Phase 21 (migration 0093): observability heartbeat + alert dedupe. Additive +
+  // idempotent so local dev (better-sqlite3) and any partially-migrated prod D1 converge
+  // without a blanket `migrations apply`. NON-CANONICAL: these tables are operational only
+  // (job_runs heartbeat + health_alerts dedupe) — nothing here moves money or mutates a
+  // business record. NOT on an always-on business read path; can migrate dark.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS job_runs (
+      job_name             TEXT PRIMARY KEY NOT NULL,
+      last_run_at          TEXT,
+      last_success_at      TEXT,
+      last_status          TEXT,
+      last_error           TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      updated_at           TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS health_alerts (
+      alert_key     TEXT PRIMARY KEY NOT NULL,
+      severity      TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      last_sent_at  TEXT,
+      resolved_at   TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_health_alerts_unresolved ON health_alerts(resolved_at);
+  `);
 }
 
 function getD1Binding() {

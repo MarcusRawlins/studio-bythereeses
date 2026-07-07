@@ -81,7 +81,9 @@ async function main() {
   }, seedTime);
 
   const withoutProvider = await sendDueSchedulerReminders(now);
-  assert.deepEqual(withoutProvider, { checked: 2, sent: 0 });
+  // Phase 21: extended return {checked, due, sent, failed}. With RESEND unset the one eligible
+  // booking is attempted (due:1) and returns delivered:false (failed:1, sent:0).
+  assert.deepEqual(withoutProvider, { checked: 2, due: 1, sent: 0, failed: 1 });
   assert.deepEqual(database.prepare(`
     SELECT id, reminder_sent_at
     FROM scheduler_bookings
@@ -97,7 +99,7 @@ async function main() {
   global.fetch = async () => new Response(null, { status: 200 });
   try {
     const withProvider = await sendDueSchedulerReminders(now);
-    assert.deepEqual(withProvider, { checked: 2, sent: 1 });
+    assert.deepEqual(withProvider, { checked: 2, due: 1, sent: 1, failed: 0 });
     assert.equal(
       database.prepare("SELECT reminder_sent_at FROM scheduler_bookings WHERE id = 'booking-due'").get()?.reminder_sent_at,
       now.toISOString(),

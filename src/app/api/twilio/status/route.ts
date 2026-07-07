@@ -1,3 +1,4 @@
+import { recordJobRun } from "@/lib/job-runs";
 import { guardDirectWorkerApiRequest } from "@/lib/origin-guard";
 import { handleStatusCallback, verifyTwilioSignature } from "@/lib/twilio-webhook";
 import { NextResponse } from "next/server";
@@ -50,6 +51,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid signature." }, { status: 403 });
   }
 
+  // Phase 21 heartbeat is recorded ONLY after the 403 signature gate above — a rejected
+  // signature returns before reaching here and cannot poison the failure counter. Record then
+  // PRESERVE the fail-loud 500 so Twilio still retries.
   try {
     await handleStatusCallback({
       messageSid: form.get("MessageSid") ? String(form.get("MessageSid")) : null,
@@ -57,8 +61,10 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("Twilio status handling failed", error);
+    await recordJobRun("twilio-status", false, error instanceof Error ? error.message : "Twilio status handling failed.");
     return NextResponse.json({ error: "Failed to process status callback." }, { status: 500 });
   }
 
+  await recordJobRun("twilio-status", true);
   return twiml(200);
 }

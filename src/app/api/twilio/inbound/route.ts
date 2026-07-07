@@ -1,3 +1,4 @@
+import { recordJobRun } from "@/lib/job-runs";
 import { guardDirectWorkerApiRequest } from "@/lib/origin-guard";
 import { handleInboundSms, verifyTwilioSignature } from "@/lib/twilio-webhook";
 import { NextResponse } from "next/server";
@@ -59,6 +60,8 @@ export async function POST(request: Request) {
 
   // Signature passed — only NOW act on business meaning. Every branch returns 2xx
   // only after the intended DB effect is durably written.
+  // Phase 21 heartbeat is recorded ONLY after the 403 signature gate above. Record then
+  // PRESERVE the fail-loud 500 so Twilio still retries (no silent loss).
   try {
     await handleInboundSms({
       from: String(form.get("From") ?? ""),
@@ -68,8 +71,10 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Twilio inbound handling failed", error);
     // A failure to persist must be non-2xx so Twilio retries (no silent loss).
+    await recordJobRun("twilio-inbound", false, error instanceof Error ? error.message : "Twilio inbound handling failed.");
     return NextResponse.json({ error: "Failed to process inbound message." }, { status: 500 });
   }
 
+  await recordJobRun("twilio-inbound", true);
   return twiml(200);
 }

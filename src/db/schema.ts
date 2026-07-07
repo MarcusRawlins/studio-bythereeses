@@ -619,6 +619,28 @@ export const refundInitiations = sqliteTable("refund_initiations", {
   updatedAt: text("updated_at").notNull(),
 });
 
+// Phase 21 — observability heartbeat (job_runs) + immediate-alert dedupe (health_alerts).
+// NON-CANONICAL operational tables: nothing here moves money or mutates a business record.
+// job_runs is current-state (one upserted row per job); per-event history already lives in
+// activity_logs / stripe_webhook_events. Written ONLY by recordJobRun + the monitor route.
+export const jobRuns = sqliteTable("job_runs", {
+  jobName: text("job_name").primaryKey(), // 'scheduler-reminders' | 'sequence-runner' | 'stripe-webhook' | ...
+  lastRunAt: text("last_run_at"), // ISO; set on every call (ok or fail)
+  lastSuccessAt: text("last_success_at"), // ISO; set only on ok → staleness is computed from this
+  lastStatus: text("last_status"), // 'ok' | 'error'
+  lastError: text("last_error"), // cleaned, capped (≤500) message; NULL on ok
+  consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const healthAlerts = sqliteTable("health_alerts", {
+  alertKey: text("alert_key").primaryKey(), // e.g. 'critical:refund_stuck:<initiationId>'
+  severity: text("severity").notNull(),
+  firstSeenAt: text("first_seen_at").notNull(),
+  lastSentAt: text("last_sent_at"),
+  resolvedAt: text("resolved_at"),
+});
+
 // Phase 9a — mileage log (tax deduction input). No money moved; admin CRUD only.
 export const mileageLogs = sqliteTable("mileage_logs", {
   id: text("id").primaryKey(),

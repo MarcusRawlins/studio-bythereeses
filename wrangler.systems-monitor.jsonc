@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "reese-systems-monitor",
+  "main": "workers/systems-monitor.ts",
+  "account_id": "765e233f8635f207a8a3db4847efd3e9",
+  "compatibility_date": "2026-04-28",
+  // Hourly: the route evaluates CRITICAL signals every run (immediate email on a newly-seen
+  // critical) and sends the full daily digest once per day at the configured ET hour.
+  // SHIPS UN-WIRED: this worker is committed but NOT deployed/scheduled until Tyler's
+  // enablement step (set ALERT_EMAIL + MONITOR_ENABLED=1, deploy this config, set CRON_SECRET).
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
+  "vars": {
+    "MONITOR_ENDPOINT": "https://reese-photography-crm.solitary-flower-c3ab.workers.dev/api/cron/systems-monitor"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

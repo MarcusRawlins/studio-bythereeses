@@ -1,6 +1,7 @@
 import { listStudioDataHealth } from "@/lib/data-health";
+import { computeSystemHealth, type HealthSeverity } from "@/lib/system-health";
 
-type StatusTone = "ok" | "warn" | "info";
+type StatusTone = "ok" | "warn" | "info" | "critical";
 
 export type StudioSystemStatusItem = {
   label: string;
@@ -17,7 +18,15 @@ export type StudioSystemStatus = {
   operations: StudioSystemStatusItem[];
   tokenPolicy: StudioSystemStatusItem[];
   knownRisks: StudioSystemStatusItem[];
+  systemsHealth: StudioSystemStatusItem[];
 };
+
+function severityTone(severity: HealthSeverity): StatusTone {
+  if (severity === "critical") return "critical";
+  if (severity === "warn") return "warn";
+  if (severity === "ok") return "ok";
+  return "info";
+}
 
 function configured(value: string | undefined) {
   return Boolean(value?.trim());
@@ -35,9 +44,32 @@ function configuredItem(label: string, envName: string, detail: string): StudioS
 export async function getStudioSystemStatus(): Promise<StudioSystemStatus> {
   const dataHealth = await listStudioDataHealth();
 
+  // Phase 21: the always-on runtime heartbeat view (autonomous jobs + reconciliation queues).
+  // Pure read; never throws the page (falls back to an INFO row if the computation fails).
+  let systemsHealth: StudioSystemStatusItem[];
+  try {
+    const health = await computeSystemHealth();
+    systemsHealth = [
+      item(
+        "Overall systems health",
+        health.overall,
+        severityTone(health.overall === "green" ? "ok" : (health.overall as HealthSeverity)),
+        `Autonomous jobs + reconciliation heartbeat as of ${health.generatedAt}. A missing daily Systems email is itself the alarm (dead-man's-switch, phase-21 §4.3).`,
+      ),
+      ...health.signals.map((signal) =>
+        item(signal.label, signal.severity, severityTone(signal.severity), signal.detail),
+      ),
+    ];
+  } catch {
+    systemsHealth = [
+      item("Overall systems health", "unavailable", "info", "The systems-health computation failed to run this load."),
+    ];
+  }
+
   return {
     reviewedAt: "2026-07-03",
     dataHealth: dataHealth.summary,
+    systemsHealth,
     frontDoor: [
       item(
         "Studio admin gate",

@@ -1,4 +1,5 @@
 import { ingestInboundInquiry, isInquiryIntakeEnabled, MAX_INBOUND_JSON_BYTES, type InboundEmailPayload } from "@/lib/inbound-inquiry";
+import { recordJobRun } from "@/lib/job-runs";
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 
@@ -51,11 +52,16 @@ export async function POST(request: NextRequest) {
   // Persist-then-2xx: only return 2xx after the inbound_inquiries row is durably
   // written. Idempotency is derived CRM-side from payload.messageId (the JSON
   // body), NOT an HTTP Idempotency-Key header (which would throw on CR/LF).
+  // Phase 21 heartbeat is recorded ONLY after the bearer + flag + size gates above (a
+  // rejected/unconfigured request returns before here and cannot poison the counter). Record
+  // then PRESERVE the fail-loud 500 so the Worker still forwards to a human.
   try {
     const result = await ingestInboundInquiry(payload);
+    await recordJobRun("inbound-inquiry", true);
     return NextResponse.json(result, { status: 200 });
-  } catch {
+  } catch (error) {
     // A failure to persist must be a non-2xx so the Worker forwards to a human.
+    await recordJobRun("inbound-inquiry", false, error instanceof Error ? error.message : "Inbound inquiry ingest failed.");
     return NextResponse.json({ error: "Failed to persist inquiry." }, { status: 500 });
   }
 }

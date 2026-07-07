@@ -113,6 +113,18 @@ export function evaluateProductionSmoke(results) {
   if (results.agentTasks?.status !== 200) {
     errors.push("Agent task list should return 200 with bearer auth.");
   }
+  // Phase 21 config-verification companion: /api/agent/health must be LIVE + shaped. The
+  // /api/agent/ prefix is what makes it reachable through the proxy at all (a bare /api/health
+  // would 303/404). Do NOT fail on warn/critical — that's a real runtime signal, not a smoke
+  // failure; assert only that the endpoint is up and `overall` is one of the known values.
+  if (results.agentHealth) {
+    const overall = results.agentHealth.json?.overall;
+    if (results.agentHealth.status !== 200) {
+      errors.push("Agent systems-health endpoint (/api/agent/health) should return 200 with bearer auth.");
+    } else if (!["green", "warn", "critical"].includes(overall)) {
+      errors.push(`Agent systems-health 'overall' should be green|warn|critical, got ${overall}.`);
+    }
+  }
   if (!hasFinanceTool(Array.isArray(mcpTools) ? mcpTools : [])) {
     errors.push("MCP tools/list should expose studio_get_finance_report.");
   }
@@ -241,6 +253,7 @@ async function runProductionSmoke() {
     dataHealth: await fetchJson(`${studio}/api/agent/data-health`, token),
     financeReport: await fetchJson(`${studio}/api/agent/finance/report?paymentStatus=needs_reconciliation&expenseStatus=needs_reconciliation`, token),
     agentTasks: await fetchJson(`${studio}/api/agent/tasks?limit=5`, token),
+    agentHealth: await fetchJson(`${studio}/api/agent/health`, token),
     mcpTools: await callMcpToolsList(`${studio}/api/mcp`, token),
     proposalReferrerPolicy: await fetchReferrerPolicy(`${studio}/proposal/smoke-check-${Date.now()}`),
     defaultReferrerPolicy: await fetchReferrerPolicy(`${studio}/admin/login`),

@@ -1256,14 +1256,26 @@ export async function sendDueSchedulerReminders(now = new Date()) {
     limit: 25,
   });
 
+  // Phase 21 "ran but sent nothing" instrumentation. `due` = bookings we actually attempt to
+  // remind this run (eligible + has a resolvable meeting type); `failed` = attempts where the
+  // provider returned delivered:false (e.g. RESEND_API_KEY missing/revoked — resendRequest
+  // returns false WITHOUT throwing). The caller records a heartbeat FAILURE when
+  // due > 0 && sent === 0 (persistent breakage), so silent non-send surfaces instead of
+  // reading green forever (the original 2-month incident, via a different mechanism).
+  let due = 0;
   let sent = 0;
+  let failed = 0;
   for (const booking of bookings.filter((item) => !item.reminderSentAt)) {
     const meetingType = await db.query.schedulerMeetingTypes.findFirst({
       where: eq(schedulerMeetingTypes.id, booking.meetingTypeId),
     });
     if (!meetingType) continue;
+    due += 1;
     const emailed = await sendBookingReminderEmail({ booking, meetingType, ...getBookingManageUrls(meetingType.slug, booking) });
-    if (!emailed) continue;
+    if (!emailed) {
+      failed += 1;
+      continue;
+    }
     await db.update(schedulerBookings).set({
       reminderSentAt: now.toISOString(),
       updatedAt: now.toISOString(),
@@ -1271,7 +1283,7 @@ export async function sendDueSchedulerReminders(now = new Date()) {
     sent += 1;
   }
 
-  return { checked: bookings.length, sent };
+  return { checked: bookings.length, due, sent, failed };
 }
 
 export async function updateSchedulerSettingsAction(formData: FormData) {

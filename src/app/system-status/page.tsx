@@ -1,12 +1,13 @@
 import { AppShell } from "@/components/AppShell";
 import { getStudioSystemStatus, type StudioSystemStatusItem } from "@/lib/system-status";
-import { Activity, DatabaseBackup, KeyRound, ShieldCheck } from "lucide-react";
+import { Activity, DatabaseBackup, HeartPulse, KeyRound, ShieldCheck } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
 function toneClass(tone: StudioSystemStatusItem["tone"]) {
   if (tone === "ok") return "border-emerald-700/30 bg-emerald-50 text-emerald-900";
   if (tone === "warn") return "border-amber-700/30 bg-amber-50 text-amber-900";
+  if (tone === "critical") return "border-red-700/40 bg-red-50 text-red-900";
   return "border-[var(--line)] bg-[var(--paper-2)] text-[var(--ink-3)]";
 }
 
@@ -64,6 +65,14 @@ export default async function SystemStatusPage() {
             <div className="studio-caps text-[0.58rem] text-[var(--ink-3)]">High priority</div>
             <div className="mt-2 text-2xl font-semibold">{status.dataHealth.highIssueCount}</div>
           </div>
+        </section>
+
+        <section className="space-y-3">
+          <div className="flex items-center gap-2">
+            <HeartPulse className="h-4 w-4 text-[var(--ink-muted)]" />
+            <h2 className="text-lg font-semibold">Autonomous jobs and systems health</h2>
+          </div>
+          <StatusGrid items={status.systemsHealth} />
         </section>
 
         <section className="space-y-3">

@@ -124,6 +124,18 @@ async function expireStripeCheckoutSessionById(sessionId: string) {
   }
 }
 
+// Phase 21: a typed error for PRE-verification signature rejects (missing/invalid/expired
+// signature). The webhook route classifies on this so a scanner spamming bad signatures on
+// the *.workers.dev origin cannot poison the `stripe-webhook` CRITICAL "money state drift"
+// counter (attacker-triggerable cry-wolf). Only a throw from processing a SUCCESSFULLY-
+// verified event records a `stripe-webhook` FAILURE. See webhook route.
+export class StripeWebhookSignatureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StripeWebhookSignatureError";
+  }
+}
+
 function parseStripeSignatureHeader(header: string | null) {
   const parts = new Map<string, string[]>();
   for (const item of (header ?? "").split(",")) {
@@ -135,7 +147,7 @@ function parseStripeSignatureHeader(header: string | null) {
   const timestamp = Number(parts.get("t")?.[0] ?? "");
   const signatures = parts.get("v1") ?? [];
   if (!Number.isFinite(timestamp) || !signatures.length) {
-    throw new Error("Invalid Stripe signature header.");
+    throw new StripeWebhookSignatureError("Invalid Stripe signature header.");
   }
 
   return { timestamp, signatures };
@@ -162,14 +174,14 @@ export function verifyStripeWebhookPayload({
 }) {
   const { timestamp, signatures } = parseStripeSignatureHeader(signatureHeader);
   if (Math.abs(nowSeconds - timestamp) > toleranceSeconds) {
-    throw new Error("Stripe webhook signature timestamp is outside the tolerance window.");
+    throw new StripeWebhookSignatureError("Stripe webhook signature timestamp is outside the tolerance window.");
   }
 
   const expectedSignature = createHmac("sha256", secret)
     .update(`${timestamp}.${rawBody}`)
     .digest("hex");
   if (!signatures.some((signature) => secureCompareHex(signature, expectedSignature))) {
-    throw new Error("Stripe webhook signature verification failed.");
+    throw new StripeWebhookSignatureError("Stripe webhook signature verification failed.");
   }
 
   return JSON.parse(rawBody) as Record<string, unknown>;
