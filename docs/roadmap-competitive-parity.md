@@ -96,3 +96,15 @@ deploy **dark** → Tyler enables.
 12 (convert) → 15 (PWA, quick win) → 14 (email) → 13 (autopay, money-gated) → 16 (mini-sessions) →
 17 (kanban) → 18 (daily brief) → 19 (lead form) → 20 (notes). Each independently shippable + dark.
 Money-movement (13, and any deposit-at-booking in 16) pauses at first live charge for Tyler's go.
+
+## Change requests (Tyler's live edits — see docs/change-requests.md)
+- **CR-1 / Phase 22 — Project progress / milestone timeline.** ✅ BUILT + Fable spec-review (REVISE
+  → rev 2) + Fable diff-review (APPROVE WITH FIXES, all applied) + pushed dark 2026-07-07 behind
+  `PROJECT_PROGRESS_TIMELINE`. Read-time milestone projection (detail strip + list bar); dates mark
+  DUE, data marks DONE, date-passed-without-data = OVERDUE. Void/draft invoices excluded from the
+  overdue scan (a voided-and-reissued invoice can't falsely amber a healthy project); flag-off adds
+  zero queries. Gate green (220 tests). Enable = set the var.
+- **CR-3 — Quick-find dialog rendered under the nav.** ✅ FIXED + pushed 2026-07-07 (unflagged bug
+  repair): dialog portals to document.body; ⌘K bound to the single desktop instance. Live on deploy.
+- **CR-2 — Left-nav: raise Settings, fold Activity/Data Health/System Status under it.** In build
+  (dark behind `SETTINGS_NAV_GROUP`).
