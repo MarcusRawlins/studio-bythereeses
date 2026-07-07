@@ -92,8 +92,9 @@ The authoritative, always-current list is `docs/roadmap-competitive-parity.md`. 
 **Not yet built (parity backlog):** 13 autopay (money-gated), 16 mini-sessions (business-dependent),
 17 kanban board, 18 AI daily brief, 19 embeddable lead form, 20 structured meeting notes.
 
-**Confidence backlog:** golden-path end-to-end test (in progress), config-verification preflight,
-staged log→enforce enablement, email deliverability hardening.
+**Confidence backlog:** golden-path end-to-end test (in progress), config-verification preflight
+(**built** — `scripts/config-preflight.mjs` / `npm run config:preflight`, see `docs/deploy-next.md`
+§7), staged log→enforce enablement, email deliverability hardening.
 
 ---
 

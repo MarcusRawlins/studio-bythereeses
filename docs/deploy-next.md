@@ -77,7 +77,25 @@ node scripts/production-smoke.mjs
 Expect green. The new `/api/agent/health` check needs `STUDIO_AGENT_API_TOKEN` in your env for the
 smoke to exercise it.
 
-## 7. Do NOT deploy (these stay parked until you choose to enable)
+## 7. Config-verification preflight (config-at-rest, not surface reachability)
+
+```bash
+npm run config:preflight
+```
+
+This is a **different question** than the smoke above: smoke proves the surfaces answer; this
+proves every provider is actually *wired* — secrets present, Stripe/Resend/Twilio keys still
+valid, the Stripe webhook endpoint subscribed at the right URL with the right events, and every
+cron `*_ENDPOINT` pointed at the workers.dev origin (not the login-walled `studio.bythereeses.com`
+host — the exact class of bug that silently no-oped the reminders cron for two months). It is
+read-only (GET/HEAD only) and reads secrets from your local env, so run it on your machine where
+`.env.local` / exported secrets live. It never prints a secret value. Exit code fails only when a
+`REQUIRED` secret is missing or a provider check fails; dark-phase (`ENABLEMENT`-tier) secrets
+render as "not yet enabled", not a failure. See
+`docs/specs/phase-21-observability-alerting.md` §7 for how this relates to the Phase 21 runtime
+heartbeats (this checks config-at-rest; Phase 21 checks whether jobs actually ran).
+
+## 8. Do NOT deploy (these stay parked until you choose to enable)
 
 - `wrangler.systems-monitor.jsonc` — the Phase 21 monitor cron Worker ships **un-wired** by design.
   Deploying it is step 2 of the Phase 21 enablement runbook (`docs/specs/phase-21-observability-alerting.md`

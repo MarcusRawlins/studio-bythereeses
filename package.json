@@ -18,6 +18,7 @@
     "deploy:pages-proxy": "wrangler pages deploy pages-proxy --project-name studio-bythereeses --branch main",
     "smoke:perf": "node scripts/performance-smoke.mjs",
     "smoke:production": "node scripts/production-smoke.mjs",
+    "config:preflight": "node scripts/config-preflight.mjs",
     "test:origin-guard": "tsx src/lib/origin-guard.test.ts",
     "cf:typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
     "db:migrate": "tsx src/db/migrate.ts",
