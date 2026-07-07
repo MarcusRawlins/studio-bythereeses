@@ -135,9 +135,14 @@ inert while flags stay off. Ops/rollback: `docs/ops-stabilization-checklist.md`.
 
 ## 6. Open decisions waiting on Tyler (don't guess these)
 
-- **Refund policy confirmations** (affects the money-gated refund path, still off): (1) is the
-  non-refundable retainer identified by *label OR earliest payment* (as built) or label-only? (2) are
-  processing fees passed to the client on the *service portion only* (as built) or the full amount?
+- **Refund policy — CONFIRMED 2026-07-07 (as-built stands; no longer open).** Tyler's policy:
+  *"refunds only ever issued if service isn't rendered; no refunds on the initial retainer; all
+  processing fees passed to the client."* The as-built implements this: the non-refundable retainer
+  is identified by *label ∪ earliest payment* (a safe superset that always catches the retainer),
+  and processing fees are passed to the client. The two implementation micro-questions previously
+  parked here (retainer = label-only vs label∪earliest; fee ceiling service-only vs full) are
+  resolved to the as-built readings — do not re-ask. Money movement (a live refund) still pauses for
+  Tyler's explicit go per Guardrail 2; confirming the *policy* is not enabling the *flag*.
 - **Mini-sessions (Phase 16):** does Tyler run mini-session days? If not, deprioritize.
 - **Reminders cron** (task #29): confirm the hourly reminders cron returns 200 on a live tick after the
   `CRON_SECRET` fix (the original silent-failure incident — Phase 21 exists to catch its recurrence).
