@@ -1,6 +1,6 @@
 # Phase 13 — Autopay / card-on-file (off-session installment auto-charge)
 
-Status: **SPEC (build-ready, pre-Fable).** Roadmap Tier 1 (`docs/roadmap-competitive-parity.md`).
+Status: **SPEC (build-ready, Fable rev-2 applied).** Roadmap Tier 1 (`docs/roadmap-competitive-parity.md`).
 No application code, no migration SQL in this document — spec text only.
 
 > ⚠️ **THIS IS MONEY MOVEMENT.** This is the single most safety-critical unbuilt feature in the CRM.
@@ -52,8 +52,9 @@ stays log-only until Tyler watches a full cycle; first live charge is Tyler-gate
 
 - **I3 — Exactly-once per installment.** A given installment (`invoice_payments` row) is charged
   **at most once** across crash, retry, redeploy, and concurrent cron ticks. Enforced by a **layered**
-  guarantee (§6): (1) a `UNIQUE(invoice_payment_id)` autopay-charge ledger row (one row per
-  installment, ever); (2) a single-statement **CAS claim** with a per-attempt claim token (D1 has no
+  guarantee (§6): (1) a partial `UNIQUE(invoice_payment_id) WHERE dry_run = 0` autopay-charge ledger
+  row (one *real* charge row per installment, ever; `log_only` dry-run rows sit outside the index —
+  §3.2); (2) a single-statement **CAS claim** with a per-attempt claim token (D1 has no
   transactions — `INSERT … ON CONFLICT` convergence + single-statement CAS, exactly like
   `stripe-refund-initiation.ts:439-465` and `sequences.ts` claim-first `insertLedger:324`); (3) a
   **Stripe idempotency key** pinned *before* the network call; (4) the existing
@@ -121,7 +122,7 @@ stays log-only until Tyler watches a full cycle; first live charge is Tyler-gate
 | Cron pattern (CRON_SECRET, fail-closed, timing-safe, heartbeat, fail-loud) | `POST /api/cron/sequences`, `POST /api/cron/scheduler-reminders` | `cron/sequences/route.ts`, `cron/scheduler-reminders/route.ts` | The autopay engine's cron route is a **direct structural clone**: `CRON_SECRET` (or `SCHEDULER_LINK_SECRET`) 503-if-unset / 401-if-mismatch (`sequences/route.ts:16-25`), flag-off = record ok + skip (`:30-33`), heartbeat via `recordJobRun`, throw records failure + returns 500 (fail-loud, `:37-44`). |
 | Heartbeat + alerting catalog | `recordJobRun`, `JobName` union, `WEBHOOK_JOBS`, CRITICAL `alertKey` | `job-runs.ts:69-172`, `system-health.ts:117-118,404` | Add `autopay-charger` (staleness-alertable, CRITICAL) + `autopay-webhook` folded into the existing `stripe-webhook` key. Add a reconcile tripwire signal mirroring the refund `critical:refund_stuck` one (`system-health.ts:404`). |
 | Refund reconciliation tripwire (the model for the charge tripwire) | `getRefundInitiationReconciliation` (succeeded-not-recorded ≥24h; stuck submitting ≥1h) | `stripe-refund-initiation.ts:564-614` | Mirror for autopay: a `charging` row older than ~1h → "charge stuck in-flight, reconcile against Stripe"; a `charged` row with no recorded `invoice_payments.paid` after ~24h → "charge not reconciled". |
-| Outbound email master gate (for notices/receipts) | `EMAIL_SENDING_ENABLED` (+ `sendSequenceEmail`, `isEmailSuppressed`) | `email.ts` (see `email-send-guard.test.ts`), `project-communications.ts` | Every client-facing autopay email is gated on `EMAIL_SENDING_ENABLED` **and** suppression (§8). |
+| Outbound email master gate (for notices/receipts) | `EMAIL_SENDING_ENABLED` (`emailSendingEnabled()`), `sendSequenceEmail`, `isEmailSuppressed` | `project-communications.ts:552-554`, `email.ts` (see `email-send-guard.test.ts`) | ⚠️ **The transport does NOT enforce this gate.** `emailSendingEnabled()` is checked **only** inside the Phase 14 admin approved-send path (`sendApprovedProjectEmail`, `project-communications.ts:552-554`); the sequence transport `sendSequenceEmail` does **not** consult it. Therefore the **new autopay email helper must call `emailSendingEnabled()` itself** (fail-closed) before it ever hands a message to `sendSequenceEmail`, and must also honor `isEmailSuppressed` and the `log_only` suppression (§8). Test 29 asserts the gate **at the autopay-helper layer**, not at the transport. |
 | Flag helpers home | `refundInitiationEnabled`, `unifiedSignPayEnabled`, `financeRefundRecordingMode` (three-state) | `finance-flags.ts:21-59` | Add the autopay flag helpers here (§7), modeled on these. |
 
 **Stripe integration style confirmed:** the repo uses **raw `fetch`** against `api.stripe.com` with a
@@ -170,31 +171,74 @@ Columns (names illustrative; match repo snake_case + the canon-guard trigger sty
 
 ### 3.2 `autopay_charges` — the exactly-once charge ledger (I3 backbone)
 
-**One row per installment, ever.** This table IS the idempotency/CAS state machine.
+**One *real* (`dry_run = 0`) row per installment, ever** (dry-run audit rows are unbounded and sit
+outside the partial unique index — §3.2 `dry_run`). This table IS the idempotency/CAS state machine.
 
 - `id TEXT PRIMARY KEY` — also the base of the Stripe idempotency key (§6.3).
 - `invoice_payment_id TEXT NOT NULL` (FK → `invoice_payments.id`).
-  **`UNIQUE(invoice_payment_id)`** — the hard guarantee that an installment gets **at most one**
-  charge ledger row (I3 layer 1). Claim = `INSERT … ON CONFLICT DO NOTHING` (returns true iff this
-  cron tick created it — the `insertLedger` pattern, `sequences.ts:324-346`).
+  **`UNIQUE(invoice_payment_id) WHERE dry_run = 0`** — a **PARTIAL** unique index (SQLite/D1
+  support partial indexes). The hard guarantee that an installment gets **at most one** *real*
+  (non-dry-run) charge ledger row (I3 layer 1). The partial predicate is load-bearing: it keeps
+  `dry_run = 1` rows entirely **outside** the exactly-once ledger so `log_only` audit rows can be
+  written freely (potentially many, one per observed tick) and can **never** collide with, block, or
+  be promoted into the single real row an eventual `live` charge inserts. Claim (live path) =
+  `INSERT … (dry_run = 0) ON CONFLICT DO NOTHING` (returns true iff this cron tick created it — the
+  `insertLedger` pattern, `sequences.ts:324-346`). **A dry-run row is never on the conflict target**,
+  so it never suppresses the real INSERT. (This resolves the rev-1 incoherence where a total
+  `UNIQUE(invoice_payment_id)` made "going live creates a fresh row" impossible — see rev-2 changelog
+  BLOCKER-2.)
 - `invoice_id TEXT NOT NULL`, `project_id TEXT NOT NULL`, `consent_id TEXT NOT NULL` (which consent
   authorized it), `stripe_customer_id TEXT NOT NULL`, `stripe_payment_method_id TEXT NOT NULL`
   (pinned at claim time — the card that was authorized, so a later card swap can't retroactively
   redirect an in-flight charge).
 - `amount_cents INTEGER NOT NULL` — pinned at claim time = `invoicePaymentClientPayableOpenCents`
   (I7). The charge sends **this pinned value**, never a re-computed one (mirrors the refund's pinned
-  `amountCents`, `stripe-refund-initiation.ts:494`).
+  `amountCents`, `stripe-refund-initiation.ts:494`). This is the PaymentIntent `amount`
+  (`amount_total`-equivalent: service + passed-through card fee).
+- `service_amount_cents INTEGER NOT NULL`, `client_fee_cents INTEGER NOT NULL` — **the split, also
+  pinned at claim time** (MAJOR-2). `service_amount_cents = invoicePaymentOpenCents(payment)` at
+  claim; `client_fee_cents = amount_cents − service_amount_cents`. These are what the manual checkout
+  pins into `metadata[service_open_cents]` at mint (`stripe-checkout.ts:364`) and what the settle
+  recorder consumes to split `paidAmountCents` (service) vs `clientFeeCents`
+  (`stripe-checkout.ts:506-520`). Pinning them **here at claim** — and mirroring them into the PI
+  metadata (§6.3) — means the webhook recorder reads the split from the row/metadata frozen at charge
+  time and **never re-derives it at webhook time**. Without this pin, an installment edited between
+  charge and a delayed webhook would make the recorder recompute a *different* split → wrong
+  `paidAmountCents`, wrong books.
 - `currency TEXT NOT NULL DEFAULT 'usd'`.
 - `status TEXT NOT NULL DEFAULT 'pending'` — the state machine (§6.1):
-  `pending → charging → charged | failed_retryable | failed_terminal | needs_action | skipped_capped`.
-  Constrained by a canon-guard trigger.
+  `pending → charging → charged | failed_retryable | failed_terminal | needs_action | skipped_capped
+  | aborted_ineligible`. Constrained by a canon-guard trigger.
+  - `aborted_ineligible` (MAJOR-1) is a **provably-not-charged terminal**: the post-claim
+    re-verification (§6.2a) found a §5.1 condition no longer held (invoice voided / installment
+    manually recorded / consent revoked) *after* the claim won but *before* any PI POST, so the row
+    was CAS'd here and **no network call was made**. It is not blocking for a *future* legitimately-
+    re-eligible attempt on a fresh row only insofar as the underlying installment could later re-open;
+    in practice the conditions that trigger it (void/paid/revoked) are themselves permanently
+    disqualifying, so it is a dead terminal by design.
+  - `skipped_capped` (M3): written when the pinned payable exceeded `AUTOPAY_MAX_CHARGE_CENTS` at
+    claim time (§5.1 rule 7). It is **re-claimable** iff a *freshly re-pinned* payable is now
+    `<= AUTOPAY_MAX_CHARGE_CENTS` (e.g. Tyler raised the cap, or the installment was partially paid
+    down) — the CAS claimable set (§6.2) includes `skipped_capped` **only under that condition**, so a
+    cap raise lets the next tick charge it without a manual step, and an unchanged over-cap row is
+    simply re-skipped (no state churn, but it must NOT alert-storm — see §7 cap note). Absent that
+    condition it stays a benign terminal.
 - `dry_run INTEGER NOT NULL DEFAULT 0` — `1` iff this row was created in `log_only` mode (a
-  would-charge record; **no Stripe call was made**). A dry-run row is a permanent audit artifact and
-  is **never** promoted to a real charge; going live creates a *fresh* row after the dry-run row is
-  reconciled/cleared (§7).
+  would-charge record; **no Stripe call was made, ever**). A dry-run row is a **pure audit artifact
+  that lives entirely outside the exactly-once ledger** (it is excluded from the partial
+  `UNIQUE(invoice_payment_id) WHERE dry_run = 0` index above). It is **never** claimed, **never**
+  promoted, and **never** transitions to `charging`/`charged` (BLOCKER-2). When Tyler flips to `live`,
+  the engine INSERTs a **fresh** `dry_run = 0` row for the installment — the partial index makes that
+  INSERT succeed regardless of how many dry-run rows already exist for the same installment, and the
+  §6.2 CAS carries `AND dry_run = 0` so it can only ever claim the real row. Dry-run rows are left in
+  place as history (no "reconcile/clear" step is required or defined — they are simply inert).
 - `attempt_count INTEGER NOT NULL DEFAULT 0`, `max_attempts INTEGER NOT NULL`.
-- `idempotency_key TEXT` — the exact key sent to Stripe for the **current** attempt (pinned in the
-  claiming UPDATE, §6.3). Regenerated only for a *new* attempt after a **confirmed** decline.
+- `idempotency_key TEXT` — the exact key sent to Stripe for the **current** attempt, **materialized
+  by the claiming UPDATE itself** (§6.3, M1): the key's attempt component is derived from the row's
+  own `attempt_count` **as a SQL expression in the same statement that increments it** (or the
+  pre-read `attempt_count` is pinned in that statement's `WHERE`), so the key can never be computed in
+  JS from a value that has drifted from the SQL-incremented one. Regenerated only for a *new* attempt
+  after a **confirmed** decline.
 - `claim_token TEXT` — per-attempt CAS ownership token (the refund pattern,
   `stripe-refund-initiation.ts:438`).
 - `stripe_payment_intent_id TEXT` (`pi_…`), `stripe_status TEXT`, `decline_code TEXT`,
@@ -239,10 +283,23 @@ Flow (all Stripe-hosted card entry — I4):
    `createStripeCheckoutSession`, `stripe-checkout.ts:57`) or Stripe Elements with the SetupIntent
    client secret. **v1 uses Checkout `mode=setup`** — it reuses the reviewed hosted flow, keeps all
    card fields off every CRM surface, and needs no client-side Stripe JS beyond the redirect.
-4. Stripe → `setup_intent.succeeded` webhook (via the existing verified route) → attach: store
-   `stripe_payment_method_id`, `card_brand`/`last4`/`exp`, flip consent `status='active'`,
-   `consented_at=now`. `logActivity("autopay.consent_granted")`. A `setup_intent.setup_failed` →
-   consent `status='failed'` (client can retry).
+4. Stripe → `setup_intent.succeeded` webhook (via the existing verified route) → attach. Because
+   `UNIQUE(project_id) WHERE status = 'active'` allows **at most one** active consent per project, a
+   re-consent (card update) must **not** flip a second row to `active` while the prior one is still
+   active — that would violate the unique index, throw inside the webhook handler, and (I5/§6.5) poison
+   the `stripe-webhook` money-drift counter. So the activation is **two single-statement CAS writes,
+   in this order** (M6):
+   1. **First, supersede any prior active row:** `UPDATE autopay_consents SET status='revoked',
+      revoked_at=now WHERE project_id=? AND status='active' AND id != <this consent id>` (a card update
+      revokes the old card-on-file).
+   2. **Then activate this row:** `UPDATE autopay_consents SET status='active',
+      stripe_payment_method_id=<pm>, card_brand/last4/exp=<display>, consented_at=now WHERE id=? AND
+      status='pending'`.
+   These are two independent single statements (D1 has no transactions). A crash **between** them
+   leaves the project with **zero** active consents — the fail-safe direction: autopay simply does not
+   charge until the client (or a webhook replay) re-activates, never a double-active or an
+   index-violation loop. `logActivity("autopay.consent_granted")` after step 2. A
+   `setup_intent.setup_failed` → consent `status='failed'` (client can retry).
 
 **Consent is recorded as active only by the webhook**, never optimistically on redirect (mirrors the
 Phase 12 async-settle discipline, `phase-12 §5.3`): the card-on-file must be provably attached before
@@ -285,19 +342,33 @@ An `invoice_payments` row `P` qualifies for an autopay attempt on a given tick i
 
 1. `AUTOPAY_ENABLED` is on (I1) — else the engine no-ops entirely.
 2. `P.dueDate` is non-null and `<= now` (due date arrived). A null-due installment never autopays.
-3. `P`'s invoice is **not** `void` and **not** `draft` (excluded exactly as the Phase 22 overdue scan
-   excludes them — a void/reissued invoice must never trigger a charge).
+3. `P`'s invoice status is on the **collectible ALLOWLIST** — `invoice.status IN ('sent',
+   'partially_paid', 'overdue')` — the exact precedent of the invoice-reminder / dunning scan
+   (`sequences.ts:506`), **not** a `void`/`draft` blocklist. An allowlist **fails closed**: any
+   present-or-future status not explicitly listed (`draft`, `void`, `paid`, a status added later)
+   never triggers a charge, whereas a blocklist would silently start auto-charging any new status
+   nobody remembered to exclude. (Rev-1 cited "the Phase 22 overdue scan" and a void/draft blocklist —
+   both corrected here per MINOR-3 / MINOR-8.)
 4. `P` is **unsettled and payable**: `invoicePaymentOpenCents(P) > 0` (which is `0` for
    `paid`/`waived`/`refunded` via `isSettledInvoicePaymentStatus`, `invoice-balances.ts:66`) **and**
    `invoicePaymentClientPayableOpenCents(P, …) > 0`.
 5. `P`'s project has an **`active` `autopay_consents`** row with `consent_version` == current
    `AUTOPAY_CONSENT_VERSION` and a non-null `stripe_payment_method_id` (I9).
-6. **No blocking `autopay_charges` row** for `P`: no row in `charged`, `charging`, `needs_action`, or
-   `failed_terminal`; a `failed_retryable` row qualifies **only** if `attempt_count < max_attempts`
-   **and** `now >= next_attempt_at`.
+6. **No blocking *real* (`dry_run = 0`) `autopay_charges` row** for `P`. This evaluation, and the
+   Layer-2 claim CAS (§6.2), **ignore `dry_run = 1` rows entirely** (`AND dry_run = 0` in every
+   status predicate) — dry-run audit rows never block or get claimed (BLOCKER-2). Among the real rows:
+   a row in `charged`, `charging`, `needs_action`, `failed_terminal`, or `aborted_ineligible` is
+   **blocking**; a `failed_retryable` row qualifies **only** if `attempt_count < max_attempts` **and**
+   `now >= next_attempt_at`; a `skipped_capped` row qualifies **only** if the freshly re-pinned
+   payable is now `<= AUTOPAY_MAX_CHARGE_CENTS` (M3 — a raised cap or a paid-down balance re-opens it;
+   otherwise it stays blocking).
 7. `AUTOPAY_MAX_CHARGE_CENTS` gate: if the payable amount `> AUTOPAY_MAX_CHARGE_CENTS`, the engine does
-   **not** charge — it writes a `skipped_capped` ledger row and alerts Tyler (§7). A fat-fingered large
-   installment can never be silently auto-drained.
+   **not** charge — it writes (or leaves) a `skipped_capped` ledger row and alerts Tyler **once**
+   (§7). A fat-fingered large installment can never be silently auto-drained. **Alert-storm guard
+   (M3):** the alert fires on the *transition into* `skipped_capped` (first observation), not on every
+   hourly re-select of an already-capped row — an already-`skipped_capped` row that is still over-cap
+   is re-skipped silently. Once the cap is raised (or the balance drops) so the payable is `<= cap`,
+   rule 6 makes the row re-claimable and the next tick charges it normally.
 8. `AUTOPAY_PILOT_ALLOWLIST` (if set, §7): `P.project_id` must be in the allowlist. Empty/unset ⇒ all
    consented projects (only relevant once Tyler is past the pilot).
 
@@ -343,30 +414,70 @@ blocks the rest — per-row try/catch, like the sequence runner). For each, run 
 
 ### 6.1 States
 
+> **Mode is read ONCE per tick.** At the top of each tick the engine reads `AUTOPAY_CHARGE_MODE`
+> **exactly once** (BLOCKER-2). Every row processed in that tick uses that single pinned value: a
+> `log_only` tick inserts `dry_run = 1` rows only; a `live` tick inserts `dry_run = 0` rows only. The
+> `dry_run` value is decided **at INSERT** and is **never** re-evaluated per-row mid-tick and **never**
+> mutated afterward.
+
 ```
-        (cron selects a qualifying installment P)
+        (cron selects a qualifying installment P; tick-mode = AUTOPAY_CHARGE_MODE read ONCE at tick start)
                         │
-          INSERT autopay_charges (UNIQUE invoice_payment_id) ON CONFLICT DO NOTHING
+   log_only tick? → INSERT autopay_charges (…, dry_run=1) — a pure audit row OUTSIDE the partial
+        │            unique index; NO Stripe call, EVER; log "WOULD charge $X on installment Y"; done.
+        │            (dry_run rows are never claimed, never promoted — BLOCKER-2)
+        │  live tick:
+        ▼
+          INSERT autopay_charges (…, dry_run=0) ON CONFLICT(invoice_payment_id) WHERE dry_run=0 DO NOTHING
                         │  claimed = (this INSERT created the row)?
         ┌───────────────┴───────────────┐
-       no (a row already exists)        yes → status='pending', dry_run per mode
+       no (a real row already exists)   yes → status='pending', dry_run=0
         │                                        │
-   re-evaluate that row's status               (log_only?  → status stays a dry-run record; NO Stripe call; done)
-   (retry only if failed_retryable              │
-    & attempt<max & now>=next_attempt_at)       │ (live mode)
+   re-evaluate that row's status (M2: an        │
+    orphaned 'pending' non-dry-run row          │
+    PROCEEDS to the CAS claim below;            │
+    retry a 'failed_retryable' only if          │
+    attempt<max & now>=next_attempt_at;         │
+    a 'skipped_capped' only if payable<=cap)    │
         └───────────────┬────────────────────────┘
                         ▼
-     CAS claim:  UPDATE … SET status='charging', attempt_count+1, claim_token=NEW,
-                 idempotency_key=`${id}:${attempt_count+1}`, stripe_payment_method_id=<pinned>,
-                 amount_cents=<pinned open>, updated_at=now
-                 WHERE id=? AND status IN ('pending','failed_retryable')
-                       AND (retry guards)                              ← single statement, atomic in D1
+     CAS claim:  UPDATE … SET status='charging', attempt_count = attempt_count + 1,
+                 claim_token=NEW, idempotency_key = <id> || ':' || (attempt_count + 1)  ← SQL expr, same stmt (M1)
+                 stripe_payment_method_id=<pinned>, amount_cents=<pinned open>,
+                 service_amount_cents=<pinned>, client_fee_cents=<pinned>, updated_at=now
+                 WHERE id=? AND dry_run=0 AND status IN ('pending','failed_retryable','skipped_capped')
+                       AND (retry / cap guards)                        ← single statement, atomic in D1
                         │
      re-read row; proceed ONLY IF status='charging' AND claim_token=OURS  (else another worker owns it → no-op)
                         │
+     ┌──────────────────┴─ §6.2a POST-CLAIM RE-VERIFICATION (MAJOR-1) ──────────────────┐
+     │  re-read installment + invoice + consent; if ANY §5.1 condition no longer holds   │
+     │  (invoice voided, installment manually recorded 'paid', consent revoked, etc.):   │
+     │    CAS  UPDATE … SET status='aborted_ineligible' WHERE id=? AND status='charging'  │
+     │         AND claim_token=OURS   → a provable non-charged terminal; DO NOT POST.     │
+     └──────────────────┬────────────────────────────────────────────────────────────────┘
+                        │  (all conditions still hold)
+     ┌──────────────────┴─ §6.2b CROSS-CHANNEL RESOLUTION (BLOCKER-1) ─────────────────────┐
+     │  if payment.stripeCheckoutSessionId set AND stripeCheckoutStatus='link_ready':      │
+     │    GET the session at Stripe (fetchStripeCheckoutSessionReturnUrls,                 │
+     │        stripe-checkout.ts:87-106 → {status}):                                        │
+     │      • status='complete' → the client already paid the manual link. DO NOT charge;  │
+     │        CAS row → 'aborted_ineligible' (non-charged terminal) and let/force the       │
+     │        settle path run to record it. (Prevents autopay double-charging a paid tab.) │
+     │      • status='open'     → EXPIRE it first (expireStripeCheckoutSessionById,         │
+     │        stripe-checkout.ts:112-125) so the hosted tab can never be completed later,   │
+     │        THEN proceed to POST. (Prevents a late manual completion after we charge.)    │
+     │      • status='expired'/null → already uncompletable; proceed to POST.               │
+     └──────────────────┬─────────────────────────────────────────────────────────────────┘
+                        │
      POST /v1/payment_intents  (off_session:true, confirm:true, customer, payment_method,
-                 amount=<pinned amount_cents>, currency, metadata[invoice_payment_id/charge_id/...],
+                 amount=<pinned amount_cents>, currency,
+                 metadata[autopay_charge_id/invoice_payment_id/invoice_id/project_id],
+                 metadata[service_amount_cents]=<pinned>, metadata[client_fee_cents]=<pinned>,  ← MAJOR-2
                  Idempotency-Key: <pinned idempotency_key>)
+                        │
+     (persist stripe_payment_intent_id on the row, token-guarded, the moment the POST returns ANY
+      PI object — including an error body that carries one — MAJOR-3)
                         │
         ┌───────────────┼───────────────────────────┬─────────────────────────┐
    succeeded          requires_action        card declined (provable)     network throw / 5xx / timeout
@@ -381,27 +492,94 @@ blocks the rest — per-row try/catch, like the sequence runner). For each, run 
 
 ### 6.2 The claim (D1 has no transactions — single-statement CAS)
 
-- **Layer 1 — one row per installment, ever.** `INSERT INTO autopay_charges (…, status)
-  VALUES (…, 'pending') ON CONFLICT(invoice_payment_id) DO NOTHING` and check whether the row was
-  created (drizzle `.returning()` length, like `insertLedger`, `sequences.ts:344-345`). Two concurrent
-  cron ticks racing the same fresh installment: **exactly one** INSERT wins; the loser sees the
-  existing row and re-evaluates it (it will be `charging`/`charged` → skip). This alone prevents two
-  *first* charges.
-- **Layer 2 — per-attempt CAS claim with a claim token.** To move `pending`(or a retry-eligible
-  `failed_retryable`) → `charging`, issue **one** `UPDATE … SET status='charging', claim_token=<new
-  uuid>, idempotency_key=<pinned>, amount_cents=<pinned>, attempt_count=attempt_count+1
-  WHERE id=? AND status IN ('pending','failed_retryable') AND <retry guards>`. Then **re-read** and
-  proceed to the network call **only if** `status='charging' AND claim_token` equals ours. A loser's
-  UPDATE matches 0 rows (status already `charging`) → its re-read shows a foreign token → it does
-  **not** POST. This is the exact winner-detection the refund path uses
+- **Layer 1 — one *real* row per installment, ever.** `INSERT INTO autopay_charges (…, status,
+  dry_run) VALUES (…, 'pending', 0) ON CONFLICT(invoice_payment_id) WHERE dry_run = 0 DO NOTHING` and
+  check whether the row was created (drizzle `.returning()` length, like `insertLedger`,
+  `sequences.ts:344-345`). The conflict target is the **partial** index `WHERE dry_run = 0`, so
+  pre-existing `dry_run = 1` audit rows are **invisible** to it and never suppress the real INSERT
+  (BLOCKER-2). Two concurrent *live* cron ticks racing the same fresh installment: **exactly one**
+  INSERT wins; the loser sees the existing real row and re-evaluates it. **M2 — orphaned-pending
+  resolution:** on INSERT-conflict, if the existing real row is `pending` (a prior tick claimed the
+  row's existence but crashed before the Layer-2 CAS), the loser **proceeds to the Layer-2 CAS claim
+  below** — a `pending` non-dry-run row is claimable, not a dead end. (Only `charging`/`charged`/
+  terminal rows short-circuit to skip.) This alone prevents two *first* charges while never stranding
+  a half-claimed row.
+- **Layer 2 — per-attempt CAS claim with a claim token.** To move `pending` (or a retry-eligible
+  `failed_retryable`, or a now-under-cap `skipped_capped`) → `charging`, issue **one**
+  `UPDATE … SET status='charging', claim_token=<new uuid>, idempotency_key=<id> || ':' ||
+  (attempt_count + 1), amount_cents=<pinned>, service_amount_cents=<pinned>, client_fee_cents=<pinned>,
+  stripe_payment_method_id=<pinned>, attempt_count = attempt_count + 1
+  WHERE id=? AND dry_run = 0 AND status IN ('pending','failed_retryable','skipped_capped') AND <retry /
+  cap guards>`. The `AND dry_run = 0` is mandatory (BLOCKER-2) — the CAS can **never** claim a dry-run
+  audit row. The `idempotency_key` and `attempt_count` are computed **in this one statement** so the
+  key's attempt suffix always matches the incremented count (M1) — never JS-computed from a pre-read
+  that could drift. Then **re-read** and proceed **only if** `status='charging' AND claim_token` equals
+  ours. A loser's UPDATE matches 0 rows (status already `charging`) → its re-read shows a foreign
+  token → it does **not** POST. This is the exact winner-detection the refund path uses
   (`stripe-refund-initiation.ts:438-465`) — a plain status re-read is insufficient because both racers
   would read `charging`; the **token** is what identifies the single winner.
 
+#### 6.2a Post-claim re-verification (MAJOR-1 — close the TOCTOU window)
+
+The Layer-2 CAS guards **only** `autopay_charges.status`. Between the §5.1 eligibility SELECT and the
+PI POST the world can change: the installment can be **manually recorded `paid`**, the invoice
+**voided/reissued**, or **consent revoked** — none of which the status-only CAS notices. The refund
+precedent re-checks after winning the claim (`stripe-refund-initiation.ts:467-489`, step 8b); rev-1
+cited the pattern but dropped the step. **Mandate:** after the re-read confirms `status='charging' AND
+claim_token=OURS`, and **before** the POST, **re-read the installment + its invoice + the consent** and
+re-evaluate every §5.1 condition (invoice on the collectible allowlist, installment still open/payable,
+active consent with current `consent_version` + a `pm_…`). If **any** no longer holds, CAS the row to a
+**provably non-charged terminal**:
+`UPDATE … SET status='aborted_ineligible', last_error=<reason>, updated_at=now WHERE id=? AND
+status='charging' AND claim_token=<ours>` — and **do not POST**. Only when every condition still holds
+does the engine continue to §6.2b.
+
+#### 6.2b Cross-channel resolution — the manual checkout link stays live (BLOCKER-1)
+
+The manual per-installment checkout channel is **not** torn down when autopay is on, so the **same
+installment** has two live payment paths. Two double-charge hazards, both real:
+
+1. **Manual pays first, autopay claims before the webhook lands.** Client pays the manual Stripe link
+   at T0; the `checkout.session.completed` webhook is delayed (minutes–hours); the hourly cron at
+   T0+1h still sees the installment `open`/`pending` in the CRM → claims it → issues a **second real
+   charge**.
+2. **Autopay charges while a hosted checkout tab is still open.** Autopay charges at the due date while
+   the client has a still-open Stripe-hosted checkout page (sessions live ~24h; merely hiding the
+   `/portal` link post-settle does **not** invalidate the hosted page) → the client later completes it
+   → a **second charge**.
+
+`UNIQUE(external_payment_id)` (`migrations/0029`) prevents double-**recording**, not double-**charging**
+— the second webhook hits the already-paid ignore branch (`stripe-checkout.ts:487-499`) and today is
+**silently swallowed**. Two mandated fixes:
+
+- **Pre-POST session resolution (in §6.2b of the state machine, after §6.2a passes):** if
+  `payment.stripeCheckoutSessionId` is set **and** `payment.stripeCheckoutStatus === "link_ready"`,
+  **GET the session at Stripe** using the existing read helper `fetchStripeCheckoutSessionReturnUrls`
+  (`stripe-checkout.ts:87-106`, which returns `status ∈ {"open","complete","expired"}`):
+  - `status === "complete"` → the client already paid via the manual link. **Do NOT charge.** CAS the
+    row to `aborted_ineligible` (release the claim to a non-charged terminal) and **let/force the
+    settle path run** so the manual payment is recorded (it converges the installment to `paid`
+    normally).
+  - `status === "open"` → **expire it first** via the existing `expireStripeCheckoutSessionById`
+    (`stripe-checkout.ts:112-125`) so the hosted tab becomes uncompletable, **then** POST the
+    PaymentIntent. No residual completion path can fire a second charge afterward.
+  - `status === "expired"` (or the read returns null / no session) → already uncompletable; proceed to
+    POST.
+- **Settle-path already-paid branch must distinguish replay from a real second charge (§6.5).** The
+  branch at `stripe-checkout.ts:487-499` currently treats *every* event for an already-`paid`
+  installment as a silent no-op. The autopay sibling recorder MUST instead compare the incoming
+  `pi_…`/`external_payment_id` against the one already recorded on the installment: **same** id → a
+  true idempotent replay (no-op, as today); **different** id arriving for an already-paid installment →
+  **money moved twice** → raise a **CRITICAL** alert and flag the row as a **Phase 9b refund
+  candidate** (the second charge must be refunded) — never silently ignored.
+
 ### 6.3 The Stripe idempotency key strategy
 
-- The key for the current attempt = **`${autopay_charges.id}:${attempt_count}`** (pinned in the
-  claiming UPDATE **before** the network call — never regenerated for the same attempt). Stripe
-  idempotency keys dedupe for ~24h.
+- The key for the current attempt = **`${autopay_charges.id}:${attempt_count}`**, **materialized by
+  the claiming UPDATE itself** — the statement sets `idempotency_key = id || ':' || (attempt_count +
+  1)` in the **same** UPDATE that increments `attempt_count`, so the stored key's suffix is always the
+  post-increment count and can never drift from a stale JS pre-read (M1). It is pinned **before** the
+  network call and never regenerated for the same attempt. Stripe idempotency keys dedupe for ~24h.
 - **Within one attempt** (crash between claim and terminal update, a retried cron tick, a duplicated
   request): re-sending with the **same** pinned key returns Stripe's original result — no second
   charge. This is the crash/retry guarantee.
@@ -410,8 +588,17 @@ blocks the rest — per-row try/catch, like the sequence runner). For each, run 
   confirmed decline is not money movement) and Stripe would reject reusing the old key with different
   parameters anyway.
 - The PaymentIntent carries `metadata[autopay_charge_id]`, `metadata[invoice_payment_id]`,
-  `metadata[invoice_id]`, `metadata[project_id]` so the webhook reconciles precisely, and
-  `off_session: true` + `confirm: true` so it charges without the customer present.
+  `metadata[invoice_id]`, `metadata[project_id]` so the webhook reconciles precisely, **plus
+  `metadata[service_amount_cents]` and `metadata[client_fee_cents]` — the split frozen at claim time**
+  (MAJOR-2), mirroring exactly how the manual checkout pins `metadata[service_open_cents]` at mint
+  (`stripe-checkout.ts:364`). The recorder (§6.5) consumes these pinned values and **never re-derives
+  the split at webhook time.** `off_session: true` + `confirm: true` so it charges without the
+  customer present.
+- **Persist the PI id immediately (MAJOR-3).** The synchronous POST handler writes
+  `stripe_payment_intent_id` onto the row **token-guarded** (`WHERE id=? AND claim_token=<ours>`) the
+  moment the POST returns **any** PI object — including a decline/error body that still carries a
+  `pi_…`. Without this, a later webhook (or reconcile) for that PI cannot be matched to its row, and
+  the out-of-order CAS guards in §6.5 (which key on `stripe_payment_intent_id`) have nothing to match.
 - **Final DB backstop (I3 layer 4):** the webhook recorder writes `invoice_payments.externalPaymentId
   = pi_…`, and `idx_invoice_payments_external_payment_unique`
   (`migrations/0029_unique_external_payment_ids.sql`) makes recording the same PI against two
@@ -429,31 +616,67 @@ blocks the rest — per-row try/catch, like the sequence runner). For each, run 
   re-POST): a new `getAutopayChargeReconciliation()` mirroring
   `getRefundInitiationReconciliation` (`stripe-refund-initiation.ts:564-614`) surfaces:
   (1) a `charging` row older than ~1h → **"autopay charge stuck in-flight — reconcile against
-  Stripe"** (query Stripe by the pinned idempotency key or `metadata[autopay_charge_id]` to learn
-  whether the PI exists/succeeded, then hand-resolve the row); (2) a `charged` row with no matching
-  recorded `invoice_payments` (webhook never landed) older than ~24h → **"autopay charge not
-  reconciled"**. Both feed `computeSystemHealth` as CRITICAL signals with per-row `alertKey`s
-  (mirror `critical:refund_stuck:${id}`, `system-health.ts:404`), so a stuck charge pages Tyler.
+  Stripe"**; (2) a `charged` row with no matching recorded `invoice_payments` (webhook never landed)
+  older than ~24h → **"autopay charge not reconciled"**; (3) **MINOR-5 — a `pending` consent row with
+  a non-null `setup_intent_id` (`seti_…`) older than ~1h → a WARN "autopay consent stuck pending"
+  tripwire** (the SetupIntent likely succeeded/failed but no webhook attached it; a card may be
+  saved-but-unlinked or the client is stranded mid-flow). WARN, not CRITICAL — no money is at risk, but
+  it must not sit silently.
+- **How to query Stripe for a stuck `charging` row (MINOR-1):** Stripe has **no** "get by idempotency
+  key" API, so **do not** attempt one. Reconcile by either (a) the row's `stripe_payment_intent_id`
+  (persisted per MAJOR-3) via `GET /v1/payment_intents/:id` if present, or (b)
+  `GET /v1/payment_intents/search?query=metadata['autopay_charge_id']:'<id>'` to discover whether a PI
+  was created and its status. Then **hand-resolve** the row along one of the **enumerated legal manual
+  transitions** (no other transition is permitted from `charging`):
+  - PI found `succeeded` → CAS `charging → charged` and re-drive the settle recorder (records the
+    installment `paid`).
+  - PI found `requires_action` → CAS `charging → needs_action` (manual on-session fallback, §6.6).
+  - PI found `canceled` / a confirmed decline / **no PI exists at all** (POST never reached Stripe) →
+    CAS `charging → failed_retryable` (if under the attempt cap) or `failed_terminal` (manual
+    fallback). "No PI exists" is the only case where re-charging is safe, and even then it goes through
+    a fresh claim/attempt, never a blind re-POST of the stuck row.
+  Both money-relevant signals (1) and (2) feed `computeSystemHealth` as CRITICAL with per-row
+  `alertKey`s (mirror `critical:refund_stuck:${id}`, `system-health.ts:404`); signal (3) feeds a WARN
+  key. A stuck charge pages Tyler.
 
 ### 6.5 Webhook reconciliation → converge invoice state (reuse the existing path)
 
 Extend `handleStripeCheckoutWebhook`'s dispatch (`stripe-checkout.ts:704-727`) to route:
 
+- **A `payment_intent.succeeded` (or `payment_intent.payment_failed`) WITHOUT
+  `metadata.autopay_charge_id` is IGNORED (test (c)).** Once the Dashboard subscribes PI events,
+  ordinary manual-checkout PIs also emit `payment_intent.succeeded`; the autopay handlers key **only**
+  on `metadata.autopay_charge_id` and treat a non-autopay PI as out of scope — it is neither a
+  `stripe-webhook` failure nor an autopay success (the manual checkout path continues to record via
+  `checkout.session.completed` as today). No canonical write, no heartbeat drift.
 - **`payment_intent.succeeded`** where `metadata.autopay_charge_id` is present →
-  `recordAutopayPaymentIntentSucceeded(pi)`: find the `autopay_charges` row, mark `charged`; then
-  record the installment through the **same convergence as the checkout settle**
-  (`stripe-checkout.ts:526-585`): set `invoice_payments.status='paid'`, `paidAmountCents` =
-  service portion, fee split, `externalPaymentId = pi.id`, recompute the invoice with
+  `recordAutopayPaymentIntentSucceeded(pi)`. Every row transition here is a **single-statement CAS**
+  (MAJOR-3). **Success is convergent-idempotent:** move the row to `charged`
+  `UPDATE … SET status='charged', charged_at=now WHERE id=? AND status IN ('charging','charged')` (so
+  a replay or an out-of-order arrival converges rather than throws), then record the installment
+  through the **same convergence as the checkout settle** (`stripe-checkout.ts:526-585`): set
+  `invoice_payments.status='paid'`, `paidAmountCents = service_amount_cents` and `clientFeeCents =
+  client_fee_cents` **read from the pinned `autopay_charges` row / PI metadata (MAJOR-2), never
+  re-derived at webhook time**, `externalPaymentId = pi.id`, recompute the invoice with
   `reconciledInvoicePaymentStatus`, and `autoAdvanceProjectStageForRetainerPayment`. **Idempotent
-  replay** = no-op on an already-`paid` installment (the exact guard at `stripe-checkout.ts:487-499`).
-  Reuse — do not re-derive — the amount/fee arithmetic (I7).
-- **`payment_intent.payment_failed`** with `metadata.autopay_charge_id` → read the failure code: a
-  provable decline (`card_declined`, `insufficient_funds`, `expired_card`, …) → `failed_retryable`
-  (schedule `next_attempt_at`) or `failed_terminal` if at the attempt cap (§6.6);
-  `authentication_required` → `needs_action` (§6.6). The `payment_intent.succeeded` path is
-  authoritative for money-recording even if the synchronous POST response was ambiguous — so a
-  `charging` row that later receives `payment_intent.succeeded` converges to `charged`+recorded (the
-  ambiguity resolves itself the moment the webhook lands, and reconciliation only fires if it doesn't).
+  replay of the SAME `pi_…`** = no-op on an already-`paid` installment. **A DIFFERENT `pi_…` for an
+  already-`paid` installment (BLOCKER-1)** = money moved twice → **CRITICAL** alert + flag as a Phase
+  9b refund candidate, **not** the silent ignore of `stripe-checkout.ts:487-499`. Reuse — do not
+  re-derive — the amount/fee arithmetic (I7).
+- **`payment_intent.payment_failed`** with `metadata.autopay_charge_id` → read the failure code and
+  apply a **token/PI-guarded single-statement CAS** so a stale, out-of-order failure can never regress
+  a superseded attempt (MAJOR-3):
+  `UPDATE … SET status=<failed_retryable|failed_terminal|needs_action>, … WHERE id=? AND
+  status='charging' AND stripe_payment_intent_id=<this event's pi id>`. Because the guard pins **both**
+  `status='charging'` **and** the specific `stripe_payment_intent_id`, a late `payment_failed` for a
+  **superseded** attempt (e.g. attempt-1 PI-A declines days later, after attempt-2 PI-B already carried
+  the row to `charged`) matches **0 rows → a no-op** — it cannot regress `charged → failed_retryable`
+  and trigger a third charge. A provable decline (`card_declined`, `insufficient_funds`,
+  `expired_card`, …) → `failed_retryable` (schedule `next_attempt_at`) or `failed_terminal` at the cap
+  (§6.6); `authentication_required` → `needs_action` (§6.6). The `payment_intent.succeeded` path is
+  authoritative for money-recording even if the synchronous POST response was ambiguous — a `charging`
+  row that later receives `payment_intent.succeeded` converges to `charged`+recorded (the ambiguity
+  resolves itself the moment the webhook lands; reconciliation only fires if it doesn't).
 - These events ride the **already-verified** `stripe-webhook` heartbeat key (money-state-drift ⇒
   CRITICAL, `system-health.ts:118`); pre-verification rejects stay on `stripe-webhook-rejected`
   (`stripe/webhook/route.ts:28,55-59`). No new webhook endpoint, no new bypass-list entry (I5).
@@ -470,6 +693,13 @@ Extend `handleStripeCheckoutWebhook`'s dispatch (`stripe-checkout.ts:704-727`) t
   (the customer isn't present). Mark `needs_action` **immediately** (no off-session retry — it would
   deterministically re-fail), fall back to the **manual on-session checkout link** (where the client
   *can* authenticate), and notify. This is the standard Stripe off-session→on-session recovery.
+- **Cancel the residual PI before the manual fallback (MINOR-2).** Whenever the engine gives up
+  off-session and hands the installment back to the manual checkout link (`needs_action` /
+  `failed_terminal`), it MUST first **cancel any still-cancelable PaymentIntent**
+  (`POST /v1/payment_intents/:id/cancel`, using the row's `stripe_payment_intent_id`) so there is
+  **no residual completion path**: an `authentication_required` PI left open could otherwise later be
+  confirmed by the client *and* charged via the fresh manual link → a double charge. Cancel is a no-op
+  / benign error if the PI is already in a terminal state; the mint proceeds regardless.
 - **`insufficient_funds`** is treated as retryable (transient) up to the cap; a hard decline
   (`card_declined` with a terminal `decline_code` like `stolen_card`/`lost_card`) short-circuits to
   `failed_terminal` + manual fallback (no point retrying a dead card).
@@ -486,7 +716,7 @@ strict**, modeled on `refundInitiationEnabled` / `financeRefundRecordingMode` (`
 | Flag | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `AUTOPAY_ENABLED` | strict `=== "1"` | **off** | Master. Off ⇒ total no-op (I1): no consent UI, SetupIntent route no-ops, cron selects nothing, schema unread. **Tyler-only flip #1.** |
-| `AUTOPAY_CHARGE_MODE` | three-state (`log_only` \| `live`), like `financeRefundRecordingMode` | **`log_only`** | `log_only`: engine runs, selects, writes `dry_run=1` would-charge ledger rows + logs "WOULD charge $X on installment Y" — **zero Stripe charge calls, zero client emails**. `live`: real off-session charges. Any unset/typo → `log_only` (fail-safe). **Tyler-only flip #2 — the first live charge.** |
+| `AUTOPAY_CHARGE_MODE` | **two-state** (`log_only` \| `live`), read like `financeRefundRecordingMode` | **`log_only`** | `log_only`: engine runs, selects, writes `dry_run=1` would-charge ledger rows + logs "WOULD charge $X on installment Y" — **zero Stripe charge calls, zero client emails**. `live`: real off-session charges. Any unset/typo → `log_only` (fail-safe). **Read exactly ONCE at tick start** and pinned into every row's `dry_run` at INSERT (§6.1, BLOCKER-2) — never re-read per row mid-tick. **Tyler-only flip #2 — the first live charge.** |
 | `AUTOPAY_MAX_CHARGE_CENTS` | integer cents | e.g. `100000` ($1,000) | Per-charge hard ceiling. Payable above it ⇒ `skipped_capped` + alert, never charged (§5.1 rule 7). |
 | `AUTOPAY_PILOT_ALLOWLIST` | comma-sep project ids | unset (= all) | When set, only listed projects auto-charge — a controlled first-live pilot on one friendly client. |
 | `AUTOPAY_MAX_ATTEMPTS` | integer | `3` | Retry cap (I8). |
@@ -499,7 +729,18 @@ after a clean cycle does he flip `AUTOPAY_CHARGE_MODE=live`, initially with a lo
 `AUTOPAY_MAX_CHARGE_CENTS` and a one-project `AUTOPAY_PILOT_ALLOWLIST`. This is the money-math gate,
 directly analogous to Phase 9a's `record_only → enforce` observation window (`finance-flags.ts:1-13`).
 
-**Dark deploy (Tyler's machine — the remote env has no Cloudflare creds, `handoff §5`):**
+**The money-gate ordering is load-bearing (M5).** The **Fable money-math + idempotency review of the
+diff (Guardrail 3) gates the MERGE/DEPLOY** — it happens **before** any migration, deploy, or flag
+flip, so no code that could move money ever ships, and the review **never sits after real-client
+consent has been captured**. The sequence is therefore, strictly in order:
+
+**Step 0 — Fable diff review (Guardrail 3), the MERGE/DEPLOY gate.** The hardest money-math +
+idempotency review runs against the diff **before** it is merged/deployed. Only a passing review
+unlocks the dark deploy below. (Rev-1 placed this review as runbook step 4 — *after* consent capture
+and a `log_only` cycle; corrected here.)
+
+**Dark deploy (Tyler's machine — the remote env has no Cloudflare creds, `handoff §5`; only after Step
+0 passes):**
 1. Apply migration `0099` to D1 (additive, `CREATE TABLE IF NOT EXISTS`; inert while dark).
 2. `npm run deploy` (app Worker via OpenNext) — ships the routes/engine **inert** (`AUTOPAY_ENABLED`
    off ⇒ every path no-ops).
@@ -510,13 +751,15 @@ directly analogous to Phase 9a's `record_only → enforce` observation window (`
 1. Confirm `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` are set; confirm the Stripe Dashboard webhook
    subscribes `setup_intent.succeeded`, `setup_intent.setup_failed`, `payment_intent.succeeded`,
    `payment_intent.payment_failed` (in addition to the existing checkout events).
-2. Set `AUTOPAY_ENABLED=1`. **Consent capture goes live; the charge engine is still `log_only`.** Have
-   a test/friendly client turn on autopay; confirm the SetupIntent succeeds, the card shows on the
-   consent row (last4/brand only — I4), and `autopay.consent_granted` is logged.
-3. **Watch a full billing cycle in `log_only`.** Confirm the engine writes `dry_run` would-charge rows
-   for the right installments, right amounts, right dates; confirm **no** Stripe charge and **no**
+2. **Flag on, `log_only`.** Set `AUTOPAY_ENABLED=1` (charge engine stays `log_only` by default).
+   **Consent capture goes live.** Have a test/friendly client turn on autopay; confirm the SetupIntent
+   succeeds, the card shows on the consent row (last4/brand only — I4), and `autopay.consent_granted`
+   is logged.
+3. **Observe a full billing cycle in `log_only`.** Confirm the engine writes `dry_run` would-charge
+   rows for the right installments, right amounts, right dates; confirm **no** Stripe charge and **no**
    client email fired. Reconcile the dry-run ledger against what a human would have charged.
-4. **Fable money-math + idempotency review of the diff** (Guardrail 3) — the hardest gate.
+4. **Tyler's explicit go.** Only after a clean observation cycle does Tyler authorize the first live
+   charge (Guardrail 2 — money movement pauses for Tyler).
 5. **First live charge:** set a low `AUTOPAY_MAX_CHARGE_CENTS`, set `AUTOPAY_PILOT_ALLOWLIST` to one
    project, then flip `AUTOPAY_CHARGE_MODE=live`. Watch the single charge end-to-end: PI succeeds →
    `payment_intent.succeeded` → installment `paid` → invoice recomputed → receipt emailed. Confirm the
@@ -525,18 +768,32 @@ directly analogous to Phase 9a's `record_only → enforce` observation window (`
    log_only`** (instant, no redeploy — stops all real charges while consent/observation continue) or
    `AUTOPAY_ENABLED` unset (full revert).
 
+**`AUTOPAY_CONSENT_VERSION` bumps are money-halting — pair every bump with a health signal (MINOR-7).**
+Bumping `AUTOPAY_CONSENT_VERSION` (§4.2) **silently disqualifies every existing active consent** from
+charging (I9 requires an exact version match) until each client re-consents — i.e. a bump **halts all
+autopay charging**. So a bump is a deliberate, announced operation, and the health surface MUST expose a
+signal: **count of active consents whose `consent_version` != the current `AUTOPAY_CONSENT_VERSION`**
+(WARN when non-zero) so a bump can never quietly stop the money. Runbook note: never bump the version
+without first confirming this signal is watched and planning the re-consent prompt.
+
 ---
 
 ## 8. Client-facing transparency (emails — gated + justified)
 
 **Decision: every autopay client email is gated on BOTH `EMAIL_SENDING_ENABLED` AND `AUTOPAY_ENABLED`,
-runs through the canonical transport (`sendSequenceEmail`/`email.ts`), respects
-`isEmailSuppressed`, and is SUPPRESSED ENTIRELY in `log_only` mode.** Justification: these are
+respects `isEmailSuppressed`, and is SUPPRESSED ENTIRELY in `log_only` mode.** Justification: these are
 autonomous outbound emails, so they fall under the same email-pause guardrail (Guardrail 2) as every
-other outbound send — `EMAIL_SENDING_ENABLED` is the existing master gate
-(`email-send-guard.test.ts`, `project-communications.ts`) and must not be bypassed. And in `log_only`
-mode **nothing is actually charged**, so sending "we charged your card" (a lie) or "we'll charge you
-in 3 days" (also untrue) would be wrong — client emails only fire in `live` mode.
+other outbound send — `EMAIL_SENDING_ENABLED` is the existing master gate and must not be bypassed. And
+in `log_only` mode **nothing is actually charged**, so sending "we charged your card" (a lie) or "we'll
+charge you in 3 days" (also untrue) would be wrong — client emails only fire in `live` mode.
+
+> ⚠️ **The gate must be enforced INSIDE the new autopay email helper (M4).** The canonical sequence
+> transport `sendSequenceEmail` does **not** consult `EMAIL_SENDING_ENABLED` — only the Phase 14 admin
+> approved-send path checks it (`emailSendingEnabled()`, `project-communications.ts:552-554`). So it is
+> **wrong** to assume "runs through `sendSequenceEmail` ⇒ gated." The autopay email helper MUST itself
+> call `emailSendingEnabled()` (fail-closed) **and** check `AUTOPAY_ENABLED`, the `log_only`
+> suppression, and `isEmailSuppressed` **before** it hands anything to `sendSequenceEmail`. Test 29
+> asserts the gate **at this helper layer** (not at the transport).
 
 Two emails, both reusing the sequence/transport infra (Resend, suppression-checked):
 
@@ -620,15 +877,21 @@ prints after "Compiled successfully" and exits 1), `npm run lint` clean, then `n
     `off_session:true`, `confirm:true`, `Idempotency-Key = ${chargeId}:1`, pinned amount; row →
     `charging`. Then `payment_intent.succeeded` webhook → installment `paid`, invoice recomputed,
     stage advanced, row → `charged`, one receipt email.
-16. **Concurrent cron (two ticks, same fresh installment):** exactly **one** `autopay_charges` row
-    exists (`UNIQUE(invoice_payment_id)`); exactly **one** `POST /v1/payment_intents`; the losing
-    tick's claim UPDATE matches 0 rows / foreign token and makes no charge call.
+16. **Concurrent cron (two ticks, same fresh installment):** exactly **one** *real* (`dry_run=0`)
+    `autopay_charges` row exists (the partial `UNIQUE(invoice_payment_id) WHERE dry_run=0`); exactly
+    **one** `POST /v1/payment_intents`; the losing tick's claim UPDATE matches 0 rows / foreign token
+    and makes no charge call.
 17. **Crash/retry within an attempt:** simulate the POST resolving but the terminal UPDATE never
     running (row stuck `charging`); a later tick does **NOT** re-POST (never auto-retry a `charging`
     row); the reconcile tripwire surfaces it after ~1h.
-18. **Idempotency key reuse within an attempt:** re-invoking the charge for the same `charging` row
-    with the same pinned key is a no-op / returns Stripe's original result (assert no second distinct
-    charge).
+18. **Idempotency key is pinned once per attempt, and a `charging` row is never re-POSTed
+    (reframed — MINOR-4).** The rev-1 wording ("re-invoke the charge for the same `charging` row")
+    contradicted the invariant that *a `charging` row is NEVER re-POSTed*. Instead assert: (a) the
+    claiming UPDATE sets `idempotency_key = ${chargeId}:${attempt_count+1}` and the column is **not**
+    mutated again for that attempt; (b) the engine, encountering an existing `charging` row on a later
+    tick, makes **zero** `api.stripe.com` calls (no re-POST — it defers to §6.4 reconcile); (c) the
+    key's *stability* is what makes Stripe dedupe a genuine transport-level retry **within** the single
+    claim window, so no second distinct charge can be created for one attempt.
 19. **Double-record backstop:** attempting to record the same `pi_…` against a second installment is
     rejected by `idx_invoice_payments_external_payment_unique` — assert the second record throws /
     no-ops, no double `paid`.
@@ -664,15 +927,56 @@ prints after "Compiled successfully" and exits 1), `npm run lint` clean, then `n
     (proves no forked money math).
 
 ### 10.8 Email gating (§8)
-29. `EMAIL_SENDING_ENABLED` off → **zero** autopay emails regardless of charges. `log_only` mode →
-    **zero** emails even with `EMAIL_SENDING_ENABLED` on. `live` + `EMAIL_SENDING_ENABLED` on →
-    upcoming-notice (once per installment, idempotent) + receipt (once per charge, idempotent);
-    suppressed recipient → no send.
+29. **Gate asserted at the autopay-helper layer (M4).** With `EMAIL_SENDING_ENABLED` off → **zero**
+    autopay emails regardless of charges — assert the *autopay email helper itself* short-circuits
+    (i.e. it calls `emailSendingEnabled()` and returns before invoking `sendSequenceEmail`), **not**
+    that the transport blocked it (the transport does not enforce the gate). `log_only` mode → **zero**
+    emails even with `EMAIL_SENDING_ENABLED` on. `live` + `EMAIL_SENDING_ENABLED` on → upcoming-notice
+    (once per installment, idempotent) + receipt (once per charge, idempotent); suppressed recipient →
+    no send.
 
 ### 10.9 Reconciliation tripwires
 30. `getAutopayChargeReconciliation`: a `charging` row > ~1h old → "stuck in-flight" signal with a
     per-row CRITICAL `alertKey`; a `charged` row with no recorded `paid` installment > ~24h → "not
-    reconciled" signal. Fresh rows → no signal.
+    reconciled" signal; a `pending` consent with a `seti_…` > ~1h old → a WARN "consent stuck pending"
+    signal (MINOR-5). Fresh rows → no signal.
+
+### 10.10 Rev-2 review additions (cross-channel, TOCTOU, out-of-order, log_only→live)
+31. **Cross-channel double charge — both orderings (BLOCKER-1, test (a)).**
+    (i) *Manual pays first, webhook delayed:* the installment has a `link_ready` session whose Stripe
+    status is `complete`; the tick's §6.2b GET sees `complete` → the row is CAS'd `aborted_ineligible`,
+    **zero** `POST /v1/payment_intents`, and the settle path records the manual payment.
+    (ii) *Open hosted tab at charge time:* the session status is `open`; the tick calls
+    `expireStripeCheckoutSessionById` **before** the PI POST (assert the expire call precedes the
+    charge call); a subsequent attempt to complete the (now expired) session settles nothing.
+    (iii) *Different-PI after paid:* a `payment_intent.succeeded` carrying a **different** `pi_…` for an
+    already-`paid` installment → **CRITICAL** alert + refund-candidate flag, **not** a silent no-op;
+    a **same**-`pi_…` replay → silent no-op.
+32. **Post-claim ineligibility before POST (MAJOR-1, test (b)).** For each of: invoice **voided**
+    after claim; installment **manually recorded `paid`** after claim; **consent revoked** after claim
+    — the §6.2a re-verification CASes the row to `aborted_ineligible` and makes **zero**
+    `POST /v1/payment_intents` calls.
+33. **Non-autopay PI event ignored (test (c)).** A `payment_intent.succeeded` (ordinary manual-checkout
+    PI, once the Dashboard subscribes PI events) **without** `metadata.autopay_charge_id` → the autopay
+    handler no-ops: no `autopay_charges` write, and it is recorded as **neither** a `stripe-webhook`
+    failure **nor** an autopay success (heartbeat unchanged).
+34. **`log_only` cycle then live flip with pre-existing dry-run rows (BLOCKER-2, test (d)).** Run a
+    full `log_only` cycle (writes one-or-more `dry_run=1` rows for installment P), then flip to `live`:
+    the live tick INSERTs **exactly one** `dry_run=0` row for P (partial index does not collide),
+    issues **exactly one** real charge, and **zero** `dry_run=1` rows are mutated/claimed/promoted.
+35. **Re-consent while an active consent exists (M6, test (e)).** A second `setup_intent.succeeded` for
+    a project that already has an `active` consent → the handler first CAS-revokes the prior active row,
+    then activates the new one; assert the partial `UNIQUE(project_id) WHERE status='active'` never
+    throws and exactly one active consent remains. Simulate a crash **between** the two statements →
+    **zero** active consents (fail-safe), no index violation loop.
+36. **Late `payment_failed` for a superseded PI vs a `charged` row → no-op (MAJOR-3, test (f)).** A row
+    is `charged` via PI-B; a late `payment_intent.payment_failed` for PI-A (a superseded earlier
+    attempt) arrives → the PI-guarded CAS matches **0 rows**, the row stays `charged`, and **no** new
+    charge/claim is triggered.
+37. **`skipped_capped` then cap raised (M3, test (g)).** An over-cap installment → `skipped_capped` +
+    one alert; a later tick with the **same** cap re-skips it **silently** (no second alert, no state
+    churn); after `AUTOPAY_MAX_CHARGE_CENTS` is raised above the payable, the next tick re-claims the
+    `skipped_capped` row and charges it exactly once.
 
 ---
 
@@ -705,13 +1009,17 @@ recording).** All three carry the money-math + idempotency Fable gate.
   default param → avoids TS2559). Dark deploy ⇒ zero behavior change.
 - **D1 has no transactions:** every claim/finalize is a **single-statement `INSERT … ON CONFLICT` or
   CAS `UPDATE`** with a claim token + re-read (never `db.transaction`/`db.batch`). The exactly-once
-  guarantee rests on `UNIQUE(invoice_payment_id)` + the CAS token + the pinned Stripe idempotency key
-  + the `UNIQUE(external_payment_id)` backstop — four layers, no transaction.
+  guarantee rests on the partial `UNIQUE(invoice_payment_id) WHERE dry_run = 0` + the CAS token
+  (`AND dry_run = 0`) + the pinned Stripe idempotency key (materialized in the claiming UPDATE) + the
+  `UNIQUE(external_payment_id)` backstop — four layers, no transaction. Plus the two cross-channel
+  guards: §6.2a post-claim re-verification and §6.2b resolve-the-open-checkout-session before POST.
 - **Never blind-retry money:** a `charging` (ambiguous) row is TERMINAL-UNKNOWN; recovery is
   reconcile-against-Stripe, never a re-POST (the refund `submitting` posture).
-- **Amount is pinned, never re-computed at charge time:** the claiming UPDATE pins `amount_cents` +
-  `idempotency_key` + `stripe_payment_method_id` before the network call; the POST sends the row's
-  pinned values (the refund `claimed.amountCents` discipline).
+- **Amount AND split are pinned, never re-computed at charge/webhook time:** the claiming UPDATE pins
+  `amount_cents` + `service_amount_cents` + `client_fee_cents` + `idempotency_key` +
+  `stripe_payment_method_id` before the network call; the POST sends the row's pinned values and mirrors
+  the split into PI metadata; the webhook recorder consumes those pinned values (the refund
+  `claimed.amountCents` discipline, extended to the fee split — MAJOR-2).
 - **No forked money math:** the charge amount is `invoicePaymentClientPayableOpenCents`; recording
   reuses the `settleInvoicePaymentCheckoutSession` convergence. Neither is re-implemented.
 - **Raw `fetch`, pinned `stripe-version`:** match `stripe-checkout.ts` exactly — no `stripe` SDK.
@@ -726,6 +1034,49 @@ recording).** All three carry the money-math + idempotency Fable gate.
 ---
 
 ## 13. Changelog
+
+### Rev 2 (Fable money-math review) — 2026-07-07
+
+**Verdict: REVISE → all findings applied.** The adversarial money-math review returned **REVISE** with
+2 BLOCKERs, 3 MAJORs, 6 MEDIUMs, and 8 MINORs. Every finding is folded in below; each fix was written
+against a re-verification of the cited code (`fetchStripeCheckoutSessionReturnUrls`
+`stripe-checkout.ts:87-106`; `expireStripeCheckoutSessionById` `:112-125`; the mint-time split pin
+`metadata[service_open_cents]` `:364` + settle-time consume `:506-520`; the already-paid ignore branch
+`:487-499`; the payable basis `:341-345`; the invoice-reminder allowlist `sequences.ts:506`; the
+`emailSendingEnabled` locus `project-communications.ts:552-554`). **Verified-sound and deliberately
+NOT regressed:** the Layer-1 INSERT-conflict + Layer-2 token-CAS single-winner claim; terminal-unknown
+/ never-blind-retry; webhook-authoritative recording + tripwires; dark purity / secrets / card-data
+boundaries.
+
+| # | Severity | Finding | Fix (this rev) |
+|---|---|---|---|
+| B-1 | BLOCKER | **Cross-channel double charge.** The manual checkout channel stays live for the same installment: (1) manual pays at T0, webhook delayed, hourly cron claims → 2nd real charge; (2) autopay charges while a hosted checkout tab (lives ~24h) is still open → client completes it → 2nd charge. `UNIQUE(external_payment_id)` stops double-**recording**, not double-**charging**; the 2nd webhook hits the already-paid ignore (`stripe-checkout.ts:487-499`) and is silently swallowed. | Added **§6.2b pre-POST cross-channel resolution**: after winning the CAS and before the PI POST, if the installment has a `link_ready` session, GET it at Stripe — `complete` → do NOT charge, CAS row → `aborted_ineligible`, let settle run; `open` → **expire it first** (`expireStripeCheckoutSessionById`) then charge; `expired`/null → charge. And the settle already-paid branch (§6.5) now **distinguishes a same-`pi_…` replay** (true no-op) **from a different-`pi_…` for a paid installment** (money moved twice → CRITICAL + Phase 9b refund candidate). Both orderings added to the test plan (test 31). |
+| B-2 | BLOCKER | **`log_only → live` incoherent.** §3.2 said dry-run rows are never promoted AND `UNIQUE(invoice_payment_id)` allows one row ever — so "going live creates a fresh row" was impossible; §6.2's CAS had no `dry_run` guard so it would claim-and-charge a dry-run row; "reconciled/cleared" was undefined. | Made the index **PARTIAL**: `UNIQUE(invoice_payment_id) WHERE dry_run = 0` (§3.2, §6.2 Layer 1, I3, §12) so dry-run rows sit outside the exactly-once ledger. Added `AND dry_run = 0` to the claiming CAS (§6.2 Layer 2) and to eligibility rule 6 (§5.1). Specified `AUTOPAY_CHARGE_MODE` is **read once at tick start** and the `dry_run` decision is **pinned at INSERT**, never re-evaluated per row (§6.1 note, §7 flag table). Dropped the undefined "reconcile/clear" step — dry-run rows are inert history. Test 34 added. |
+| M-1 | MAJOR | **Post-claim re-verification (TOCTOU).** The claiming UPDATE guards only `status`; between the eligibility SELECT and the POST the installment can be manually recorded, the invoice voided, or consent revoked. The refund precedent re-checks after winning the claim (`stripe-refund-initiation.ts:467-489` 8b) — dropped in rev-1. | Added **§6.2a post-claim re-verification**: after the token re-read confirms ownership and before the POST, re-read installment + invoice + consent; if any §5.1 condition no longer holds, CAS the row (status+token guarded) to a new provable non-charged terminal **`aborted_ineligible`** and do not POST. New state added to §3.2 + §6.1 diagram. Test 32 (void/manual-record/revoke after claim). |
+| M-2 | MAJOR | **Service/fee split source for recording.** The settle recorder derives the split from `amount_total` + `metadata[service_open_cents]` pinned at mint (`stripe-checkout.ts:364,506-520`); rev-1's PI metadata had no `service_open_cents` and the ledger pinned only the total → the recorder would recompute at webhook time and drift if the installment was edited between charge and a delayed webhook. | Pinned **`service_amount_cents` + `client_fee_cents` on the `autopay_charges` row at claim time** (§3.2) and mirror them into **PI metadata** (§6.3) exactly as checkout does; the recorder (§6.5) consumes the pinned values, never a webhook-time recompute. §12 pitfall updated. |
+| M-3 | MAJOR | **Webhook transitions not CAS-guarded; PI-id write unspecified.** Out-of-order hazard: attempt-1 PI-A declines (webhook delayed days), attempt-2 PI-B succeeds but its webhook is lost, late PI-A `payment_failed` regresses `charged → failed_retryable` → next tick claims again → 3rd charge. | Every webhook-driven transition is a **single-statement CAS** (§6.5): failure `WHERE id=? AND status='charging' AND stripe_payment_intent_id=?`; success convergent-idempotent (`status IN ('charging','charged')`). The sync-response handler **persists `stripe_payment_intent_id` token-guarded** whenever the POST returns any PI object, including error bodies (§6.3). Test 36 (late `payment_failed` for a superseded PI → no-op). |
+| MED-1 | MEDIUM | Idempotency-key computation locus (JS pre-read could drift from the SQL increment). | The key is **materialized in the claiming UPDATE** as a SQL expression from the column: `idempotency_key = id \|\| ':' \|\| (attempt_count + 1)` in the same statement that increments `attempt_count` (§3.2 column, §6.2 Layer 2, §6.3). |
+| MED-2 | MEDIUM | §6.1 diagram vs §6.2 CAS contradiction on orphaned `pending` rows. | Stated explicitly (§6.1 diagram + §6.2 Layer 1, "M2"): on INSERT-conflict, a `pending` non-dry-run row **proceeds to the CAS claim** (not a dead end). |
+| MED-3 | MEDIUM | `skipped_capped` is a dead end → hourly re-select + alert storm forever after a cap raise. | Defined `skipped_capped` as **re-claimable iff the freshly-pinned payable is now `<= AUTOPAY_MAX_CHARGE_CENTS`** — added to the CAS claimable set under that condition (§3.2, §5.1 rules 6-7, §6.1/§6.2). The alert fires only on the transition into the state, not per re-select. Test 37. |
+| MED-4 | MEDIUM | `EMAIL_SENDING_ENABLED` reuse claim is wrong — the transport (`sendSequenceEmail`) does NOT enforce it; only the Phase 14 admin path does (`project-communications.ts:552-554`). | Stated the gate is enforced **inside the new autopay email helper itself** (§2 reuse row, §8); test 29 now asserts it **at that layer**, not the transport. |
+| MED-5 | MEDIUM | Money-gate ordering — the Fable review sat after real-client consent capture. | Reordered §7: the **Fable diff review gates the MERGE/DEPLOY** (Step 0, before migration/deploy/flag), then dark deploy → flag on `log_only` → observe → Tyler's go → `live`. |
+| MED-6 | MEDIUM | Re-consent vs the partial UNIQUE active index — a card update would brick on the index and poison the money-drift counter. | The activation handler **first CAS-revokes (supersedes) the prior active row, then activates** — two single statements; a crash between them leaves zero active consents (fail-safe) (§4.1 step 4). Test 35. |
+| MIN-1 | MINOR | §6.4 reconcile: Stripe has no query-by-idempotency-key API. | Use `GET /v1/payment_intents/search?query=metadata['autopay_charge_id']` (or the stored PI id); enumerated the legal manual transitions from `charging` (§6.4). |
+| MIN-2 | MINOR | `needs_action`/`failed_terminal` fallback left a residual PI completion path. | **Cancel the open PI** (`POST /v1/payment_intents/:id/cancel`) before minting the manual link (§6.6). |
+| MIN-3 | MINOR | Eligibility rule 3 used a void/draft blocklist (fails open on new statuses). | Switched to the **allowlist** precedent `invoice.status IN ('sent','partially_paid','overdue')` (`sequences.ts:506`) — fails closed (§5.1 rule 3). |
+| MIN-4 | MINOR | Test 18 (re-invoking a `charging` row) contradicted "a `charging` row is NEVER re-POSTed." | Reframed test 18 to assert key-pinned-once + zero re-POST + Stripe dedupe of a transport retry. |
+| MIN-5 | MINOR | No stuck-pending-consent tripwire. | Added a **WARN** tripwire: a `pending` consent with a `seti_…` older than ~1h (§6.4, test 30). |
+| MIN-6 | MINOR | "three-state (`log_only` \| `live`)" — it is two-state. | Corrected to **two-state** (§7 flag table). |
+| MIN-7 | MINOR | An `AUTOPAY_CONSENT_VERSION` bump silently halts all charging. | Paired every bump with a **health signal** (count of active consents whose version != current → WARN) + a runbook note (§7). |
+| MIN-8 | MINOR | Citation drift: rule 3's precedent is the invoice-reminder scan (`sequences.ts:506`), not "the Phase 22 overdue scan." | Corrected the citation (§5.1 rule 3). |
+
+**Test plan additions (§10.10, tests 31-37 + updated 16/18/29/30):** cross-channel double charge both
+orderings (a); void/manual-record/revoke after claim before POST (b); non-autopay `payment_intent.
+succeeded` ignored (c); `log_only` cycle then live flip with existing dry-run rows (d); re-consent
+while active (e); late `payment_failed` for a superseded PI vs a `charged` row → no-op (f);
+`skipped_capped` then cap raised (g); `EMAIL_SENDING_ENABLED` asserted at the autopay-helper layer (h).
+
+No findings were disagreed with or dropped — all 19 are folded in as specified above.
 
 ### Rev 1 — 2026-07-07
 Initial build-ready spec for Phase 13 (autopay / card-on-file, off-session installment auto-charge).
