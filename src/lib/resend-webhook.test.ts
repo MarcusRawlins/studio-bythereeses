@@ -209,7 +209,10 @@ async function main() {
   }
 
   // ==========================================================================================
-  // Test 4 — unset secret → route 503, no processing, recorded ONLY under the rejected key.
+  // Test 4 — unset secret → route 503, no processing. Recorded under the DISTINCT
+  // `resend-webhook-unconfigured` key (diff-review MEDIUM 1), NOT under `resend-webhook-rejected`
+  // (the key the misconfiguration WARN reads) and NOT under the `resend-webhook` heartbeat. This
+  // keeps a config gap from masquerading as a "rotated/wrong secret" alert.
   // ==========================================================================================
   {
     const before = countSuppressions();
@@ -223,8 +226,10 @@ async function main() {
     );
     assert.equal(res.status, 503, "unset RESEND_WEBHOOK_SECRET → 503");
     assert.equal(countSuppressions(), before, "unset secret writes no suppression row");
+    const unconfigured = await readJobRun("resend-webhook-unconfigured");
+    assert.ok(unconfigured && unconfigured.lastStatus === "error", "unset secret recorded under resend-webhook-unconfigured");
     const rejected = await readJobRun("resend-webhook-rejected");
-    assert.ok(rejected && rejected.lastStatus === "error", "unset secret recorded under resend-webhook-rejected");
+    assert.equal(rejected, null, "unset secret never touches resend-webhook-rejected (the WARN's key)");
     const webhook = await readJobRun("resend-webhook");
     assert.equal(webhook, null, "unset secret never touches the resend-webhook heartbeat");
   }
@@ -254,7 +259,11 @@ async function main() {
   }
 
   // ==========================================================================================
-  // Test 2b (route-level) — a bad signature is a 401 recorded ONLY under the rejected key.
+  // Test 2b (route-level) — a bad signature is a 401 recorded ONLY under the rejected key. A
+  // scanner spamming bad signatures must never touch the `resend-webhook` heartbeat (diff-review
+  // MINOR): the heartbeat is still null here (no successful event has run yet), and the 401 must
+  // leave it that way. The reject IS recorded under `resend-webhook-rejected` (the WARN's key,
+  // which is correct — a rotated real secret shows up exactly this way).
   // ==========================================================================================
   {
     const res = await resendWebhookPOST(
@@ -266,6 +275,34 @@ async function main() {
     );
     assert.equal(res.status, 401);
     assert.equal(countSuppressions(), 0, "a bad-signature POST writes no suppression");
+    const rejected = await readJobRun("resend-webhook-rejected");
+    assert.ok(rejected && rejected.lastStatus === "error", "a 401 reject is recorded under resend-webhook-rejected");
+    const webhook = await readJobRun("resend-webhook");
+    assert.equal(webhook, null, "a 401 reject never touches the resend-webhook heartbeat");
+  }
+
+  // ==========================================================================================
+  // Test 20 (diff-review MINOR) — a FUTURE-dated svix-timestamp (beyond the +tolerance window) is
+  // rejected, mirroring the stale-timestamp reject (test 3). Guards against a clock-skew /
+  // replay-forward bypass of the ±window.
+  // ==========================================================================================
+  {
+    const rawBody = JSON.stringify({ type: "email.bounced", data: { to: "future@example.com" } });
+    const svixId = "msg-verify-future";
+    const futureTimestamp = String(Math.floor(Date.now() / 1000) + 400); // beyond the +300s window
+    const sig = signSvix(SECRET, svixId, futureTimestamp, rawBody);
+    assert.throws(
+      () =>
+        verifyResendWebhookPayload({
+          rawBody,
+          svixId,
+          svixTimestamp: futureTimestamp,
+          svixSignature: svixHeader(sig),
+          secret: SECRET,
+        }),
+      ResendWebhookSignatureError,
+      "a future timestamp outside the tolerance window is rejected",
+    );
   }
 
   // ==========================================================================================

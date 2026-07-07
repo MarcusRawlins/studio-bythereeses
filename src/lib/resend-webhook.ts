@@ -226,13 +226,16 @@ async function auditSuppression(email: string, source: SuppressionSource) {
   });
 }
 
-async function auditAmbiguousRecipient(type: string) {
-  await logActivity({
-    action: "email.suppression_skipped_ambiguous_recipient",
-    actorType: "system",
-    actorName: "Resend webhook",
-    metadata: { type, note: "Multi-recipient event with no single identifiable recipient — no suppression written." },
-  });
+// Diff-review MINOR: an ambiguous-recipient event writes NO suppression row, so — unlike
+// `auditSuppression`, which is gated on an actual new insert — there is no idempotency key to
+// dedup a replay against. Routing this through `logActivity` would append one canonical activity
+// row per ambiguous event on every full-stream replay (the ~thousands-of-rows spam vector). Log to
+// the console instead: observable in Worker logs, never touches the canonical activity table.
+function auditAmbiguousRecipient(type: string) {
+  console.warn(
+    "Resend webhook: multi-recipient event with no single identifiable recipient — no suppression written.",
+    { type },
+  );
 }
 
 export async function handleResendWebhookEvent(event: Record<string, unknown>): Promise<ResendWebhookResult> {

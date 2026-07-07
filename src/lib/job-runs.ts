@@ -72,7 +72,12 @@ export type JobName =
   | "resend-webhook"
   // A separate, NON-ALERTING key for pre-verification Resend/SVIX signature rejects (I5) — kept
   // OUT of the health catalog so a scanner spamming bad signatures cannot grief the real counter.
-  | "resend-webhook-rejected";
+  | "resend-webhook-rejected"
+  // A DISTINCT non-alerting key for the unset-secret 503 (diff-review MEDIUM 1). Deliberately NOT
+  // read by the `resend-webhook-signature` misconfiguration WARN: an unconfigured endpoint (or a
+  // scanner hitting one) must not masquerade as a "rotated/wrong secret" alert — the unconfigured
+  // state is surfaced by config-preflight instead.
+  | "resend-webhook-unconfigured";
 
 export type JobRunRecord = {
   jobName: string;

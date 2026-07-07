@@ -39,11 +39,14 @@ export async function POST(request: Request) {
   const svixTimestamp = request.headers.get("svix-timestamp");
   const svixSignature = request.headers.get("svix-signature");
 
-  // (A) Fail-closed on unset secret → 503, recorded under the NON-alerting rejected key. Not
-  // attacker-triggerable-into-alert; surfaced by config-preflight instead. This IS the dark
-  // mechanism (spec §7) — no separate enable flag.
+  // (A) Fail-closed on unset secret → 503, recorded under a DISTINCT non-alerting key that the
+  // `resend-webhook-signature` misconfiguration WARN never reads (diff-review MEDIUM 1). Recording
+  // the unset-secret case under `resend-webhook-rejected` would let a config gap (or a scanner
+  // hitting an unconfigured endpoint) masquerade as a "rotated/wrong secret" WARN — dark-griefing
+  // the health panel. The genuinely-unconfigured state is surfaced by config-preflight, not here.
+  // This IS the dark mechanism (spec §7) — no separate enable flag.
   if (!process.env.RESEND_WEBHOOK_SECRET?.trim()) {
-    await recordJobRun("resend-webhook-rejected", false, "RESEND_WEBHOOK_SECRET unset");
+    await recordJobRun("resend-webhook-unconfigured", false, "RESEND_WEBHOOK_SECRET unset");
     return NextResponse.json({ error: "Resend webhook is not configured." }, { status: 503 });
   }
 

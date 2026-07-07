@@ -312,6 +312,13 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
   // A persistent rotated/wrong RESEND_WEBHOOK_SECRET is otherwise INVISIBLE: real events reject
   // pre-verify (→ 'resend-webhook-rejected', in no catalog) while 'resend-webhook' stays ok/info.
   {
+    // Gate on the secret actually being set (diff-review MEDIUM 1). The WARN means "the secret is
+    // configured but wrong/rotated" — pre-verify rejects while no success is recent. When the
+    // secret is UNSET the endpoint 503s (recorded under the distinct `resend-webhook-unconfigured`
+    // key, which this block never reads), and config-preflight — not this WARN — is the surface
+    // for the unconfigured state. Without this gate, an endpoint that was never configured (or a
+    // scanner hitting it) would light a "rotated/wrong secret" WARN that has no such secret to fix.
+    const secretConfigured = Boolean(process.env.RESEND_WEBHOOK_SECRET?.trim());
     const rejected = jobByName.get("resend-webhook-rejected");
     const webhook = jobByName.get("resend-webhook");
     const rejectCount = rejected?.consecutiveFailures ?? 0;
@@ -319,7 +326,7 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
     const webhookRecentlySucceeded = webhook
       ? ageMs(nowMs, webhook.lastSuccessAt) <= RESEND_WEBHOOK_SUCCESS_FRESH_MS
       : false;
-    if (rejectsFresh && rejectCount >= RESEND_REJECT_MIN_COUNT && !webhookRecentlySucceeded) {
+    if (secretConfigured && rejectsFresh && rejectCount >= RESEND_REJECT_MIN_COUNT && !webhookRecentlySucceeded) {
       signals.push({
         key: "resend-webhook-signature",
         label: "Resend webhook signature",
