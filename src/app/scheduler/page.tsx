@@ -92,16 +92,25 @@ function MeetingTypeForm({
             <option value="phone">Phone</option>
             <option value="in_person">In person</option>
             <option value="custom">Custom</option>
+            {process.env.SCHEDULER_MEET_LINKS === "1" && (
+              <option value="google_meet">Google Meet (auto-generated per booking)</option>
+            )}
           </select>
         </label>
         <label className="space-y-1.5 text-sm font-medium">
           Location label
           <input name="locationLabel" defaultValue={meetingType?.locationLabel ?? "Zoom"} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
         </label>
-        <label className="space-y-1.5 text-sm font-medium md:col-span-4">
-          Zoom link for this event
-          <input name="zoomJoinUrl" defaultValue={meetingType?.zoomJoinUrl ?? ""} placeholder="Leave blank to use the global Zoom link" className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
-        </label>
+        {process.env.SCHEDULER_MEET_LINKS === "1" && meetingType?.locationType === "google_meet" ? (
+          <p className="md:col-span-4 text-xs font-normal leading-5 text-[var(--ink-muted)]">
+            A unique Google Meet link is created automatically for each booking. The manual Zoom link below is not used for this event type.
+          </p>
+        ) : (
+          <label className="space-y-1.5 text-sm font-medium md:col-span-4">
+            Zoom link for this event
+            <input name="zoomJoinUrl" defaultValue={meetingType?.zoomJoinUrl ?? ""} placeholder="Leave blank to use the global Zoom link" className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+          </label>
+        )}
       </section>
 
       <SchedulerQuestionsBuilder questions={questions} />

@@ -55,6 +55,14 @@ export default async function ManageBookingPage({
             <Video className="h-4 w-4 text-[var(--ink-muted)]" />
             <span>{data.meetingType.locationLabel || "Zoom"}</span>
           </div>
+          {data.booking.meetingJoinUrl && (
+            <div className="flex items-center gap-3">
+              <Video className="h-4 w-4 text-[var(--ink-muted)]" />
+              <a href={data.booking.meetingJoinUrl} target="_blank" rel="noopener noreferrer" className="font-semibold underline">
+                Join Google Meet
+              </a>
+            </div>
+          )}
           <div className="flex items-center gap-3">
             <Mail className="h-4 w-4 text-[var(--ink-muted)]" />
             <span>{data.booking.attendeeEmail}</span>

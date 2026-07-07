@@ -1233,6 +1233,9 @@ function migrate(database: LocalDatabase) {
     ["external_payment_id", "TEXT"],
     ["payment_link", "TEXT"],
     ["payment_notes", "TEXT"],
+    // CR-4 (migration 0094): per-booking auto-generated Google Meet link. Dark behind
+    // SCHEDULER_MEET_LINKS — stays NULL unless the flag is on and locationType is google_meet.
+    ["meeting_join_url", "TEXT"],
   ] as const;
 
   for (const [name, definition] of bookingAdditions) {

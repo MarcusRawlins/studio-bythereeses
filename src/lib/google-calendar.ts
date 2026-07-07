@@ -34,6 +34,12 @@ type CalendarEventInput = {
   timezone: string;
   calendarId?: string | null;
   zoomJoinUrl?: string | null;
+  createMeetLink?: boolean;
+};
+
+export type CalendarEventResult = {
+  eventId: string;
+  meetLink: string | null;
 };
 
 type AllDayCalendarEventInput = {
@@ -379,7 +385,9 @@ export async function createGoogleCalendarEvent(input: CalendarEventInput) {
     input.zoomJoinUrl ? `Zoom: ${input.zoomJoinUrl}` : null,
   ].filter(Boolean).join("\n\n");
 
-  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events?sendUpdates=all`, {
+  const eventsUrl = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(targetCalendarId)}/events?sendUpdates=all${input.createMeetLink ? "&conferenceDataVersion=1" : ""}`;
+
+  const response = await fetch(eventsUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -407,12 +415,30 @@ export async function createGoogleCalendarEvent(input: CalendarEventInput) {
           { method: "popup", minutes: 15 },
         ],
       },
+      ...(input.createMeetLink ? {
+        conferenceData: {
+          createRequest: {
+            requestId: crypto.randomUUID(),
+            conferenceSolutionKey: { type: "hangoutsMeet" },
+          },
+        },
+      } : {}),
     }),
   });
 
   if (!response.ok) return null;
-  const data = await response.json() as { id?: string };
-  return data.id ?? null;
+  const data = await response.json() as {
+    id?: string;
+    hangoutLink?: string;
+    conferenceData?: { entryPoints?: Array<{ entryPointType?: string; uri?: string }> };
+  };
+  if (!data.id) return null;
+
+  const meetLink = data.hangoutLink
+    ?? data.conferenceData?.entryPoints?.find((entryPoint) => entryPoint.entryPointType === "video")?.uri
+    ?? null;
+
+  return { eventId: data.id, meetLink };
 }
 
 export async function createGoogleCalendarAllDayEvent(input: AllDayCalendarEventInput) {

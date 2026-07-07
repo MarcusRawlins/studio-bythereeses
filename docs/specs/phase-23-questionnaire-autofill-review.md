@@ -1,9 +1,17 @@
 # Phase 23 — Questionnaire-response autofill → review-and-apply (CR-5)
 
-Status: spec rev 1 (build-ready — awaiting adversarial Fable spec review).
+Status: spec rev 2 (build-ready — adversarial Fable spec review folded in, verdict **APPROVE WITH
+CHANGES**). Rev-1 → rev-2 finding→fix mapping in §12.
 Origin: Tyler's CR-5 (2026-07-07). Risk class: **MEDIUM** — this touches the untrusted-input →
 canonical-write boundary. No money, no new public endpoints. The build is **dark**; flag-off
 reproduces today's behavior byte-for-byte so the flag flip is the only behavior change.
+
+> **Rev 2 headline:** the reviewer approved the shape (proposal artifact, per-field apply, uniform
+> D1 routing, single migration) but found one BLOCKER — an apply-time TOCTOU where a client
+> re-submission between Tyler's review and his Apply click silently rewrites the proposal, so Tyler
+> applies values he never saw, under `actorType:"admin"`. Rev 2 adds a proposal-version invariant
+> (**I7 / D8**) that closes it, plus apply-time re-checks (**D9**) that make the compute→apply gap
+> safe for every field that a concurrent edit or a second submission can move.
 
 Tyler's ask (verbatim intent): "When a client submits a questionnaire, the answers should (safely)
 populate project details (venue, addresses, key times, contacts) and draft the wedding-day
@@ -65,6 +73,12 @@ shaped to consume the draft and **is never called with it**.
   answer-derived field values (already length-capped upstream).
 - **I6 — D1 has no transactions.** All migration + apply logic is per-object idempotent
   convergence, never wrapped in a transaction.
+- **I7 — Apply may only ever write the exact proposal Tyler reviewed (anti-TOCTOU).** The apply
+  action rejects if the stored proposal has moved since the version Tyler was shown. A client
+  re-submission (which recomputes and overwrites `suggested_changes_json`, D4) between the review
+  render and the Apply click MUST NOT cause unseen values to be written under `actorType:"admin"`.
+  Enforced by the D8 proposal-version echo/guard and pinned by test 10. This is a **hard invariant**,
+  listed in §11.
 
 ---
 
@@ -78,7 +92,29 @@ caller is more surface than it's worth. Simpler and safer: when the flag is on, 
 calling the four canonical syncs and instead computes + stores a proposal, for admin edits too. The
 canonical write moves to the one explicit apply action. This is a behavior change for the admin edit
 path as well (it, too, becomes review-then-apply), which is acceptable — the admin gains the apply
-button — and it keeps exactly one write path to reason about.
+button — and it keeps exactly one write path to reason about. The reviewer endorsed this uniform
+routing; rev 2 keeps it and just makes the four callers explicit (see below).
+
+**`updateQuestionnaireResponseAnswers` has FOUR callers, all of which flip to proposal-only when the
+flag is ON** (rev 2 corrects the rev-1 inventory, which listed only the public route):
+
+| # | Caller | Site | Flag-ON behavior |
+|---|---|---|---|
+| 1 | Public submission route | `src/app/api/questionnaires/[id]/responses/route.ts:140-144` | proposal only, no canonical write (the I2 hinge) |
+| 2 | Admin server action `updateQuestionnaireResponseAction` | `questionnaires.ts:1759-1785` (call at `~1771`) | proposal only; redirect must land where the "Suggested changes" card is visible (see §4) |
+| 3 | Agent API | `src/app/api/agent/projects/[id]/questionnaire-responses/route.ts:133-137` | proposal only; **response payload RETURNS the proposal** so agent flows don't silently dead-end |
+| 4 | MCP tool `studio_upsert_questionnaire_response` | `src/lib/studio-mcp.ts:2738-2750` (call at `~2744`) | proposal only; **tool result RETURNS the proposal** for the same reason |
+
+To satisfy callers 3 and 4 without breaking callers 1 and 2, `updateQuestionnaireResponseAnswers`
+(which today returns `responseId: string`, `:1659`) returns, flag-ON,
+`{ responseId, proposal }` (flag-OFF keeps returning the bare `responseId` — or a `{ responseId,
+proposal: null }` shape the callers already tolerate; pick one and pin it in test 4). The agent-API
+`questionnaireResponseResult` and the MCP `questionnaireResponseResult` serializers surface
+`suggested_changes_json` so the agent/MCP round-trip sees the proposed changes instead of assuming a
+silent canonical write happened. The admin action (caller 2) redirect changes from
+`/edit?saved=...` to a target where the card renders (the response-detail page, or `/edit` with a
+deep-link/anchor to the card) — a dead redirect to a page without the card is the admin-path
+equivalent of the agent silent dead-end.
 
 **D2 — Proposal storage: mirror the `inbound_inquiries.proposedProjectJson` precedent, as a
 `suggested_changes_json` column on `questionnaire_responses`.** Rejected alternatives:
@@ -115,6 +151,60 @@ and the response-detail page always renders current-vs-proposed so Tyler sees dr
 Rejected: last-writer-wins (can clobber); block-whole-apply-if-any-drift (too brittle — one changed
 field shouldn't veto the rest).
 
+**D5 applies to locations too, per-field (rev 2, M1).** Rev-1's `LocationChange` carried no
+`current` snapshot, so an `action:"update"` blindly overwrote whatever Tyler had hand-edited on the
+matched `project_locations` row (the sync at `:904-914` does a bare `db.update`). Rev 2 adds
+per-field `current` snapshots to `LocationChange` (the live `name`/`address`/`city`/`state`/`notes`
+of the matched row at compute time). At apply, an `update` re-reads the live row and:
+- skips any single field whose live value moved since compute (same rule as scalar fields),
+  reported as `skipped:[{field:"locations.<existingId>.<field>", reason:"changed"}]`;
+- if `existingId` is set but the row **no longer exists** (deleted between compute and apply), the
+  whole location entry is skipped with `reason:"existing_missing"` rather than silently
+  re-inserting or throwing.
+
+**D8 — Proposal-version echo + apply-time guard (rev 2, closes BLOCKER B1).** The apply form echoes
+the version of the proposal Tyler is looking at, and the apply route rejects if the stored proposal
+has moved since then. Mechanism:
+- The proposal carries a **version token** = its `suggested_changes_computed_at` timestamp (already
+  stored, D2) plus a `contentHash` (a stable hash of the serialized `QuestionnaireAutofillProposal`
+  — belt-and-suspenders in case two recomputes land in the same millisecond). The response-detail
+  card renders both into a hidden form field.
+- On apply, before writing anything, the route re-reads `suggested_changes_json` +
+  `suggested_changes_computed_at`, recomputes/compares the token, and if it does not match the
+  echoed value it **rejects the whole apply** with a friendly error: *"This proposal changed since
+  you reviewed it (the client re-submitted). Re-review the suggested changes and apply again."* No
+  fields are written.
+- Why this is the BLOCKER fix: `createProjectQuestionnaireResponseDraft` returns the **same**
+  response row on re-submission regardless of `submittedAt` (`questionnaires.ts:1436-1445`), and D4
+  recompute **overwrites** `suggested_changes_json` in place. Without the guard, a client
+  re-submitting between Tyler's review render and his Apply click would have unseen values written
+  under `actorType:"admin"` — the exact untrusted-input→canonical-write leak this phase exists to
+  close, re-opened through the apply door. The D5 per-field stale guard does NOT cover this: D5
+  compares proposed-vs-live-canonical, but here the *proposal itself* changed, so a fresh
+  proposed value can equal `current` and sail straight through. B1 needs a proposal-identity check,
+  which is what D8 is. Hard invariant I7; pinned by test 10.
+
+**D9 — Apply-time re-checks for values a concurrent write can move (rev 2; M2, M6, M7).** The
+compute half reads state that can change before apply; three of those reads must RE-RUN at apply,
+not be trusted from compute time:
+- **Client-email uniqueness (M2).** Today the collision check is a DB read performed at *write*
+  time (`questionnaires.ts:732-739`). Under compute→apply, computing at submission time and trusting
+  it at apply lets a duplicate email land if another client claimed it in between. The apply half
+  **re-runs the collision lookup**; on collision the email field is skipped with
+  `reason:"email_collision"` (not applied, not thrown).
+- **`projectEvent` re-resolution + apply ordering (M6).** The event apply must re-resolve *which*
+  `project_events` row it targets using the same fallback chain as compute
+  (`title==="wedding day"` → `type==="wedding"` → first event → insert new,
+  `questionnaires.ts:992-995`), because a row could have been created/deleted since compute. The
+  venue/date backfill semantics (`event.field || project.field`, `:997-1005`) are preserved. **Apply
+  ordering is fixed: project-profile BEFORE projectEvent**, so the event inherits the freshly-applied
+  venue/date rather than the pre-apply project values.
+- **`calendarSyncStatus` recompute (M7).** `eventDate`'s coupled `calendarSyncStatus` write
+  (`:1078-1082`, via `projectEventCalendarStatusAfterEdit`) must be recomputed at apply from the
+  **live** `googleCalendarEventId`, not from the value snapshotted at compute — the project may have
+  connected/disconnected its calendar in between. `calendarSyncStatus` is a derived companion of the
+  `eventDate` field change, not an independently-checkboxed field.
+
 **D6 — Timeline apply gated behind the SAME flag, and it IS itself an approval step.** The timeline
 apply is net-new (the draft dead-ends today, so nothing regresses if it stays dark), and it is
 already an explicit admin action. It does not *need* the flag for safety. But gating it behind the
@@ -133,9 +223,10 @@ Stored JSON (`suggested_changes_json`), shape:
 
 ```ts
 type QuestionnaireAutofillProposal = {
-  version: 1;
+  version: 1;                      // schema version of THIS type
   responseId: string;
-  computedAt: string;              // ISO; mirrors suggested_changes_computed_at
+  computedAt: string;              // ISO; mirrors suggested_changes_computed_at — the D8 version token
+  contentHash: string;            // stable hash of this proposal; second half of the D8 version token
   project: FieldChange[];          // → projects table
   projectEvent: FieldChange[];     // → the "Wedding day" project_events notes (single "notes" field in v1)
   client: FieldChange[];           // → clients table
@@ -143,7 +234,7 @@ type QuestionnaireAutofillProposal = {
 };
 
 type FieldChange = {
-  field: string;                   // e.g. "venueName", "eventDate", "phone"
+  field: string;                   // e.g. "venueName", "eventDate", "phone" — apply ALLOWLISTS this (see below)
   current: string | null;          // canonical value at compute time (drives D5 stale guard)
   proposed: string;                // answer-derived value
   questionTitle: string;           // provenance for the diff UI
@@ -153,7 +244,12 @@ type FieldChange = {
 type LocationChange = {
   action: "create" | "update";
   type: string;                    // getting_ready | ceremony | reception | portrait | ...
-  name: string; address: string | null; city: string | null; state: string | null; notes: string | null;
+  proposed: {                      // answer-derived values
+    name: string; address: string | null; city: string | null; state: string | null; notes: string | null;
+  };
+  current?: {                      // (M1) live matched-row snapshot at compute time; set when action === "update"
+    name: string | null; address: string | null; city: string | null; state: string | null; notes: string | null;
+  };
   existingId?: string;             // set when action === "update" (matched existing questionnaire_response location)
 };
 ```
@@ -161,6 +257,18 @@ type LocationChange = {
 - **No secrets** (I5): only field values already capped by the submission route.
 - Empty arrays are elided in the UI; a proposal with all-empty arrays renders "No suggested changes".
 - The proposal is recomputed and overwritten every submission (D4); it is never appended to.
+- **`FieldChange.field` is ALLOWLISTED at apply (rev 2, MINOR).** The apply half never writes an
+  arbitrary key read from stored JSON. It validates every `field` against the fixed compute
+  vocabulary — `project`: `eventDate | venueName | venueAddress | city | state`; `client`:
+  `instagramHandle | phone | communicationPreference | referralSource | preferredName | firstName |
+  lastName | email`; `projectEvent`: `notes` — and drops (with `reason:"unknown_field"`) anything
+  outside it. `calendarSyncStatus` is NOT in the allowlist: it is never a standalone proposed field,
+  only a D9-recomputed companion of `eventDate`.
+- **Serialized size is capped (rev 2, MINOR).** Before writing `suggested_changes_json`, the compute
+  path bounds the serialized proposal with the existing `maxSerializedAnswersLength` (100000,
+  `questionnaires.ts:109`). On overflow it **fails soft** — stores no proposal (or a truncated
+  marker) rather than throwing and blocking the submission; the answers themselves were already
+  length-capped upstream, so this is a defense-in-depth bound, not a live risk.
 
 ---
 
@@ -200,17 +308,50 @@ is sourced the way the sibling admin routes do — hardcoded `"Tyler"`, matching
 `send-email/route.ts:72`):
 
 - **`POST /api/questionnaires/[id]/responses/[responseId]/apply`** (new admin route): reads accepted
-  field ids from the form, calls `applyQuestionnaireAutofillProposal`, redirects back to the
-  response detail with a saved banner. Guards: `guardDirectWorkerApiRequest` (mirrors
-  `route.ts` siblings); NOT added to any public bypass list in `origin-guard.ts` (I4). Idempotent
-  on double-click: applying twice re-diffs against the now-updated row → the second apply finds no
-  changed fields (proposed === current) and is a no-op with `applied: []`.
+  field ids **and the echoed proposal-version token** from the form, calls
+  `applyQuestionnaireAutofillProposal`, redirects back to the response detail with a saved banner.
+  Guards: `guardDirectWorkerApiRequest` (mirrors `route.ts` siblings); NOT added to any public
+  bypass list in `origin-guard.ts` (I4). Apply-half order of operations (rev 2):
+  1. **D8 proposal-version guard FIRST** — re-read the stored proposal, compare its token to the
+     echoed one; on mismatch reject the whole apply (B1). Nothing is written.
+  2. For each accepted field, in this exact check order (rev 2, **M9**):
+     **(a)** allowlist the `field` (drop `unknown_field`);
+     **(b)** if `live === proposed` → **`already_applied` no-op** for that field — this check comes
+     BEFORE the stale check, otherwise a genuinely-already-applied double-click reports every field
+     `skipped:"changed"` (because `live !== entry.current` is true once the value is in place);
+     **(c)** D5 stale check `live !== entry.current` → `skipped:"changed"`;
+     **(d)** apply-time re-checks (D9): email `email_collision`, calendarSync recompute, event
+     re-resolution; locations `existing_missing` / per-field `changed`.
+  3. Write accepted, surviving fields with `actorType:"admin"`. **Apply ordering: project-profile
+     before projectEvent** (D9/M6).
+  Idempotent on double-click: the second apply hits check (2b) for every field and is a no-op with
+  `applied: []` (and per-field `already_applied`), not a spurious `changed` sweep.
 - **`POST /api/projects/[id]/timeline-draft/apply`** (new admin route, D6): reads the agent task id +
   its `outputJson.timelineDraft`, maps `timelineItems` → `createProjectTimelineItemInput[]`, calls
   `createProjectTimelineItemsFromAgent(projectId, { sourceType: "project_source", sourceId:
-  <outputJson.projectSourceId>, replaceExistingForSource: true, timelineItems })`. Idempotent
-  re-apply via the existing replace-by-source delete (`project-timeline.ts:156-165`). Gated behind
-  `QUESTIONNAIRE_AUTOFILL_REVIEW`.
+  <outputJson.projectSourceId>, replaceExistingForSource: true, timelineItems })`. Gated behind
+  `QUESTIONNAIRE_AUTOFILL_REVIEW`. Rev-2 hardening:
+  - **Hand-edit protection (M4).** `replaceExistingForSource: true` deletes **all** rows carrying
+    that `sourceId` (`project-timeline.ts:160-164`), including ones Tyler hand-edited after a prior
+    apply (edits preserve the source link, `:206-207`). Before re-applying, the route checks the
+    existing source-linked items; if **any** has `updatedAt > createdAt` (was hand-edited), it does
+    NOT blindly replace — it **skips-or-confirms** (returns a "N hand-edited items would be
+    overwritten — confirm to replace" state that the button must explicitly confirm). The button
+    copy must say **re-apply replaces the draft-sourced items** so the destruction is not a surprise.
+  - **ISO `startAt` composition (M5).** Draft `startAt` values are 12-hour strings like `"02:00 PM"`
+    (`timeline-draft.ts:107-113`, `maybeTime`), NOT ISO. Written straight through they break
+    `formatDate` (renders "Date TBD"), the `datetime-local` edit input, and the client PORTAL
+    rendering (`portal.ts:503`). The apply mapping composes `project.eventDate` + the parsed time →
+    an ISO `startAt`; when the time text is **unparsable**, it puts the raw text in `description` and
+    leaves `startAt` null (never writes a non-ISO `startAt`). Pinned by test 12.
+  - **Route validation + friendly errors (rev 2, MINOR).** Validate `outputJson.projectId === `
+    the route `projectId` (reject cross-project apply); friendly errors when `projectSourceId` is
+    missing (`"This draft has no source link; regenerate it before applying."`) or `timelineItems`
+    is empty (`"This draft has no timeline items to apply."`) rather than letting
+    `createProjectTimelineItemsFromAgent` throw its raw "At least one timeline item is required."
+    / source-assertion errors.
+  Idempotent re-apply (no hand edits present) via the existing replace-by-source delete
+  (`project-timeline.ts:156-164`).
 
 UI:
 

@@ -217,6 +217,7 @@ export async function sendBookingEmails({ booking, meetingType, manageUrl, resch
   const location = meetingType.locationLabel || "Zoom";
   const confirmation = meetingType.confirmationMessage || `Your ${meetingType.name.toLowerCase()} is confirmed.`;
   const adminEmail = process.env.SCHEDULER_ADMIN_EMAIL || "hello@bythereeses.com";
+  const joinLabel = meetingType.locationType === "google_meet" ? "Google Meet" : "Join";
 
   const clientText = [
     `Hi ${booking.attendeeName},`,
@@ -227,6 +228,7 @@ export async function sendBookingEmails({ booking, meetingType, manageUrl, resch
     `When: ${when}`,
     `Location: ${location}`,
     meetingType.zoomJoinUrl ? `Zoom: ${meetingType.zoomJoinUrl}` : null,
+    booking.meetingJoinUrl ? `${joinLabel}: ${booking.meetingJoinUrl}` : null,
     rescheduleUrl ? `Reschedule: ${rescheduleUrl}` : null,
     manageUrl ? `Cancel or manage: ${manageUrl}` : null,
     "",
@@ -262,6 +264,7 @@ export async function sendBookingEmails({ booking, meetingType, manageUrl, resch
 export async function sendBookingReminderEmail({ booking, meetingType, manageUrl, rescheduleUrl }: BookingEmailInput) {
   const when = formatDateTime(booking.startAt);
   const location = meetingType.locationLabel || "Zoom";
+  const joinLabel = meetingType.locationType === "google_meet" ? "Google Meet" : "Join";
 
   return sendResendEmail({
     to: booking.attendeeEmail,
@@ -274,6 +277,7 @@ export async function sendBookingReminderEmail({ booking, meetingType, manageUrl
       `When: ${when}`,
       `Location: ${location}`,
       meetingType.zoomJoinUrl ? `Zoom: ${meetingType.zoomJoinUrl}` : null,
+      booking.meetingJoinUrl ? `${joinLabel}: ${booking.meetingJoinUrl}` : null,
       rescheduleUrl ? `Reschedule: ${rescheduleUrl}` : null,
       manageUrl ? `Cancel or manage: ${manageUrl}` : null,
       "",

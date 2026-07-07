@@ -861,7 +861,11 @@ export async function createSchedulerBookingFromForm(formData: FormData) {
   if (JSON.stringify(inviteeAnswers).length > MAX_SERIALIZED_INVITEE_ANSWERS_LENGTH) {
     throw new Error("Submitted answers are too large.");
   }
-  const zoomJoinUrl = meetingType.zoomJoinUrl || settings.zoomJoinUrl;
+  // CR-4: per-booking auto-generated Google Meet links, dark behind SCHEDULER_MEET_LINKS.
+  // Flag off (or any other locationType) leaves the static-zoom-link path byte-identical.
+  const meetLinksEnabled = process.env.SCHEDULER_MEET_LINKS === "1";
+  const useGoogleMeet = meetLinksEnabled && meetingType.locationType === "google_meet";
+  const zoomJoinUrl = useGoogleMeet ? null : (meetingType.zoomJoinUrl || settings.zoomJoinUrl);
   const selectedDate = dateKeyInTimeZone(new Date(startAt), settings.timezone);
   const availableSlots = await getAvailableSlots(meetingType.slug, selectedDate, { bypassGoogleCache: true });
   const stillAvailable = availableSlots.some((slot) => slot.startAt === startAt && slot.endAt === endAt);
@@ -872,9 +876,10 @@ export async function createSchedulerBookingFromForm(formData: FormData) {
   const projectId = await linkSchedulerClientToProject(projectContext?.projectId ?? null, clientId);
 
   let googleEventId: string | null = null;
+  let meetingJoinUrl: string | null = null;
   let calendarSyncStatus = "local_only";
   try {
-    googleEventId = await createGoogleCalendarEvent({
+    const calendarEvent = await createGoogleCalendarEvent({
       summary: `${meetingType.name} with ${attendeeName}`,
       description: [
         notes,
@@ -893,7 +898,10 @@ export async function createSchedulerBookingFromForm(formData: FormData) {
       timezone: settings.timezone,
       calendarId: settings.googleCreateCalendarId || "hello@bythereeses.com",
       zoomJoinUrl,
+      ...(useGoogleMeet ? { createMeetLink: true } : {}),
     });
+    googleEventId = calendarEvent?.eventId ?? null;
+    meetingJoinUrl = calendarEvent?.meetLink ?? null;
     calendarSyncStatus = googleEventId ? "synced" : "local_only";
   } catch (error) {
     calendarSyncStatus = "sync_failed";
@@ -928,6 +936,7 @@ export async function createSchedulerBookingFromForm(formData: FormData) {
     googleCalendarEventId: googleEventId,
     googleCalendarId: settings.googleCreateCalendarId || "hello@bythereeses.com",
     calendarSyncStatus,
+    meetingJoinUrl,
     rescheduledFromBookingId: rescheduledFromBooking?.id ?? null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),

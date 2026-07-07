@@ -73,6 +73,14 @@ export default async function BookingConfirmedPage({
               <Video className="h-4 w-4 text-[var(--ink-muted)]" />
               <span>{meetingType.locationLabel || "Zoom"}</span>
             </div>
+            {booking.meetingJoinUrl && (
+              <div className="flex items-center gap-3">
+                <Video className="h-4 w-4 text-[var(--ink-muted)]" />
+                <a href={booking.meetingJoinUrl} target="_blank" rel="noopener noreferrer" className="font-semibold underline">
+                  Join Google Meet
+                </a>
+              </div>
+            )}
             <div className="flex items-center gap-3">
               <Mail className="h-4 w-4 text-[var(--ink-muted)]" />
               <span>{booking.attendeeEmail}</span>

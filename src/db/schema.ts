@@ -183,6 +183,7 @@ export const schedulerBookings = sqliteTable("scheduler_bookings", {
   googleCalendarEventId: text("google_calendar_event_id"),
   googleCalendarId: text("google_calendar_id"),
   calendarSyncStatus: text("calendar_sync_status").notNull().default("not_connected"),
+  meetingJoinUrl: text("meeting_join_url"),
   cancelledAt: text("cancelled_at"),
   cancellationReason: text("cancellation_reason"),
   rescheduledFromBookingId: text("rescheduled_from_booking_id"),
