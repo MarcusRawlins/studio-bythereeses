@@ -59,4 +59,20 @@ see `docs/handoff-build-state.md` for the full list):
 
 ## Requests
 
-<!-- Add CR-1, CR-2, … below. Newest at the bottom is fine; the agent works by priority, not order. -->
+### CR-1 — Project progress bar / milestone timeline (auto-advancing)
+- Status: SPEC
+- Screen: /projects — Projects list (compact bar per project) AND /projects/:id — Project detail (full milestone strip)
+- Host: admin
+- Priority: P2
+- Now: Projects show a single `stage` value (inquiry → proposal_sent → retainer_paid → planning → editing → delivered → completed). No visual lifecycle progress; nothing date-aware.
+- Want: A progress bar showing the full client lifecycle, auto-advancing. Tyler's candidate milestones: inquiry, retainer paid, engagement-session planning, e-session delivery, wedding planning, vision & timeline call, final payment made, week-of, wedding day, sneak-peek delivery, full-gallery delivery, anniversary gift. Open to refinement.
+- Why: See at a glance where every couple is in the journey and what's next/late, without opening each project.
+- Money/risk: no (read-only projection of existing data; no canonical writes).
+- Notes (agreed design, 2026-07-07): **Derive, don't mutate.** The bar is a read-time projection
+  (`computeProjectMilestones(project, today)`) over existing canonical data — stage, event dates,
+  payment rows, delivered galleries — NOT a cron that rewrites `stage`. **Dates mark milestones
+  *due*; real data marks them *done*** — a date passing without its data (e.g. wedding + 10 days,
+  no sneak-peek gallery) shows **overdue/amber**, never falsely "done." So the bar doubles as a
+  what's-late signal. Wedding track ≈ Tyler's list (with "wedding planning" as the span between
+  booking and week-of rather than a point); non-wedding projects get a shorter generic track.
+  Ships dark behind a flag. Spec: `docs/specs/phase-22-project-progress-timeline.md`.
