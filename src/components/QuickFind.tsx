@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { CalendarDays, Command, FolderKanban, Loader2, Search, X } from "lucide-react";
 
 type ProjectSearchResult = {
@@ -105,7 +106,12 @@ export function QuickFind({ mobile = false }: { mobile?: boolean }) {
         </span>
       </button>
 
-      {open ? (
+      {/* CR-3: portal the dialog to <body>. The trigger renders inside the sticky mobile header
+          (z-30 + backdrop-blur → its OWN stacking context) / the fixed desktop aside, so an inline
+          fixed z-50 overlay is TRAPPED in that ancestor context and the app nav paints over the
+          search. At the root stacking context z-50 reliably covers the header (z-30) and the
+          z-auto sidebar. `open` only becomes true from client interaction, so document exists. */}
+      {open ? createPortal(
         <div className="fixed inset-0 z-50 bg-black/25 px-4 py-5 backdrop-blur-sm sm:py-16" role="presentation" onMouseDown={() => setOpen(false)}>
           <div
             role="dialog"
@@ -170,7 +176,8 @@ export function QuickFind({ mobile = false }: { mobile?: boolean }) {
               ) : null}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       ) : null}
     </>
   );

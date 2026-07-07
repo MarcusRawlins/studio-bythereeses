@@ -94,3 +94,19 @@ see `docs/handoff-build-state.md` for the full list):
   **all URLs stay unchanged** (bookmarks/agent surface map intact). Dark behind
   `SETTINGS_NAV_GROUP === "1"`; off ⇒ nav renders exactly as today. Small enough that the spec is
   this entry; the Fable gate runs on the diff.
+
+### CR-3 — Quick-find dialog renders UNDER the app navigation (bug)
+- Status: DARK (fixed, pending gate + review + deploy)
+- Screen: all admin pages — Quick find (⌘K) overlay
+- Host: admin
+- Priority: P1 (bug — search is unusable when the nav covers it)
+- Now: Opening Quick find leaves the project navigation painted on top of the search overlay.
+- Want: The overlay covers everything; nav never paints over it.
+- Why: Bug. The Quick-find trigger renders inside the sticky mobile header (z-30 + backdrop-blur —
+  which creates its own stacking context) / the fixed desktop sidebar, so the dialog's fixed z-50
+  overlay was TRAPPED inside that ancestor stacking context and lost to the nav.
+- Money/risk: no.
+- Notes: Fixed by portaling the dialog to document.body (root stacking context, z-50 > header
+  z-30) — `src/components/QuickFind.tsx`. Straight bug fix restoring intended behavior, so it
+  ships UNFLAGGED (the dark-flag rule covers new capabilities, not repairs). Verified via the
+  component test + full gate; Fable diff review runs with the next batch.
