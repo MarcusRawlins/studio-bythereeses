@@ -32,7 +32,16 @@ it surfaces is already visible to Tyler in the admin app today. Keep it lean.
    asserts this (mirrors `src/lib/observability-guard.test.ts`).
 3. **The email always sends on schedule with or without AI narration.** The AI-narration step
    is best-effort and fully decoupled from the send path (§3.4) — it cannot delay, block, or
-   fail the digest.
+   fail the digest, because it was produced (or wasn't) hours earlier by an entirely separate
+   process; the digest request only ever does a single cheap `SELECT ... WHERE day_key = ?`
+   against it. **This guarantee is specifically about the AI-narration step, not the rule-based
+   brief as a whole**: `computeDailyBrief` itself IS awaited synchronously inside the digest send
+   request (§2.1), and with `PROJECT_PROGRESS_TIMELINE=1` it runs the paged `listProjectIndex`
+   scan (§1.1a) plus `loadProjectMilestoneSummaries`'s chunked batch reads across every active
+   project before `sendAdminAlertEmail` is called — that adds real, bounded latency to the digest
+   cron request (bounded by the number of active projects / pagination round trips, not
+   unbounded), it just cannot *fail* the send (§2.1's try/catch) or depend on any AI/agent process
+   succeeding.
 4. **No new AI vendor integration.** There is no direct LLM API call anywhere in this codebase
    today (verified — see §3.1). This phase does not add one. It reuses the exact mechanism
    Phase 10 already uses for "AI narrative": a read-only MCP/REST surface that an agent session
@@ -52,7 +61,7 @@ Three signal groups, all pure reads, all reused verbatim from shipped code:
 |---|---|---|---|
 | Priority leads / stuck items / overdue payments | `listDashboardActionItems(now, limit)` — `src/lib/dashboard.ts:156-319` | Engagement sessions to schedule, overdue + upcoming invoice payments, proposals waiting on the client, questionnaire drafts in progress, inquiries needing follow-up | Same query that feeds the dashboard "What needs you" section (`page.tsx:164`, wired `page.tsx:85`). Call with a higher `limit` (e.g. `50`) than the dashboard's `8` — an email digest isn't paginated, so don't silently truncate what the dashboard truncates for screen space. |
 | Upcoming shoots / calls | `getAgenda({ fromDate, toDate, timeZone: "America/New_York" })` — `src/lib/agenda.ts:65-229` | Weddings, engagement sessions, "other" sessions, and scheduler calls in a date window | Window: today through **+2 days** (ET), matching a "what's coming up" brief rather than the dashboard's full-future agenda. Reuses the exact query at `page.tsx:86`. |
-| Overdue project milestones | `loadProjectMilestoneSummaries(projectRows, today)` — `src/lib/project-milestones-batch.ts:30-119`, filtered to `hasOverdue === true` | Projects whose current milestone (final payment, gallery delivery, etc.) is past due | **Gated on `PROJECT_PROGRESS_TIMELINE=1`.** See §1.1 — this is a deliberate boundary, not an oversight. |
+| Overdue project milestones | `loadProjectMilestoneSummaries(projectRows, today)` — `src/lib/project-milestones-batch.ts:30-119`, filtered to `hasOverdue === true` | Projects whose current milestone (final payment, gallery delivery, etc.) is past due | **Gated on `PROJECT_PROGRESS_TIMELINE=1`.** See §1.1 — this is a deliberate boundary, not an oversight. `projectRows` source is specified precisely in §1.1a — do not improvise it. |
 
 None of these is a new query. `listDashboardActionItems` and `getAgenda` are unconditionally
 safe to call (no flag). `loadProjectMilestoneSummaries` carries an explicit existing-code
@@ -72,6 +81,44 @@ silently omitted from the email (not an error, not a placeholder row) — the br
 useful signal from the other two groups. This also means Phase 18 adds a second, independent
 caller-site consumer of that Phase 22 flag, which is worth flagging to whoever eventually decides
 to graduate `PROJECT_PROGRESS_TIMELINE` to always-on.
+
+### 1.1a Where `projectRows` comes from (this is not optional detail — read before implementing)
+
+`loadProjectMilestoneSummaries(projectRows, today)` takes project rows as its first argument
+(`project-milestones-batch.ts:30-33`); it does not fetch them itself. Both existing callers feed
+it from `listProjectIndex` / `listProjectBoardIndex` (`src/app/projects/page.tsx:170,254`
+pre-rev; current lines `page.tsx:164/240-246,253-255`). This phase's `projectRows` **MUST** come
+from the same reused read — `listProjectIndex` — not a fresh query, and **MUST NOT** silently
+truncate the set of active projects scanned for overdue milestones. Concretely:
+
+- Call `listProjectIndex({ page: n, pageSize: 200, sort: "eventDate" })` (`src/lib/crm.ts:285-347`
+  — the exact function `page.tsx:240-246` already calls, same parameters the list page's largest
+  `pageSizeOptions` entry already uses, `page.tsx:15`) starting at `page: 1`, and **loop across
+  every page**: accumulate `rows.map(({ project }) => project)` from each response, and keep
+  calling with `page: n + 1` until `currentPage >= totalPages` (both already returned by
+  `listProjectIndex`). Feed the accumulated array into `loadProjectMilestoneSummaries`.
+- This is zero new SQL — it is the identical query the projects list page already issues once per
+  pagination click, issued N times in a loop instead of once by a batch job that (unlike a page
+  request) can afford to make N round trips before the digest hour fires. It does not violate the
+  "zero new canonical queries" guarantee (§0).
+- **Do not** call `listProjectIndex` once with a single hardcoded `pageSize` and treat that as
+  "good enough": `pageSize` is hard-capped at 200 inside `listProjectIndex` itself
+  (`crm.ts:292`, `Math.min(Math.max(..., 1), 200)`) — a single call can never return more than 200
+  rows. With 200 or fewer active projects a one-shot call happens to return everything, but that
+  is incidental, not guaranteed; the studio's active-project count is not bounded by this spec, so
+  a one-shot call silently drops overdue projects past row 200 the day that bound is crossed, with
+  no error and no log line. The page-loop above has no such ceiling.
+- **Do not** use `listProjectBoardIndex` for this. It hard-caps at `BOARD_MAX_ROWS = 300`
+  (`src/lib/project-board.ts:17`, enforced at `crm.ts:402,407`) and reports truncation via a
+  `truncated` boolean (`crm.ts:413`) that the board UI renders as a visible banner
+  (`page.tsx:217-221`) — a background job has nowhere to render that banner, so silently
+  swallowing `truncated: true` inside a once-a-day digest is exactly the "truncate overdue
+  projects via a default page size" failure mode this fix exists to prevent. It also defaults to
+  only the 6 in-flight stages (`crm.ts:368`) unless `stages` is passed explicitly, which is a
+  second, independent way it can under-report.
+- `listProjectIndex`'s `projectIndexWhere` always filters `eq(projects.status, "active")`
+  (`crm.ts:269`), matching "every active project" as already stated in §1.1 above — no additional
+  status filter is needed or should be added.
 
 ### 1.2 Assembling the report — `src/lib/daily-brief.ts` (new, pure)
 
@@ -123,8 +170,11 @@ beats two he starts skimming past.
 
 **The cost of folding in:** the systems-monitor email now mixes "is the CRM's plumbing healthy"
 (ops) with "what needs your attention today" (business) in one message. Mitigated by:
-- The brief renders as a clearly labeled second section, appended **after** the health signals,
-  with its own heading (`"Today: what needs you"`) — never interleaved with health signals.
+- The brief renders as a clearly labeled second section, appended **after** the health signals
+  but **before** `buildHealthDigest`'s trailing dead-man footer (the "If you did NOT receive
+  today's Systems email..." line and the "External dead-man ping: ..." line,
+  `system-health.ts:551-553`) — see §2.1's precise insertion point — with its own heading
+  (`"Today: what needs you"`) — never interleaved with health signals.
 - It has its **own** enablement flag (§4) so Tyler can run ops monitoring alone, or add the brief
   later, without touching the other.
 - `buildHealthDigest`'s subject line is untouched by this phase — the subject still reflects
@@ -132,30 +182,67 @@ beats two he starts skimming past.
   dead-man's-switch story; the brief section is additive body content, not a subject-line
   concern.
 
-### 2.1 Where the section is built
+### 2.1 Where the section is built — and where in the text it lands (before the footer, not after)
 
-Extend `buildHealthDigest` (`system-health.ts:519-548`) with an optional second argument, or
-(cleaner — keeps `system-health.ts` about health only) add a small `appendDailyBriefSection(text,
-report)` in the new `daily-brief.ts` module and have the cron route compose:
+**Ordering hazard, called out explicitly:** `buildHealthDigest` (`system-health.ts:526-555`)
+already ends its returned `text` with a trailing dead-man footer — `lines.push("—")` followed by
+the "If you did NOT receive today's Systems email..." line and the "External dead-man ping: ..."
+line (`system-health.ts:551-553`). A naive `digest.text = digest.text + briefSection` (or any
+`appendDailyBriefSection(text, report)` that does plain string concatenation onto the already-
+built `text`) lands the brief section **after** that footer, not "after the health signals" as
+§2 requires — Tyler would have to scroll past the dead-man boilerplate to reach "Today: what needs
+you" every morning. That is the wrong order and must not ship.
+
+**Fix: extend `buildHealthDigest` with an optional parameter for the extra section, inserted
+BEFORE the footer lines are pushed** (i.e. before `system-health.ts:551`'s `lines.push("—")`),
+not by string-splicing the already-assembled text afterward:
+
+```
+// system-health.ts — buildHealthDigest gains one optional field on its options bag; no health
+// logic changes, it stays agnostic to what the section contains.
+export function buildHealthDigest(
+  report: SystemHealthReport,
+  options?: { deadmanArmed?: boolean; extraSection?: string },
+): { subject: string; text: string } {
+  // ...unchanged signals loop...
+  if (options?.extraSection) {
+    lines.push(options.extraSection);
+    lines.push("");
+  }
+  lines.push("—");                                   // footer starts here — extraSection is
+  lines.push("If you did NOT receive today's Systems email...");  // already above it
+  ...
+}
+```
+
+`daily-brief.ts` owns *formatting* the brief into a text block (heading + bullets + narrative) —
+it never needs to know about the footer at all — and the cron route passes that formatted string
+in as `extraSection`:
 
 ```
 // src/app/api/cron/systems-monitor/route.ts, inside the existing digest branch (route.ts:75-79)
 if (easternHour(now) === parseDigestHour(process.env.MONITOR_DIGEST_HOUR)) {
-  const digest = buildHealthDigest(report, { deadmanArmed: Boolean(deadmanPingUrl()) });
+  let extraSection: string | undefined;
   if (dailyBriefEnabled()) {
     const brief = await computeDailyBrief(now);
-    digest.text = appendDailyBriefSection(digest.text, brief);
+    extraSection = formatDailyBriefSection(brief); // pure text formatting, no digest.text knowledge
   }
+  const digest = buildHealthDigest(report, { deadmanArmed: Boolean(deadmanPingUrl()), extraSection });
   sentDigest = await sendAdminAlertEmail(digest);
   ...
 }
 ```
 
-`computeDailyBrief` is wrapped in the SAME try/catch discipline as every other block in
-`computeSystemHealth` — a thrown error here must not prevent `sendAdminAlertEmail(digest)` from
-running with the health-only body. (Concretely: wrap the `dailyBriefEnabled()` branch in its own
-try/catch that falls back to leaving `digest.text` unchanged on any throw, logged nowhere
-sensitive — see §3.4 for the full degrade chain.)
+This guarantees "after the health signals, before the footer" by construction — the insertion
+point is a fixed line in `buildHealthDigest` itself, not a string search over already-rendered
+text, so it cannot silently regress if the footer's wording changes later.
+
+`computeDailyBrief` (and the `formatDailyBriefSection` call around it) is wrapped in the SAME
+try/catch discipline as every other block in `computeSystemHealth` — a thrown error here must not
+prevent `sendAdminAlertEmail(digest)` from running with the health-only body. Concretely: wrap the
+`dailyBriefEnabled()` branch in its own try/catch that falls back to leaving `extraSection`
+`undefined` on any throw (so `buildHealthDigest` renders exactly as it does today, footer and
+all), logged nowhere sensitive — see §3.4 for the full degrade chain.
 
 No new Worker, no new wrangler config, no new cron secret, no new digest-hour env var, no new
 `/system-status` wiring beyond one line noting "daily brief: <on/off>".
@@ -214,7 +301,21 @@ CREATE TABLE IF NOT EXISTS daily_brief_narrations (
 );
 ```
 
-3-place mirror per this repo's migration convention (verified against 0093/0094/0095):
+**Migration number, assigned: 0096.** As of this spec revision the migrations tail is
+`0095_questionnaire_autofill_review.sql`, so 0096 is the next free slot. **However**, three
+unshipped specs — Phase 18 (this one), `phase-19-embeddable-lead-form.md`, and
+`phase-20-meeting-notes.md` — all currently claim 0096, because all three were written against
+the same tail before any of them shipped. Whichever of the three lands first wins 0096
+legitimately; the other two collide. **Build-time caveat (mandatory, first step of task #1 in
+§10): before creating `migrations/0096_daily_brief_narration.sql`, the builder MUST `ls migrations/
+| tail` (or equivalent) to confirm 0096 is still the next free number.** If Phase 19 or Phase 20
+landed first and already claimed 0096, this phase's migration — and every 0096 reference in this
+document (§3.3 above, §4, §10) — must be renumbered to whatever the next free number is at build
+time (0097, 0098, ...), across all three files in the 3-place mirror below. Do not ship a
+duplicate/colliding migration number under any circumstances.
+
+3-place mirror per this repo's migration convention (verified against 0093/0094/0095), using
+whichever number is confirmed free per the caveat above (0096 unless already claimed):
 1. `migrations/0096_daily_brief_narration.sql` (above).
 2. `src/db/client.ts` `migrate()` — idempotent `CREATE TABLE IF NOT EXISTS` block, appended after
    the existing 0093 block (`src/db/client.ts:1259-1281`), same style.
@@ -231,10 +332,33 @@ guardAgentApiRequest(request)         // STUDIO_AGENT_API_TOKEN bearer, 503 unse
 
 Body: `{ narrative: string }`. Handler:
 - Trims; rejects empty (`400`).
-- Caps at a fixed length (e.g. 1500 chars — long enough for 4-6 sentences, short enough that a
-  narration can never smuggle in a large blob) and strips control characters, mirroring
-  `sanitizeJobRunError`'s discipline in `job-runs.ts:45-56` (defense-in-depth; the endpoint does
-  not trust the caller to pre-clean).
+- **Runs the same secret-value redaction `sanitizeJobRunError` performs — not just a length cap
+  and a control-character strip.** `sanitizeJobRunError` (`job-runs.ts:45-56`) is load-bearing
+  precisely because it walks `SECRET_ENV_NAMES` (`job-runs.ts:27-41`) and replaces any configured
+  secret's literal *value* with `[redacted]` before capping/trimming — that is what makes it safe
+  for text to reach `last_error`, which the digest renders verbatim. The narration is agent-
+  composed free text with no schema constraining what it can contain, flowing into that same
+  digest email, which `buildHealthDigest` carries an explicit invariant against
+  (`system-health.ts:522-524`: *"It MUST NEVER interpolate process.env"*) — an accidentally
+  self-narrated secret (e.g. an agent that pastes an error message containing
+  `STUDIO_AGENT_API_TOKEN`'s value while describing a stuck job) must not survive into the sent
+  email. A control-character strip alone does nothing to catch that. Concretely:
+  - Extract `sanitizeJobRunError`'s secret-redaction loop (the `for (const name of
+    SECRET_ENV_NAMES) { ... text.split(secret).join("[redacted]") ... }` body,
+    `job-runs.ts:48-52`) into a small shared helper both `sanitizeJobRunError` and the narration
+    handler call, or call `sanitizeJobRunError` itself against the narrative text before applying
+    the narration's own (longer, 1500-char) cap — do not re-implement the redaction loop a second
+    time by hand; a duplicated copy is exactly the kind of thing that silently drifts from
+    `SECRET_ENV_NAMES` when a tenth secret name is added later.
+  - Then cap at a fixed length (e.g. 1500 chars — long enough for 4-6 sentences, short enough that
+    a narration can never smuggle in a large blob) and strip control characters, same discipline
+    as `sanitizeJobRunError`'s own cap/trim (defense-in-depth; the endpoint does not trust the
+    caller to pre-clean).
+  - **Extend the secret-redaction test to cover the narration path**: whatever test file currently
+    exercises `sanitizeJobRunError`'s secret-value redaction must gain a case (or the narration
+    handler must gain an equivalent one) asserting a narrative string containing a live
+    `SECRET_ENV_NAMES` value is redacted to `[redacted]` before the row is written — the same
+    property, proven on the new code path, not assumed by proximity to the old one.
 - `day_key` = today's date in `America/New_York` (`dateKeyInTimeZone`, already imported elsewhere,
   e.g. `agenda.ts:3`).
 - `INSERT ... ON CONFLICT(day_key) DO UPDATE` (no `db.transaction()`, matching the D1-no-
@@ -298,7 +422,8 @@ would force an all-or-nothing choice neither precedent supports.
 `PROJECT_PROGRESS_TIMELINE` (existing, unchanged) additionally gates only the overdue-milestones
 section (§1.1) — independent of both flags above.
 
-**Ships dark:** migration 0096 applied (additive), `daily-brief.ts`, the MCP tool, the narration
+**Ships dark:** migration 0096 applied (additive — renumbered per the §3.3 build-time free-slot
+caveat if Phase 19/20 claimed 0096 first), `daily-brief.ts`, the MCP tool, the narration
 endpoint, and the digest-section wiring all deployed with `DAILY_BRIEF_ENABLED` unset — zero
 behavior change to the existing Phase 21 email. Enabling requires Tyler to (1) set
 `DAILY_BRIEF_ENABLED=1` (only meaningful if `MONITOR_ENABLED=1` is already set), and (2)
@@ -360,13 +485,13 @@ and satisfies the "what needs you" ask on its own.
 |---|---|
 | Priority leads / stuck items / overdue payments | `listDashboardActionItems` (`src/lib/dashboard.ts:156`) |
 | Upcoming shoots / calls | `getAgenda` (`src/lib/agenda.ts:65`) |
-| Overdue milestones | `loadProjectMilestoneSummaries` (`src/lib/project-milestones-batch.ts:30`), flag-gated per §1.1 |
+| Overdue milestones | `loadProjectMilestoneSummaries` (`src/lib/project-milestones-batch.ts:30`), flag-gated per §1.1, fed `projectRows` from a full-pagination loop over `listProjectIndex` (`src/lib/crm.ts:285`) per §1.1a — never a fresh query, never a single truncated page |
 | Once-daily ET-hour cron + fail-loud Worker + bearer route | Phase 21's `workers/systems-monitor.ts` + `src/app/api/cron/systems-monitor/route.ts` (unchanged; extended) |
 | Owner-only email send | `sendAdminAlertEmail` (`src/lib/email.ts:190`) |
-| Digest body composition | `buildHealthDigest` (`system-health.ts:519`), extended with an appended section |
+| Digest body composition | `buildHealthDigest` (`system-health.ts:526-555`), extended with an optional `extraSection` field inserted before the footer (§2.1) |
 | Agent-composed-prose-from-read-only-JSON pattern | `studio_get_business_review` (`studio-mcp.ts:163`) — the exact shape `studio_get_daily_brief` copies |
 | Bearer-guarded `/api/agent/*` REST write, double-guard pattern | `/api/agent/health/route.ts:1-22` (guard shape copied; this route is a POST instead of GET) |
-| Non-canonical, capped, sanitized text storage | `job-runs.ts`'s `sanitizeJobRunError` + upsert-by-key pattern |
+| Non-canonical, capped, secret-redacted, sanitized text storage | `job-runs.ts`'s `sanitizeJobRunError` (secret-value redaction over `SECRET_ENV_NAMES`, reused/extracted, not re-implemented — §3.3) + upsert-by-key pattern |
 | Zero-canonical-write guard test | `src/lib/observability-guard.test.ts` (pattern extended, not duplicated from scratch) |
 | Migration 3-place mirror | migrations 0093/0094/0095 + `db/client.ts` inline block + `db/schema.ts` |
 
@@ -393,9 +518,11 @@ Unit tests (tsx, local better-sqlite3):
    systems-monitor digest path with the flag unset; assert the sent body matches
    `buildHealthDigest`'s output exactly (no section appended), i.e. zero behavior change to
    Phase 21.
-5. **Digest ships with the brief appended when enabled** — flag on, a narration row present for
-   today → digest body contains both the health signals and the brief section (narrative +
-   bullets), in that order, under the labeled heading.
+5. **Digest ships with the brief appended when enabled, in the right position** — flag on, a
+   narration row present for today → digest body contains the health signals, then the brief
+   section (narrative + bullets) under its labeled heading, then the dead-man footer, in that
+   exact order (§2.1) — assert the brief section's text appears BEFORE the "If you did NOT
+   receive today's Systems email..." line, not after it.
 6. **No narration row → rule-based section still ships** — flag on, no `daily_brief_narrations`
    row for today → digest sends with the bullet sections and no narrative paragraph, `sentDigest`
    is still `true`, no error surfaced, no delay.
@@ -405,9 +532,12 @@ Unit tests (tsx, local better-sqlite3):
    inside the digest-building branch; assert `sendAdminAlertEmail` is still called with the
    health-only body and the route still returns its normal success shape (mirrors the
    degrade-to-rule-based requirement literally, at the integration level).
-9. **Narration endpoint: auth + validation + upsert** — missing/wrong bearer → 401/503 (mirrors
-   `guardAgentApiRequest`); empty body → 400; oversized/control-char narrative → capped + cleaned
-   before storage; two POSTs same day → one row (`ON CONFLICT DO UPDATE`), not two.
+9. **Narration endpoint: auth + validation + upsert + secret redaction** — missing/wrong bearer →
+   401/503 (mirrors `guardAgentApiRequest`); empty body → 400; oversized/control-char narrative →
+   capped + cleaned before storage; **a narrative containing a live `SECRET_ENV_NAMES` value is
+   stored with that value replaced by `[redacted]`** (same assertion style as whatever test
+   already covers `sanitizeJobRunError`'s redaction — extended to this path per §3.3); two POSTs
+   same day → one row (`ON CONFLICT DO UPDATE`), not two.
 10. **Zero-canonical-write guard (extends `observability-guard.test.ts`)** — running
     `computeDailyBrief`, the narration endpoint, and a full digest send (flag on) writes rows
     **only** to `daily_brief_narrations` (+ the existing `job_runs`/`health_alerts`); assert the
@@ -421,6 +551,14 @@ Unit tests (tsx, local better-sqlite3):
     `daily_brief_narrations`/`daily-brief-narrative` references).
 12. **Flag-off is a true no-op** — `DAILY_BRIEF_ENABLED` unset (or `MONITOR_ENABLED` unset):
     `daily_brief_narrations` is never read, `computeDailyBrief` is never called from the route.
+13. **Overdue-milestone scan does not truncate past one page** (§1.1a) — seed more than 200
+    active projects (exceeding `listProjectIndex`'s hard-capped `pageSize`, `crm.ts:292`), with at
+    least one overdue-milestone project seeded on what would be page 2+ if only a single page were
+    fetched; with `PROJECT_PROGRESS_TIMELINE=1`, assert `computeDailyBrief`'s
+    `overdueMilestoneProjects` includes that project — proving the `projectRows` source pages
+    through `listProjectIndex` to `currentPage >= totalPages` rather than issuing one bounded
+    call. Also assert no fresh/ad-hoc `SELECT ... FROM projects` is issued (spy/query-count, same
+    technique as test 2) — only repeated calls to the existing `listProjectIndex` function.
 
 ---
 
@@ -428,13 +566,13 @@ Unit tests (tsx, local better-sqlite3):
 
 | # | Task | Effort | Risk | Notes |
 |---|---|---|---|---|
-| 1 | Migration 0096 (3-place mirror: SQL + `client.ts` block + `schema.ts`) | S | Low | Additive, non-canonical |
-| 2 | `src/lib/daily-brief.ts` — `computeDailyBrief()` over the 3 reused signal sources, per-block try/catch | S | Low | Pure read; zero new queries |
+| 1 | Migration 0096 — **first confirm 0096 is still free** (`ls migrations/ \| tail`; renumber if Phase 19/20 shipped first, per §3.3) — then the 3-place mirror: SQL + `client.ts` block + `schema.ts` | S | Low | Additive, non-canonical |
+| 2 | `src/lib/daily-brief.ts` — `computeDailyBrief()` over the 3 reused signal sources, per-block try/catch; overdue-milestone `projectRows` sourced by paging `listProjectIndex` to completion per §1.1a | S | Low | Pure read; zero new queries; must not truncate (test 13) |
 | 3 | `studio_get_daily_brief` MCP tool (read-only, mirrors `studio_get_business_review`) | S | Low | Add to `docs/studio-agent-access.md` catalog too |
 | 4 | `POST /api/agent/daily-brief-narrative` (double-guard, cap+sanitize, upsert-by-day) | S | Low | Mirrors `/api/agent/health` guard shape |
-| 5 | Extend the systems-monitor digest branch: `appendDailyBriefSection` behind `DAILY_BRIEF_ENABLED`, wrapped so a throw never blocks `sendAdminAlertEmail` | M | Med | Must preserve byte-identical output when the flag is off (test 4) |
+| 5 | Extend `buildHealthDigest` with the optional `extraSection` field (inserted before the footer, §2.1) + the systems-monitor digest branch computing it behind `DAILY_BRIEF_ENABLED`, wrapped so a throw never blocks `sendAdminAlertEmail` | M | Med | Must preserve byte-identical output when the flag is off (test 4); must land before the footer (test 5) |
 | 6 | `/system-status` — one line noting daily-brief on/off (reuse existing page, no new section needed beyond a status line) | S | Low | Optional polish, not required for the email to work |
-| 7 | Tests §9 (12 cases) + extend `observability-guard.test.ts` | M | Low | Build-gate green |
+| 7 | Tests §9 (13 cases) + extend `observability-guard.test.ts` | M | Low | Build-gate green |
 | 8 | Deploy dark (`DAILY_BRIEF_ENABLED` unset); document the optional narration-Routine setup for Tyler as an enablement note, not an autonomous step | S | Low | Guardrails 1/2/4 |
 
 ---
@@ -456,9 +594,12 @@ Unit tests (tsx, local better-sqlite3):
   strongest possible version of "AI failure never blocks the email" (§3.4).
 - **No D1 transactions.** The narration upsert is `INSERT ... ON CONFLICT DO UPDATE`, matching
   the D1-rejects-transactions rule already enforced throughout Phase 21.
-- **Secret/length hygiene on agent-submitted free text.** The narration is capped and stripped of
-  control characters before storage, mirroring `sanitizeJobRunError`'s defense-in-depth stance
-  (don't trust the caller to pre-clean).
+- **Secret/length hygiene on agent-submitted free text.** The narration runs the same
+  secret-value redaction `sanitizeJobRunError` performs (over `SECRET_ENV_NAMES`, reused/extracted
+  rather than re-implemented) before it is capped and stripped of control characters — not just a
+  cap-and-strip. `buildHealthDigest`'s explicit "MUST NEVER interpolate process.env" invariant
+  (`system-health.ts:522-524`) applies to this new tainted-input path exactly as it does to
+  `last_error`; the secret-redaction test is extended to prove it (test 9, §9).
 - **No agent/MCP export of the write surface.** The narration POST endpoint is REST-only, guarded
   identically to other agent-write endpoints, and explicitly asserted absent from the MCP tool
   list (test 11) — read/write separation stays consistent with the rest of the agent surface.
@@ -468,6 +609,23 @@ Unit tests (tsx, local better-sqlite3):
 ---
 
 ## 12. Changelog
+
+### Rev 2 — 2026-07-07 — adversarial Fable review folded in (verdict: APPROVE WITH CHANGES)
+
+| Finding | Severity | Root cause (verified) | Fix in this spec |
+|---|---|---|---|
+| **A-1** — migration number collision | MEDIUM | Migrations tail is `0095_questionnaire_autofill_review.sql`; Phase 18, 19 (`phase-19-embeddable-lead-form.md`), and 20 (`phase-20-meeting-notes.md`) all independently claim 0096 | §3.3: Phase 18 → 0096, assigned, **plus** a mandatory build-time caveat to `ls migrations/ \| tail` and renumber (§3.3, §4, §10 task 1) if 19/20 shipped first. |
+| **A-2** — `projectRows` source unspecified (MOST IMPORTANT) | MEDIUM | `loadProjectMilestoneSummaries(projectRows, today)` (`project-milestones-batch.ts:30-33`) takes rows as input; neither existing caller nor this spec named the read/params supplying them for the brief — risk of a fresh `SELECT` (violating §0's "zero new canonical queries") or silent truncation | New **§1.1a**: `projectRows` comes from `listProjectIndex` (`crm.ts:285-347`), called in a full-pagination loop (`page: 1..totalPages`, `pageSize: 200`) — reuses the existing blessed read exactly, never truncates regardless of active-project count. `listProjectBoardIndex` explicitly rejected (hard-caps at `BOARD_MAX_ROWS=300`, defaults to 6 in-flight stages). Test 13 added. |
+| **A-3** — narrative sanitization missing secret redaction | MINOR | Spec said "cap + strip control characters," but the cited precedent `sanitizeJobRunError` (`job-runs.ts:45-56`) is load-bearing for SECRET-VALUE redaction over `SECRET_ENV_NAMES`, protecting `buildHealthDigest`'s "MUST NEVER interpolate process.env" invariant (`system-health.ts:522-524`) — the narration is new tainted input entering that same digest | §3.3: narration handler MUST reuse/extract `sanitizeJobRunError`'s secret-redaction loop before its own cap+strip; test 9 extended to assert a live secret value is redacted before storage. |
+| **A-4** — section placement lands below the dead-man footer | MINOR | `appendDailyBriefSection` via plain string concat would append after `buildHealthDigest`'s trailing footer (`system-health.ts:551-553`), not "after the health signals" as intended | §2.1 rewritten: `buildHealthDigest` gains an optional `extraSection` field inserted before the footer lines are pushed — insertion point fixed by construction, not a string search. Test 5 extended to assert ordering. |
+| **A-5** — latency overclaim | MINOR | §0's "cannot delay ... the digest" is accurate for the AI-narration step (§3.4) but overstated for the rule-based part: `computeDailyBrief` is awaited inside the send request, and with `PROJECT_PROGRESS_TIMELINE=1` runs the paged project scan + batch milestone reads before send | §0 guarantee 3 now explicitly scopes the "cannot delay" claim to AI narration only, and states the rule-based compute adds real, bounded (not unbounded) latency to the digest request. |
+
+Verified correct by the reviewer, unchanged: fold-into-digest via the inner try/catch (test 8)
+preserving dead-man semantics; the `/api/agent/` double-guard needing no `PUBLIC_API_PREFIXES`
+entry; milestone gating behind `PROJECT_PROGRESS_TIMELINE`; data egress matching Phase 10's
+boundary; no canonical write.
+
+Test plan grew from 12 to 13 cases.
 
 ### Rev 1 — initial spec, 2026-07-07
 
