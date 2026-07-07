@@ -1,6 +1,6 @@
 # Phase 19 — Embeddable lead-capture form → inquiry-intake pipeline
 
-Status: spec rev 1 (build-ready — awaiting adversarial Fable spec review).
+Status: spec rev 2 (build-ready — two adversarial Fable reviews applied; see §12).
 Origin: roadmap Phase 19 (Tyler): "Booking page + email intake exist; add a customizable inquiry form
 the photographer embeds on their own site (→ inquiry intake pipeline)."
 Risk class: **MEDIUM-HIGH** — this is a **NEW PUBLIC surface accepting untrusted, unauthenticated
@@ -101,32 +101,57 @@ request. The lead-form routes follow the Twilio/Resend "PROXY-ONLY" posture, not
   unbounded payload can be stored.
 - **I6 — The embed page is frameable ONLY by Tyler's domains.** A `frame-ancestors` allowlist
   (`'self' https://bythereeses.com https://www.bythereeses.com`) is set **only** for the exact embed
-  page path on the schedule host, and `x-frame-options` is dropped **only** there. Every other route
-  keeps `frame-ancestors 'none'` + `x-frame-options DENY` (`SECURITY_HEADERS` `_worker.js:12-19`).
-- **I7 — The surface is reachable ONLY through the proxy.** Proxy-only (D3) means the per-IP
-  `leadForm` rate limit and the honeypot/timing gates cannot be bypassed by hitting `*.workers.dev`
-  directly — `guardDirectWorkerPageRequest` (middleware, matcher `/api/:path*` + pages) 404s any
-  direct-origin request lacking `x-reese-origin-secret`.
+  page path (`/embed/lead`), its thanks path (`/embed/lead/thanks`), and the submit response
+  (`/api/lead-form/submit`) on the schedule host, and `x-frame-options` is dropped **only** there.
+  Framing the harmless redirect/re-render response is required because the form POSTs same-origin and
+  the POST **response becomes the framed document** (frame-ancestors/XFO apply to form-submission
+  navigations) — see D2/BLOCKER-2. Every other route keeps `frame-ancestors 'none'` +
+  `x-frame-options DENY` (`SECURITY_HEADERS` `_worker.js:12-19`).
+- **I7 — The surface is reachable ONLY through the proxy.** The embed/thanks page paths are
+  **dot-free** (the token rides in the `?t=` query param, NOT the path — see §2/BLOCKER-1), so they are
+  actually MATCHED by the Next middleware page matcher (`/((?!…|.*\\..*).*)`, `middleware.ts:126-131`,
+  which EXCLUDES any path containing a dot). Proxy-only (D3) then means the per-IP `leadForm` rate
+  limit and the honeypot/timing gates cannot be bypassed by hitting `*.workers.dev` directly —
+  `guardDirectWorkerPageRequest` (middleware, `origin-guard.ts:76-91`, matcher `/api/:path*` + pages)
+  404s any direct-origin request lacking `x-reese-origin-secret`. A token-in-path form
+  (`/embed/lead/<token>`, token contains a dot per `questionnaire-links.ts:44`) would be silently
+  EXCLUDED from the matcher and I7 would be undeliverable — this is why the token is a query param.
 - **I8 — The embed token carries no secret and no PII.** It is an HMAC signature over a
   form-identity payload only (mirrors the questionnaire context token, I5 of Phase 23). No client
   data, no admin token.
-- **I9 — Spam-dropped submissions leave no trace.** A honeypot hit / failed timing check / invalid
-  nonce returns a friendly `200` and creates **no** row (never tips the bot, never stores junk).
+- **I9 — Bot-signal submissions leave no trace, and NO user-visible POST renders inside the frame.**
+  A honeypot hit or a sub-`MIN_FILL_MS` submission (the only two genuine bot signals) creates **no**
+  row and returns a **303 redirect to the thanks page** — indistinguishable from success, so the bot
+  is never tipped. Every user-visible POST outcome is a 303 to a carve-out-matched embed path (thanks,
+  or back to the form), NEVER a `200`/JSON body rendered in the iframe (a non-redirect response would
+  render as a BLANK FRAME under `frame-ancestors 'none'` — see D2/BLOCKER-2). A **stale nonce is NOT a
+  bot signal** (a couple composing a long inquiry is expected): it 303s back to a re-rendered form, it
+  does not silently vanish (see §4/MAJOR-4). The only non-redirect response is the raw `403` for an
+  invalid/missing embed token (no page was ever legitimately rendered there).
 
 ---
 
 ## 2. Surface & routes (all on `schedule.bythereeses.com`, the public host)
 
+The token rides in a `?t=` QUERY PARAM, never in the path. This is load-bearing (BLOCKER-1): the
+embed token mirrors `questionnaire-links.ts` and therefore CONTAINS A DOT
+(`${payload}.${signPayload(payload)}`, `questionnaire-links.ts:44`), and the Next middleware page
+matcher (`/((?!…|.*\\..*).*)`, `middleware.ts:129`) EXCLUDES any path containing a dot. A dotted path
+(`/embed/lead/<token>`) would never reach `guardDirectWorkerPageRequest` or `adminProofRequired`,
+defeating I7 and serving the framable page on the raw `*.workers.dev` origin with none of the proxy's
+`SECURITY_HEADERS`. A dot-free path + `?t=` token is the repo-native answer (questionnaire context
+tokens ride in `?context=`, `questionnaire-links.ts:70-75`).
+
 | Route | Method | Purpose | Classification |
 |---|---|---|---|
-| `/embed/lead/[token]` | GET | Renders the configured form inside an iframe; mints a per-render timing nonce; serves the `frame-ancestors` carve-out. | schedule-public, proxy-only, framed |
-| `/api/lead-form/submit` | POST | Verifies token + nonce + honeypot + timing + caps → `ingestWebFormInquiry` → 303 to thanks. | schedule-public, proxy-only, `leadForm` rate kind |
-| `/embed/lead/[token]/thanks` | GET | Post-submit confirmation shown inside the iframe (PRG). | schedule-public, proxy-only, framed |
+| `/embed/lead?t=<token>` | GET | Renders the configured form inside an iframe; mints a per-render timing nonce; serves the `frame-ancestors` carve-out. Dot-free path. | schedule-public, proxy-only, framed |
+| `/api/lead-form/submit` | POST | Verifies token + nonce + honeypot + timing + caps → `ingestWebFormInquiry` → **303** to thanks (success) / back to form (validation/stale) / thanks (bot-signal drop). | schedule-public, proxy-only, `leadForm` rate kind, framed redirect |
+| `/embed/lead/thanks?t=<token>` | GET | Post-submit confirmation shown inside the iframe (PRG). Dot-free path. | schedule-public, proxy-only, framed |
 
 The photographer embeds one snippet on `bythereeses.com` (generated in Studio settings, §5):
 
 ```html
-<iframe src="https://schedule.bythereeses.com/embed/lead/<signed-token>"
+<iframe src="https://schedule.bythereeses.com/embed/lead?t=<signed-token>"
         title="Inquiry form" style="width:100%;border:0;min-height:720px" loading="lazy"></iframe>
 ```
 
@@ -151,7 +176,7 @@ export type WebFormInquiryInput = {
   name: string; email: string;
   phone?: string | null; eventDate?: string | null; eventType?: string | null;
   message: string; referralSource?: string | null;
-  nonceId: string;          // the per-render timing nonce id → synthetic message_id (idempotency)
+  nonceId: string;          // a `crypto.randomUUID()` from the signed nonce → synthetic message_id (idempotency)
 };
 
 export async function ingestWebFormInquiry(input: WebFormInquiryInput): Promise<IngestInboundInquiryResult>;
@@ -169,8 +194,11 @@ Behavior (each step cites the reused primitive):
    optionally run `parseEventDate` (`:350-360`) over a free-text date field as a fallback.
 3. **Synthetic `messageId` = `webform:${nonceId}`** so the existing INSERT-OR-IGNORE on `message_id`
    (`:533-537`, B2) makes a double-submit of the **same** rendered form idempotent — one row, one task.
-   `envelopeFrom`/`headerFrom` = the submitted email so `domainOf` (`:456-463`) still feeds the
-   flood guard.
+   `nonceId` MUST be a `crypto.randomUUID()` minted per GET render and embedded in the signed nonce
+   payload (§4.2, MEDIUM-1) — NEVER derived from `issuedAtMs` or a counter, or two simultaneous loads
+   would mint the same `nonceId`, collide on the INSERT-OR-IGNORE dedup, and one lead would be silently
+   discarded as a duplicate. `envelopeFrom`/`headerFrom` = the submitted email so `domainOf`
+   (`:456-463`) still feeds the flood guard.
 4. **`parsed_json.source = "web_form"`** (D4 provenance). No new column.
 5. **Flood guard**: `isRateLimited(email, now)` (`:473-485`) — over-cap → `status:"spam"`,
    `parsed_json.spamReason = "rate_limited"`, **no** agent task, return early. (Reused verbatim.)
@@ -188,30 +216,77 @@ row approves through the identical admin path (I3). **No edit to the approval fu
 
 ## 4. Spam defense (all in-house — NO CAPTCHA, NO external service)
 
+**Threat-model honesty (MEDIUM-2 rv2).** The signed embed token is **public and reusable by design**
+— it is in Tyler's marketing-page source, so anyone can read it and POST with it. The token and the
+timing nonce **RAISE BOT COST**; they do NOT *prevent* spam. The REAL spam ceiling is the CRM flood
+guard (`isRateLimited`, §3.5/§4.6) + the per-IP `leadForm` proxy rate kind (§4.5), backed by the
+absolute output ceiling (§4.7): the worst case is junk review items, never a junk project. Read the
+list below as cost-reducers layered under that ceiling, not as a spam-proof gate.
+
 In order of cost (cheapest first), consistent with the "everything in-house" principle:
 
 1. **Signed embed token (`lead-form-links.ts`, mirrors `questionnaire-links.ts`).** The iframe URL
-   carries an HMAC-signed token binding the form identity (`{ v:1, formId:"default" }`). A drive-by
-   POST with a missing/tampered token is rejected **before any DB read** with a fast `403`
-   (constant-time verify, `timingSafeEqual`). Long-lived (pasted once); no PII (I8).
-2. **Per-render timing nonce (`formNonce`).** The GET page mints an HMAC over `{ issuedAtMs, id }`,
-   renders it into a hidden field. On POST: reject if `now - issuedAtMs < MIN_FILL_MS` (default 3 s —
-   bots submit instantly) or `> MAX_AGE_MS` (default 30 min — stale/replayed). The `id` becomes the
-   synthetic `message_id` (§3.3) so replaying one nonce dedups to a single row. No client JS, no
-   external service.
+   carries an HMAC-signed token binding the form identity and a revocation counter
+   (`{ v:1, formId:"default", rev:number }`). A drive-by POST with a missing/tampered token is
+   rejected **before any DB read** with a fast `403` (constant-time verify, `timingSafeEqual`). No PII
+   (I8). **Expiry/revocation (MEDIUM-7):** the token is long-lived and shared-secret-signed
+   (`SCHEDULER_LINK_SECRET||AUTH_SECRET`, shared with questionnaire+scheduler links), so rotating the
+   secret is a nuclear option that kills every outstanding client link. Instead, `rev` is carried in
+   BOTH the token payload AND `LeadFormConfig` (§5); the submit route verifies `token.rev ===
+   config.rev`, and "Copy embed snippet" mints the CURRENT `rev`. Revocation of an abused embed URL
+   becomes a Settings edit (bump `rev`) — no secret rotation, no collateral damage to other links.
+2. **Per-render timing nonce (`formNonce`).** The GET page mints an HMAC over
+   `{ issuedAtMs, id: crypto.randomUUID() }` (the `id` MUST be a `crypto.randomUUID()`, MEDIUM-1),
+   renders it into a hidden field. The `id` becomes the synthetic `message_id` (§3.3) so replaying one
+   nonce dedups to a single row. On POST:
+   - `now - issuedAtMs < MIN_FILL_MS` (default 3 s — bots submit instantly): a genuine bot signal →
+     **303 to thanks**, no row (I9).
+   - `now - issuedAtMs > MAX_AGE_MS`: a **stale** nonce is NOT a bot signal (MAJOR-4) — a couple
+     composing a long inquiry with the tab open is expected. **DECISION: lengthen `MAX_AGE_MS` to
+     `1000*60*60*8` (8 h)** rather than 30 min. Replay is already fully neutralized by the `nonceId`
+     dedup (§3.3), so a long window costs nothing; an 8 h window covers realistic compose times. If a
+     nonce is *still* older than 8 h, **303 back to a re-rendered form** with a fresh nonce and a
+     "please confirm and resubmit" note — the lead is NEVER silently dropped. No client JS, no
+     external service. **PII constraint (MINOR, security):** the redirect URL carries ONLY `?t=<token>`
+     + a generic `&error=<code>` — NEVER the submitted `name`/`email`/`message` values as query params
+     (they would land in proxy access logs alongside the token). If typed values are to be preserved
+     across the re-render, use a short-lived server-side stash keyed by the nonce `id`, not the query
+     string; otherwise the re-rendered form starts empty and the user re-enters (acceptable — an 8 h
+     stale window makes this near-never).
 3. **Honeypot field** (hidden `company_website`, off-screen, `autocomplete="off"`, `tabindex="-1"`).
-   Filled ⇒ friendly `200`, **no row** (I9). Bots fill every field; humans never see it.
-4. **Length caps** mirroring the booking form (§0), enforced in `ingestWebFormInquiry` (I5).
+   Filled ⇒ **303 to thanks** (indistinguishable from success, preserves I9), **no row**. Bots fill
+   every field; humans never see it.
+4. **Length caps** mirroring the booking form (§0), enforced in `ingestWebFormInquiry` (I5). A missing
+   required field or an over-cap/invalid required field (name/email/message) → **303 back to the form**
+   with `?error=…` (a validation re-render, NOT a silent drop — the user must be able to correct it).
+   The redirect carries only `?t=<token>&error=<code>` — never the submitted PII as query params (same
+   constraint as the stale-nonce re-render above).
 5. **Per-IP proxy rate limit — a DEDICATED `leadForm` kind** (D3/§6), not `publicMutation`. Form spam
    has a different profile than booking bursts and Tyler should tune it independently; a dedicated
    bucket also stops booking traffic from sharing the ceiling. Default `{ max: 10, windowSeconds: 600 }`.
+   A separate **`leadFormPage` GET kind** (default `{ max: 60, windowSeconds: 60 }`, D3/§6, MEDIUM-6)
+   bounds the uncached embed-page GET (each GET does origin SSR + an `app_settings` read + an HMAC
+   nonce mint, and is explicitly UNCACHED) so per-IP GETs cannot be free origin-load amplification or
+   unlimited nonce farming.
 6. **CRM-side flood guard** (`isRateLimited`, §3.5) — global 200/hr, per-domain 25/hr → auto-`spam`.
+   **Cross-channel coupling tradeoff (MEDIUM-5):** `isRateLimited` (`inbound-inquiry.ts:473-485`)
+   counts ALL `inbound_inquiries` rows in the trailing hour REGARDLESS of source. The web form is a
+   cheaper flood vector than SMTP, so a web-form flood can push the global count to
+   `GLOBAL_HOURLY_INSERT_CAP=200`, after which every genuine EMAIL inquiry is auto-`status:"spam"` with
+   no agent task (`:556-562`) — retained but unsurfaced. **DECISION: keep `isRateLimited` reused
+   VERBATIM (do not fork it — §3.5), and add a health alert/count** (a `job_runs` heartbeat / structured
+   warn + counter) whenever the GLOBAL cap trips, so a cross-channel starvation event is visible instead
+   of silent. Per-source scoping of the global cap (using `parsed_json.source`) is noted as a
+   FOLLOW-UP if the alert ever fires in practice; v1 does not fork the shared guard.
 7. **The output ceiling itself.** Every defense that leaks still only yields a **review item**. There
    is no path from the public POST to a canonical project/client (I2/I3). This is the load-bearing
    guarantee — the other six are cost-reducers, not the safety boundary.
 
-Missing/invalid **embed token** → fast `403` (never loaded the page; no politeness owed).
-Honeypot / timing / nonce failures → friendly `200` + silent drop (I9, don't tip the bot).
+Missing/invalid **embed token** → fast `403` (never loaded the page; no politeness owed; the ONLY
+non-redirect POST outcome). Honeypot / sub-`MIN_FILL_MS` → **303 to thanks** + silent drop (I9, don't
+tip the bot). Stale nonce / validation error → **303 back to the re-rendered form** (never a silent
+drop). Every user-visible outcome is a 303 to a carve-out-matched embed path so it never renders as a
+blank frame (D2/BLOCKER-2).
 
 ---
 
@@ -225,9 +300,10 @@ JSON blob (`lead_form_config_json`), normalized against code defaults exactly li
 ```ts
 type LeadFormConfig = {
   version: 1;
-  introText: string;            // capped ~500
-  submitButtonText: string;     // capped ~60
-  confirmationMessage: string;  // capped ~500 (shown on the thanks page)
+  rev: number;                  // revocation counter (MEDIUM-7); token.rev must === config.rev
+  introText: string;            // capped ~500, sanitized (sanitizeLine/sanitizeBody), rendered ESCAPED
+  submitButtonText: string;     // capped ~60, sanitized, rendered ESCAPED
+  confirmationMessage: string;  // capped ~500 (shown on the thanks page), sanitized, rendered ESCAPED
   fields: {
     name:           { enabled: true;  required: true };   // identity — always on, always required
     email:          { enabled: true;  required: true };   // identity — always on, always required
@@ -244,10 +320,27 @@ type LeadFormConfig = {
   actionable. The normalizer forces `enabled:true, required:true` for the three regardless of stored
   input.
 - `NULL` column ⇒ code defaults (all fields shown; phone/eventDate/eventType on & optional;
-  referralSource off).
-- Admin edits via the existing Settings surface (extend `updateAppSettingsFromForm`
-  `settings.ts:180-227`, same FormData pattern), plus a **"Copy embed snippet"** action that emits the
-  iframe HTML with a freshly-signed embed token.
+  referralSource off; `rev: 0`).
+- **Config-injection / stored-XSS defense (MEDIUM-3).** `lead_form_config_json` free text (introText,
+  submitButtonText, confirmationMessage, field labels) is ADMIN-SET but rendered on a PUBLIC page framed
+  into `bythereeses.com`. `normalizePaymentSettings` (`settings.ts:115-122`) only SHAPE-normalizes and
+  `cleanText` only trims — neither strips HTML/control chars. Therefore:
+  - (a) **All config text is rendered ONLY as escaped JSX text nodes — NEVER via
+    `dangerouslySetInnerHTML`** (do not "allow line breaks" by injecting HTML; use `white-space:
+    pre-wrap` on an escaped text node if line breaks are wanted).
+  - (b) `normalizeLeadFormConfig` runs `sanitizeLine` (short fields, labels, button text) /
+    `sanitizeBody` (introText, confirmationMessage) + the field caps on EVERY string field **before
+    store**, and the render escapes regardless (defense in depth — a hand-edited DB row is still inert).
+  - (c) A test (§9) asserts `<script>` in `introText` renders as inert escaped text.
+- Admin edits via the existing Settings surface, but the lead-form config is a **SEPARATE `<form>`
+  posting a DEDICATED action** (`updateLeadFormConfigFromForm`), NOT joined into
+  `updateAppSettingsFromForm` (`settings.ts:180-220`). Reason (MINOR-9): `updateAppSettingsFromForm`
+  unconditionally rewrites the full business/payment column set via `onConflictDoUpdate`
+  (`:208-220`), and `normalizeBusinessSettings` defaults empty fields (`:104-113`); a second `<form>`
+  posting the shared action WITHOUT the business fields would silently reset business settings to
+  defaults. The lead-form editor follows the finance-rate-columns pattern (deliberately its own action,
+  writing ONLY `lead_form_config_json`). It includes a **"Copy embed snippet"** action that emits the
+  iframe HTML (`?t=<token>`) with a freshly-signed embed token minted at the CURRENT `config.rev`.
 
 A full form builder (arbitrary questions, ordering, types) is explicitly **out of scope** — it would
 re-introduce the questionnaire system's untrusted-mapping surface for no v1 benefit.
@@ -260,15 +353,17 @@ The single spot this repo's reviews keep catching. All three surfaces, stated pr
 
 **D2 — CSP `frame-ancestors` carve-out (the ONLY `_worker.js` header change).** Today
 `SECURITY_HEADERS` sets `frame-ancestors 'none'` + `x-frame-options: DENY` on every response
-(`_worker.js:18` / `:16`). In the response-finalization block, AFTER `applySecurityHeaders` +
-`applyAppCsp` (i.e. after `_worker.js:689`, so it WINS), add a carve-out scoped to the exact embed
-page path on the schedule host:
+(`_worker.js:18` / `:16`), applied to every proxied response at `:688` and to error/429 responses at
+`:383-390`. In the response-finalization block, AFTER `applySecurityHeaders` + `applyAppCsp` (i.e.
+after `_worker.js:689`, so it WINS), add a carve-out scoped to the exact embed paths AND the submit
+response on the schedule host:
 
 ```js
-// Phase 19: the lead-form embed PAGE is the ONLY frameable surface, and ONLY by
-// Tyler's marketing domains. Scoped to the exact embed path on the schedule host;
-// every other route keeps frame-ancestors 'none' + x-frame-options DENY.
-if (incomingUrl.hostname === "schedule.bythereeses.com" && isLeadFormEmbedPath(incomingUrl.pathname)) {
+// Phase 19: the lead-form embed PAGE, its thanks page, AND the submit redirect/
+// re-render response are the ONLY frameable surfaces, and ONLY by Tyler's
+// marketing domains. Scoped to exact paths on the schedule host; every other
+// route keeps frame-ancestors 'none' + x-frame-options DENY.
+if (incomingUrl.hostname === "schedule.bythereeses.com" && isLeadFormFrameablePath(incomingUrl.pathname)) {
   responseHeaders.set(
     "content-security-policy",
     "base-uri 'self'; object-src 'none'; frame-ancestors 'self' https://bythereeses.com https://www.bythereeses.com; upgrade-insecure-requests",
@@ -277,32 +372,62 @@ if (incomingUrl.hostname === "schedule.bythereeses.com" && isLeadFormEmbedPath(i
 }
 ```
 
-with `isLeadFormEmbedPath(pathname) = /^\/embed\/lead\/[^/]+(?:\/thanks)?\/?$/.test(pathname)`.
-Notes: (a) **must drop `x-frame-options`** — a lingering `DENY` blocks framing regardless of
-`frame-ancestors` in browsers that honor XFO; (b) the embed page is NOT cached
-(`canCachePublicBookingPage` `:515-522` only matches `/book/`), so there is no cache-HIT path to mirror
-(unlike the CSP-preserve fix at `:617-632`); (c) the POST/thanks JSON/redirect responses are never
-framed, so only the page carve-out is needed. This is the precise "which header, which route, set
-where" the task asked for.
-
-**Proxy host gate (`isSchedulePublicPath`, `_worker.js:286-298`) — ADD** all three paths, else the
-schedule-host gate 303-redirects them to the discovery-call booking page (`:554-556`):
+with `isLeadFormFrameablePath(pathname)` matching the EXACT dot-free paths plus the submit path:
 ```js
-/^\/embed\/lead\/[^/]+(?:\/thanks)?\/?$/.test(pathname) ||
+pathname === "/embed/lead" || pathname === "/embed/lead/thanks" || pathname === "/api/lead-form/submit"
+```
+Notes:
+- (a) **must drop `x-frame-options`** — a lingering `DENY` blocks framing regardless of
+  `frame-ancestors` in browsers that honor XFO.
+- (b) the embed page is NOT proxy-cached (`canCachePublicBookingPage` `:515-522` only matches
+  `/book/`), so there is no cache-HIT path to mirror. But because it is uncached AND mints a
+  per-request nonce, the PAGE routes MUST be dynamically rendered — **§5/§8 mandate
+  `export const dynamic = "force-dynamic"` + `cache-control: private, no-store` on BOTH the embed page
+  and the thanks page** (MAJOR-2). Minting a nonce with `Date.now()`+`crypto` does NOT by itself opt a
+  route out of Next's full-route cache; a cached embed page would freeze one `{issuedAtMs, id}` for all
+  visitors → after `MAX_AGE_MS` every genuine submission is silently dropped (I9) and, within the
+  window, two visitors share one `nonceId` → `webform:${nonceId}` dedup collision (`:533-537`) → the
+  second lead discarded. Every other page in this repo already carries `force-dynamic` (40+ sites,
+  e.g. `src/app/book/[slug]/page.tsx:11`); the embed pages MUST follow that convention.
+- (c) **All USER-VISIBLE POST outcomes are 303 redirects** (§4/BLOCKER-2): success and bot-signal drop
+  → `…/thanks`; validation error / stale nonce → back to `/embed/lead?t=<token>&error=…`. The form
+  POSTs same-origin and the POST RESPONSE BECOMES THE FRAMED DOCUMENT (frame-ancestors/XFO apply to
+  form-submission navigations), so a non-redirect body would render as a BLANK FRAME. The carve-out
+  therefore ALSO covers `/api/lead-form/submit` (MAJOR-3) so the 303 (and any error re-render) carries
+  the SAME relaxed `frame-ancestors` — browser handling of framing headers on 3xx inside a frame
+  navigation is historically inconsistent, so this is pinned by test, not asserted. The thanks PAGE is
+  itself framed and its path is in the carve-out; the only non-framed POST outcome is the raw `403`
+  bad-token response (no page was ever legitimately rendered there).
+- (d) **MINOR-8:** a `leadForm` `429` inside the iframe would otherwise render as a blocked document
+  (`rateLimitResponse` ships `SECURITY_HEADERS` with `frame-ancestors 'none'`, `:383-390`). Because the
+  429 is emitted for `/api/lead-form/submit`, the carve-out (which matches that path) relaxes its
+  frame-ancestors too, so a rate-limited submit degrades visibly inside the frame rather than blanking.
+
+**Proxy host gate (`isSchedulePublicPath`, `_worker.js:286-298`) — ADD** all three paths (EXACT,
+dot-free), else the schedule-host gate 303-redirects them to the discovery-call booking page
+(`:554-556`):
+```js
+pathname === "/embed/lead" ||
+pathname === "/embed/lead/thanks" ||
 pathname === "/api/lead-form/submit" ||
 ```
 **Do NOT add to `isStudioPublicPath`** (`:224-284`) — that is the admin host; the lead form has no
 business there.
 
-**D3 — Rate-limit kind (`rateLimitKind`, `_worker.js:306-362`) — a DEDICATED `leadForm` kind.** Add
-`leadForm: { max: 10, windowSeconds: 600 }` to `RATE_LIMITS` (`:21-59`) and match it BEFORE the
-`publicMutation` branch (`:336-360`):
+**D3 — Rate-limit kinds (`rateLimitKind`, `_worker.js:306-362`) — a DEDICATED `leadForm` kind + a
+`leadFormPage` GET kind.** Add to `RATE_LIMITS` (`:21-59`) `leadForm: { max: 10, windowSeconds: 600 }`
+and `leadFormPage: { max: 60, windowSeconds: 60 }`, and match them BEFORE the `publicMutation` branch
+(`:336-360`):
 ```js
 if (request.method !== "GET" && pathname === "/api/lead-form/submit") return "leadForm";
+if (request.method === "GET" && (pathname === "/embed/lead" || pathname === "/embed/lead/thanks")) return "leadFormPage";
 ```
 Rationale (mirrors the twilio/inbound "own kind, not publicMutation" reasoning at `:36-51`): form-spam
-volume is unrelated to booking volume, and a shared bucket would let one abuse the other. GET requests
-to the embed/thanks pages get no rate kind (return `null`), same as the booking pages.
+volume is unrelated to booking volume, and a shared bucket would let one abuse the other. The embed GET
+gets its OWN modest kind rather than `null` (MEDIUM-6): unlike the booking pages (proxy-cached 60s,
+`:515-522`), the embed page is explicitly UNCACHED and every GET does origin SSR + an `app_settings`
+read + an HMAC nonce mint, so an unmetered GET would be free origin-load amplification + unlimited
+nonce farming.
 
 **Origin-guard (`src/lib/origin-guard.ts`) — DO NOT TOUCH (Phase 24 MAJOR-1).** The lead-form routes
 are **PROXY-ONLY**. Leaving them OUT of `PUBLIC_PAGE_PREFIXES`/`PUBLIC_API_PREFIXES` is what makes
@@ -319,19 +444,21 @@ fall-through is `return true` (`:262`), so without exemptions all three paths wo
 `ADMIN_PROOF_ENFORCE=1` (the latent trap Phase 8a/8b/8c each had to defuse). Add, alongside the sibling
 public exemptions:
 ```js
-if (/^\/embed\/lead\/[^/]+(?:\/thanks)?$/.test(path)) return false;
+if (path === "/embed/lead" || path === "/embed/lead/thanks") return false;
 if (path === "/api/lead-form/submit") return false;
 ```
 The signed embed token + nonce are the credentials, not the admin proof (comment it like `:199-221`).
+Note these are the EXACT dot-free paths — the same paths the middleware page matcher now actually
+matches (I7/BLOCKER-1); a dotted token-in-path would never reach this predicate at all.
 
 Summary table:
 
 | Surface | Setting | Value |
 |---|---|---|
-| Proxy schedule-host gate | `isSchedulePublicPath` | **ADD** embed page, submit POST, thanks page |
+| Proxy schedule-host gate | `isSchedulePublicPath` | **ADD** `/embed/lead`, `/embed/lead/thanks`, `/api/lead-form/submit` (exact, dot-free) |
 | Proxy admin-host gate | `isStudioPublicPath` | **unchanged** (wrong host) |
-| Proxy rate limit | `rateLimitKind` / `RATE_LIMITS` | **ADD** dedicated `leadForm` kind (before `publicMutation`) |
-| Proxy CSP | response finalize | **ADD** `frame-ancestors` carve-out + drop `x-frame-options`, embed page only |
+| Proxy rate limit | `rateLimitKind` / `RATE_LIMITS` | **ADD** `leadForm` (POST) + `leadFormPage` (GET) kinds (before `publicMutation`) |
+| Proxy CSP | response finalize | **ADD** `frame-ancestors` carve-out + drop `x-frame-options` for `/embed/lead`, `/embed/lead/thanks`, AND `/api/lead-form/submit` |
 | Origin guard | `PUBLIC_PAGE_PREFIXES` / `PUBLIC_API_PREFIXES` | **unchanged** (proxy-only; adding = dead code + wider surface) |
 | Origin guard | in-route | submit route calls `guardDirectWorkerApiRequest` (defense-in-depth) |
 | Admin proof | `adminProofRequired` | **ADD** exemptions for all three paths |
@@ -340,17 +467,21 @@ Summary table:
 
 ## 7. Migration — one additive nullable column (3-place mirror)
 
-Migration number: **0096** (0095 = `questionnaire_autofill_review`, the current tail — verified
-`migrations/` ends at `0095`; if a CR races another 0096 in first, renumber to the next free slot).
+Migration number: **0097** (0095 = `questionnaire_autofill_review`, the current tail — verified
+`migrations/` ends at `0095`). Phases 18, 19, 20 all originally claimed `0096`; by build order they
+are assigned **18 → 0096, 19 → 0097, 20 → 0098**. **CAVEAT: the builder MUST confirm the next free
+slot at build time (`grep`/`ls migrations/` for the tail) and renumber if 0096 was already taken by
+Phase 18 landing first, or if another CR raced a `0097` in — the number is whatever the next free slot
+actually is, not a hard-coded constant.**
 
 ```sql
--- 0096: Phase 19 embeddable lead-form config. Additive + idempotent. NON-CANONICAL:
+-- 0097: Phase 19 embeddable lead-form config. Additive + idempotent. NON-CANONICAL:
 -- this column holds a display/config artifact; losing it reverts to code defaults, no business state.
 ALTER TABLE app_settings ADD COLUMN lead_form_config_json TEXT;
 ```
 
 Mirror per repo convention (matches Phase 23 §7):
-1. `migrations/0096_lead_form_config.sql` — the file above.
+1. `migrations/0097_lead_form_config.sql` — the file above (renumber if the tail moved; see caveat).
 2. `src/db/client.ts` — `addColumnIfMissing(database, "app_settings", "lead_form_config_json", "TEXT");`
 3. `src/db/schema.ts` — add `leadFormConfigJson: text("lead_form_config_json")` to `appSettings`
    (`:208-231`).
@@ -362,24 +493,34 @@ No index (config is read by the single settings row PK).
 
 ## 8. Task breakdown (ordered; effort / risk)
 
-1. **Migration 0096 + 3-place mirror** (§7). Effort S / Risk L. Purely additive.
-2. **Lead-form config module** (`src/lib/lead-form.ts`): `LeadFormConfig` type, defaults,
-   `normalizeLeadFormConfig` (forces name/email/message on+required), `getLeadFormConfig`, and a
-   settings-write path (extend `updateAppSettingsFromForm`). Effort S / Risk L.
-3. **Token module** (`src/lib/lead-form-links.ts`): `createLeadFormEmbedToken` / `verifyLeadFormEmbedToken`
-   + `mintFormNonce` / `verifyFormNonce` (timing + max-age), reusing the `questionnaire-links` HMAC
-   helpers/secret. Effort S / Risk M.
+1. **Migration 0097 + 3-place mirror** (§7; confirm the next free slot at build time). Effort S / Risk L.
+   Purely additive.
+2. **Lead-form config module** (`src/lib/lead-form.ts`): `LeadFormConfig` type (incl. `rev:number`),
+   defaults, `normalizeLeadFormConfig` (forces name/email/message on+required; runs
+   `sanitizeLine`/`sanitizeBody` + caps on every string field, MEDIUM-3), `getLeadFormConfig`, and a
+   **DEDICATED** settings-write path `updateLeadFormConfigFromForm` (separate action, NOT joined into
+   `updateAppSettingsFromForm` — MINOR-9). Effort S / Risk L.
+3. **Token module** (`src/lib/lead-form-links.ts`): `createLeadFormEmbedToken` (payload
+   `{ v:1, formId, rev }`) / `verifyLeadFormEmbedToken` (verifies `rev` against config, MEDIUM-7)
+   + `mintFormNonce` (`id: crypto.randomUUID()`, MEDIUM-1) / `verifyFormNonce` (timing + max-age 8 h,
+   MAJOR-4), reusing the `questionnaire-links` HMAC helpers/secret. The token rides in `?t=` (query
+   param, dot-free path, BLOCKER-1). Effort S / Risk M.
 4. **`ingestWebFormInquiry`** in `src/lib/inbound-inquiry.ts` (§3) + the optional `origin` param on
    `draftFromInquiry` (D5, email path byte-for-byte). Effort M / **Risk H** — the I2/I3 invariant core;
    must reuse (not fork) caps/sanitizers/flood-guard/drafter, and never touch canonical writes.
-5. **Embed page route** `/embed/lead/[token]` (GET) + `/embed/lead/[token]/thanks`: verify embed token,
-   render configured fields + honeypot + minted nonce; flag-off → `notFound()`. Effort M / Risk M.
-6. **Submit route** `/api/lead-form/submit` (POST): flag gate → token → nonce/timing → honeypot → caps
-   → `ingestWebFormInquiry` → 303 thanks; `guardDirectWorkerApiRequest` defense-in-depth; friendly
-   `200` on spam-drop, `403` on bad token. Effort M / **Risk H**.
-7. **Proxy classification** (`_worker.js`, §6/D2/D3): `isSchedulePublicPath` += 3 paths;
-   `leadForm` rate kind; `frame-ancestors` carve-out + `x-frame-options` drop + `isLeadFormEmbedPath`
-   helper. Effort M / Risk M (the review-sensitive one).
+5. **Embed page route** `/embed/lead` (GET, token in `?t=`) + `/embed/lead/thanks` (GET): verify embed
+   token, render configured fields (ESCAPED text nodes only, MEDIUM-3) + honeypot + minted nonce;
+   flag-off → `notFound()`. **BOTH pages MUST set `export const dynamic = "force-dynamic"` +
+   `cache-control: private, no-store`** (MAJOR-2 — a cached page freezes the nonce → silent lead loss).
+   Effort M / Risk M.
+6. **Submit route** `/api/lead-form/submit` (POST): flag gate → token (+`rev`) → nonce/timing →
+   honeypot → caps → `ingestWebFormInquiry`; ALL user-visible outcomes are **303s**: success/bot-signal
+   → `…/thanks`, validation/stale → back to `/embed/lead?t=…&error=…` (BLOCKER-2); ONLY the bad-token
+   outcome is a raw `403`. `guardDirectWorkerApiRequest` defense-in-depth. Effort M / **Risk H**.
+7. **Proxy classification** (`_worker.js`, §6/D2/D3): `isSchedulePublicPath` += 3 exact paths;
+   `leadForm` + `leadFormPage` rate kinds; `frame-ancestors` carve-out + `x-frame-options` drop for the
+   two embed pages AND the submit response + `isLeadFormFrameablePath` helper. Effort M / Risk M (the
+   review-sensitive one).
 8. **`adminProofRequired` exemptions** (`admin-proxy-auth.ts`, §6). Effort S / Risk L.
 9. **Settings UI**: lead-form config editor + "Copy embed snippet" (signed iframe). Effort M / Risk L.
 10. **Tests** (§9). Effort M / Risk L.
@@ -399,34 +540,60 @@ No index (config is read by the single settings row PK).
 2. **Approval is the sole canonical path (I3).** `approveInquiryProjectCreation` on the web-form row →
    canonical project created via the existing path; activity `actorType:"admin"`; no code change to the
    approval fn exercised.
-3. **Honeypot drop (I9).** POST with `company_website` filled → `200`, ZERO `inbound_inquiries` rows.
-4. **Timing nonce (spam).** POST with nonce age `< MIN_FILL_MS` → dropped (no row); age within window →
-   row created; age `> MAX_AGE_MS` → dropped.
-5. **Embed token gate.** POST with missing/tampered token → `403`, no row; valid token → proceeds.
-6. **Length caps (I5).** Over-cap name/email/phone/message → rejected or stored truncated to the
-   inbound-inquiry caps; assert no field exceeds its cap in the stored row.
+3. **Honeypot drop (I9, BLOCKER-2).** POST with `company_website` filled → **303 to `…/thanks`**
+   (indistinguishable from success, NOT a `200` body), ZERO `inbound_inquiries` rows.
+4. **Timing nonce (BLOCKER-2/MAJOR-4).** POST with nonce age `< MIN_FILL_MS` → bot signal → **303 to
+   `…/thanks`**, no row; age within window → row created + **303 to `…/thanks`**; age `> MAX_AGE_MS`
+   (8 h) → NOT dropped: **303 back to `/embed/lead?t=…&error=…`** re-rendering the form with a fresh
+   nonce (assert the response is a 303 to an embed path, a row is NOT created, and NO lead is silently
+   lost).
+5. **Embed token gate.** POST with missing/tampered token → `403`, no row (the ONLY non-redirect
+   outcome); valid token → proceeds. Token whose `rev` ≠ `config.rev` (revoked, MEDIUM-7) → `403`.
+6. **Length caps (I5, MINOR-2).** Over-cap non-identity fields (phone/message) stored truncated to the
+   inbound-inquiry caps (assert no stored field exceeds its cap). An over-cap/invalid REQUIRED identity
+   field (email — `normalizeEmail` `:340-347` REJECTS over-cap by returning `null`, it does NOT
+   truncate) → **303 back to the form with `?error=…`** (a validation re-render), NOT a silent
+   null-email review row.
 7. **Idempotent double-submit (B2 reuse).** Same nonce POSTed twice → single `inbound_inquiries` row
    (INSERT-OR-IGNORE on `webform:${nonceId}`), single agent task.
 8. **CRM flood guard reuse.** Exceed `DOMAIN_HOURLY_INSERT_CAP` from one email domain → row
-   auto-`status:"spam"`, no agent task.
+   auto-`status:"spam"`, no agent task. Additionally assert a health alert/count is emitted when the
+   GLOBAL cap trips (MEDIUM-5 cross-channel visibility).
 9. **Flag-off = no surface (I1).** `LEAD_FORM_ENABLED` unset → embed GET `404`, submit POST `404`,
    thanks GET `404`.
-10. **Proxy classification drift pins (I4/I7).**
-    `isSchedulePublicPath("/embed/lead/abc") === true`, `("/embed/lead/abc/thanks") === true`,
-    `("/api/lead-form/submit") === true`; `isStudioPublicPath("/embed/lead/abc") === false`;
-    `isPublicOriginBypassPath("/embed/lead/abc") === false`;
+10. **Proxy + middleware classification drift pins (I4/I7).** Predicate pins on the EXACT dot-free
+    paths: `isSchedulePublicPath("/embed/lead") === true`, `("/embed/lead/thanks") === true`,
+    `("/api/lead-form/submit") === true`; `isStudioPublicPath("/embed/lead") === false`;
+    `isPublicOriginBypassPath("/embed/lead") === false`;
     `isPublicOriginBypassApiPath("/api/lead-form/submit") === false` (Phase 24 dead-code trap);
-    `rateLimitKind` for POST `/api/lead-form/submit` === `"leadForm"`;
-    `adminProofRequired("/embed/lead/abc") === false` and `("/api/lead-form/submit") === false`.
-11. **CSP framing carve-out pin (I6, `proxy-security.test.ts`).** A schedule-host response for
-    `/embed/lead/<token>` has `content-security-policy` containing
+    `rateLimitKind` for POST `/api/lead-form/submit` === `"leadForm"` and for GET `/embed/lead` ===
+    `"leadFormPage"`; `adminProofRequired("/embed/lead") === false` and `("/api/lead-form/submit")
+    === false`.
+    **PLUS a REQUEST-LEVEL middleware-matcher test (BLOCKER-1 — the predicate pins above are false
+    coverage otherwise):** assert `/embed/lead` IS matched by the middleware `config.matcher` (it is
+    dot-free, so it is NOT excluded by the `.*\\..*` clause), and that a direct-origin request to
+    `/embed/lead` lacking `x-reese-origin-secret` is 404'd by `guardDirectWorkerPageRequest` — exercising
+    the matcher at request level, NOT just calling the predicate functions. Add a negative pin: a
+    dotted path like `/embed/lead/<token-with-dot>` would be EXCLUDED from the matcher (documents why
+    the token must be a query param).
+11. **CSP framing carve-out pin (I6/MAJOR-3, `proxy-security.test.ts`).** A schedule-host response for
+    `/embed/lead`, for `/embed/lead/thanks`, AND for `/api/lead-form/submit` (the 303 + the error
+    re-render + a `leadForm` 429, MINOR-8) each has `content-security-policy` containing
     `frame-ancestors 'self' https://bythereeses.com https://www.bythereeses.com` and NO
     `x-frame-options`; a response for any OTHER path (e.g. `/book/...`) still has
     `frame-ancestors 'none'` + `x-frame-options: DENY`. (Drift pin so a future edit cannot silently
-    widen framing.)
-12. **Config (§5).** `lead_form_config_json` NULL → default field set rendered; a field set
+    widen — or narrow — framing.)
+12. **Config (§5, BLOCKER-2).** `lead_form_config_json` NULL → default field set rendered; a field set
     `enabled:false` → its input absent from the embed HTML and ignored on POST; `name`/`email`/`message`
-    forced on+required even if stored otherwise; a missing required field → `400`/re-render.
+    forced on+required even if stored otherwise; a missing required field → **303 back to
+    `/embed/lead?t=…&error=…`** (a re-render inside the carve-out, NEVER a `400`/blank-frame body).
+13. **Rendering mode (MAJOR-2).** Two GETs of the SAME embed URL yield DIFFERENT nonce ids (assert the
+    hidden nonce field differs between renders) — proves `force-dynamic` + `no-store` (a cached page
+    would freeze one nonce → silent lead loss). Assert the embed and thanks responses carry
+    `cache-control: private, no-store`.
+14. **Config stored-XSS inert (MEDIUM-3).** A `<script>` (and `"><img onerror=…>`) in `introText`
+    renders as ESCAPED text in the embed HTML (no live element/`dangerouslySetInnerHTML`); and
+    `normalizeLeadFormConfig` sanitizes it on store.
 
 Gate: `npm run lint` exit 0; `npm run build` EXIT=0 (type errors print after "Compiled successfully");
 `npm test` all pass.
@@ -436,7 +603,7 @@ Gate: `npm run lint` exit 0; `npm run build` EXIT=0 (type errors print after "Co
 ## 10. Rollout
 
 - **Default:** `LEAD_FORM_ENABLED` unset ⇒ all three routes `404` (I1). No embed possible.
-- **Enable:** apply migration 0096, set `LEAD_FORM_ENABLED=true`, configure fields in Settings, copy the
+- **Enable:** apply migration 0097, set `LEAD_FORM_ENABLED=true`, configure fields in Settings, copy the
   signed iframe snippet, paste on `bythereeses.com`. Submissions then land in the existing inquiry
   triage inbox as `web_form`-sourced review items.
 - **Rollback:** unset `LEAD_FORM_ENABLED` ⇒ routes `404` instantly; existing `inbound_inquiries` rows
@@ -460,10 +627,14 @@ Gate: `npm run lint` exit 0; `npm run build` EXIT=0 (type errors print after "Co
 - **Public surface on the SCHEDULE host only** — `isSchedulePublicPath` gains three paths; the admin
   host (`isStudioPublicPath`) is untouched; the origin-guard bypass lists are untouched (proxy-only,
   Phase 24 trap); `adminProofRequired` gains explicit exemptions (I4/I7).
-- **Framing allowed ONLY for Tyler's domains**, scoped to the exact embed page path; every other route
-  keeps `frame-ancestors 'none'` + `x-frame-options DENY` (I6).
+- **Framing allowed ONLY for Tyler's domains**, scoped to the exact embed-page paths (`/embed/lead`,
+  `/embed/lead/thanks`) AND the submit response (`/api/lead-form/submit`, so the 303/error re-render
+  never blanks the frame); every other route keeps `frame-ancestors 'none'` + `x-frame-options DENY`
+  (I6). All user-visible POST outcomes are 303s to those paths (BLOCKER-2).
 - **No CAPTCHA / no external service** — spam defense is honeypot + signed timing nonce + signed embed
-  token + per-IP `leadForm` limit + CRM flood guard + length caps, all in-house (§4).
+  token (revocable via `rev`) + per-IP `leadForm`/`leadFormPage` limits + CRM flood guard + length
+  caps, all in-house (§4). The token/nonce raise bot cost; the CRM flood guard + rate kinds + output
+  ceiling are the real spam boundary.
 - **No full form builder** — fixed field vocabulary with show/hide + required + copy customization only
   (§5).
 - **One additive nullable column; no new tables; `inbound_inquiries` unchanged** — provenance rides in
@@ -473,6 +644,42 @@ Gate: `npm run lint` exit 0; `npm run build` EXIT=0 (type errors print after "Co
 
 ## 12. Changelog
 
+### Rev 2 — 2026-07-07
+Applied two independent adversarial Fable reviews (both APPROVE WITH CHANGES, converged findings).
+- **BLOCKER-1 (token-in-path defeats the middleware matcher):** moved the embed token to a `?t=`
+  QUERY PARAM so the page paths (`/embed/lead`, `/embed/lead/thanks`) are DOT-FREE and actually matched
+  by the Next middleware page matcher (`.*\\..*` excludes dotted paths) — I7 is now deliverable.
+  Rewrote all §6 classification predicates to exact-path equality; added a REQUEST-LEVEL
+  middleware-matcher test (§9 test 10) so the predicate pins are no longer false coverage. (§1 I7, §2,
+  §6, §9.)
+- **BLOCKER-2 (non-redirect POST responses blank the frame):** every USER-VISIBLE POST outcome is now
+  a 303 to a carve-out-matched embed path (success/bot-signal → thanks; validation/stale → back to the
+  form). Only the bad-token `403` is a non-redirect. (§1 I9, §4, §6 note (c), §9 tests 3/4/6/12.)
+- **MAJOR-3 (submit 303 carried `frame-ancestors 'none'`):** widened the CSP carve-out to ALSO match
+  `/api/lead-form/submit`; extended the §9 framing test to pin the submit path headers. (§1 I6, §6 D2.)
+- **MAJOR-2 (rendering mode / cached nonce → silent lead loss):** mandated
+  `export const dynamic = "force-dynamic"` + `cache-control: private, no-store` on both pages; added a
+  two-GETs-differ nonce test. (§5, §6 D2 note (b), §8, §9 test 13.)
+- **MAJOR-4 (30-min expiry misclassifies slow humans):** stale nonce now 303s back to a re-rendered
+  form (never a silent drop); lengthened `MAX_AGE_MS` to 8 h (replay already neutralized by the
+  `nonceId` dedup). (§4.2.)
+- **MEDIUM-1 (`nonceId` entropy):** required `id: crypto.randomUUID()` in the signed nonce. (§3.3, §4.2.)
+- **MEDIUM-3 (config stored-XSS):** mandated escaped-text-node rendering only (never
+  `dangerouslySetInnerHTML`), `normalizeLeadFormConfig` sanitize+cap on store, and an inert-`<script>`
+  test. (§5, §9 test 14.)
+- **MEDIUM-5 (flood-guard cross-channel coupling):** documented the tradeoff; kept `isRateLimited`
+  reused verbatim and required a health alert/count when the GLOBAL cap trips. (§4.6, §9 test 8.)
+- **MEDIUM-6 (embed GET uncached + unmetered):** added a `leadFormPage` GET rate kind
+  (`{ max: 60, windowSeconds: 60 }`). (§4.5, §6 D3.)
+- **MEDIUM-7 (no token revocation):** added `rev` to the token payload AND `LeadFormConfig`; submit
+  verifies `token.rev === config.rev`; "Copy embed snippet" mints the current rev. (§4.1, §5.)
+- **MEDIUM-2 (migration collision):** assigned Phase 19 → migration **0097** (18→0096, 20→0098) with a
+  build-time confirm-the-next-free-slot caveat. (§7, §8, §10.)
+- **MINORs:** honesty on the reusable token / real spam ceiling (§4 threat-model note); over-cap email
+  → 400 re-render not a null-email row (§9 test 6); separate dedicated settings action so lead-form
+  config does not reset business settings (§5, §8); tightened D2 note (c) prose vs. its own regex;
+  `leadForm` 429 exempted in the carve-out (§6 D2 note (d)).
+
 ### Rev 1 — 2026-07-07
 Initial build-ready spec. Adds an embeddable, customizable lead-capture form that feeds the EXACT
 existing inquiry-intake pipeline via a sibling `ingestWebFormInquiry` (review item only; zero new
@@ -481,5 +688,5 @@ the one embed page path (+ `x-frame-options` drop). Proxy-only classification on
 (`isSchedulePublicPath`, dedicated `leadForm` rate kind, `adminProofRequired` exemptions); origin-guard
 bypass lists deliberately untouched (Phase 24 dead-code trap). In-house spam defense (signed embed
 token + per-render timing nonce + honeypot + caps + CRM flood guard; no CAPTCHA). Config in
-`app_settings.lead_form_config_json` (one additive column, migration 0096). Dark behind
-`LEAD_FORM_ENABLED`. Awaiting adversarial Fable spec review.
+`app_settings.lead_form_config_json` (one additive column, migration 0096 — superseded → 0097 in
+Rev 2). Dark behind `LEAD_FORM_ENABLED`. Awaiting adversarial Fable spec review.
