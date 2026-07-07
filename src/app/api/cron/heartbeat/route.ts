@@ -18,8 +18,13 @@ function secretsMatch(provided: string | null, expected: string) {
 }
 
 // Only these known operational job keys may be written via the public heartbeat endpoint (no
-// arbitrary key injection). backup-d1 is the primary out-of-Worker use.
-const ALLOWED_HEARTBEAT_JOBS = new Set<JobName>(["backup-d1", "scheduler-reminders", "sequence-runner"]);
+// arbitrary key injection). Restricted to backup-d1 ONLY (FIX 6): it is the sole job that runs
+// OUT-of-Worker (the launchd backup script). scheduler-reminders / sequence-runner write their own
+// heartbeat CRM-side inside the bearer-authed cron route; allowing them here would let a
+// CRON_SECRET compromise (the secret sits in plaintext in the mac-mini launchd script — the
+// weakest custody point) forge fresh liveness for those jobs and SUPPRESS the exact staleness
+// alarms this phase builds.
+const ALLOWED_HEARTBEAT_JOBS = new Set<JobName>(["backup-d1"]);
 
 export async function POST(request: NextRequest) {
   const configuredSecret = process.env.CRON_SECRET || process.env.SCHEDULER_LINK_SECRET;

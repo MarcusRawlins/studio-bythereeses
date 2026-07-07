@@ -40,6 +40,33 @@ async function main() {
     assert.equal(countRows(database, table), 0, `${table} must start empty`);
   }
 
+  // Seed ONE known row in each canonical table BEFORE any monitoring runs. This strengthens the
+  // guard beyond "no new INSERT" (an empty-db count only catches inserts): we snapshot each seeded
+  // row and assert it is byte-for-byte unchanged afterwards, so an UPDATE or DELETE by the
+  // monitoring layer would also fail the guard.
+  const now = new Date().toISOString();
+  database.exec(`
+    INSERT INTO clients (id, first_name, last_name, email, sms_opt_in, created_at, updated_at)
+      VALUES ('cli-1','Ada','Lovelace','ada@example.com',0,'${now}','${now}');
+    INSERT INTO projects (id, name, type, stage, status, calendar_sync_status, created_at, updated_at)
+      VALUES ('proj-1','Guard Project','wedding','inquiry','active','not_connected','${now}','${now}');
+    INSERT INTO invoices (id, project_id, invoice_number, status, created_at, updated_at)
+      VALUES ('inv-1','proj-1','INV-GUARD-1','draft','${now}','${now}');
+    INSERT INTO invoice_payments (id, invoice_id, label, created_at, updated_at)
+      VALUES ('pay-1','inv-1','Balance','${now}','${now}');
+    INSERT INTO payment_refunds (id, stripe_refund_id, invoice_payment_id, amount_cents, currency, status, created_at, updated_at)
+      VALUES ('pref-1','re_guard','pay-1',5000,'usd','succeeded','${now}','${now}');
+    INSERT INTO refund_initiations (id, invoice_payment_id, amount_cents, currency, status, stripe_refund_id, created_at, updated_at)
+      VALUES ('ri-1','pay-1',5000,'usd','succeeded','re_guard','${now}','${now}');
+    INSERT INTO sequence_sends (id, project_id, sequence_key, step_key, dedupe_key, channel, mode, status, attempts, fired_at)
+      VALUES ('seq-1','proj-1','welcome','step1','dedupe-guard-1','email','auto_send','sent',0,'${now}');
+  `);
+  const snapshot: Record<string, unknown[]> = {};
+  for (const table of CANONICAL_TABLES) {
+    snapshot[table] = database.prepare(`SELECT * FROM ${table} ORDER BY id`).all();
+    assert.equal((snapshot[table] as unknown[]).length, 1, `${table} seeded with exactly one row`);
+  }
+
   // recordJobRun writes only job_runs.
   await recordJobRun("stripe-webhook", true);
   await recordJobRun("scheduler-reminders", false, "boom");
@@ -79,9 +106,12 @@ async function main() {
     1,
     "monitor run wrote its own heartbeat",
   );
-  // ZERO canonical writes from all of the above.
+  // ZERO canonical MUTATION from all of the above: no new INSERT (count unchanged at 1) AND the
+  // seeded rows are byte-for-byte identical (no UPDATE / no DELETE).
   for (const table of CANONICAL_TABLES) {
-    assert.equal(countRows(database, table), 0, `monitoring must write ZERO rows to canonical table ${table}`);
+    assert.equal(countRows(database, table), 1, `monitoring must not INSERT/DELETE canonical table ${table}`);
+    const after = database.prepare(`SELECT * FROM ${table} ORDER BY id`).all();
+    assert.deepEqual(after, snapshot[table], `monitoring must not mutate canonical table ${table} (no UPDATE)`);
   }
 
   // ---- no agent/MCP export of monitoring internals ----

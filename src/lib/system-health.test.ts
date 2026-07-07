@@ -177,6 +177,98 @@ async function main() {
     assert.ok(!digest.subject.includes(secret!), "digest subject must not contain a secret value");
   }
 
+  // ---- FIX 3: a required job frozen at last_status=error STILL escalates on staleness ----
+  db.prepare("DELETE FROM job_runs").run();
+  db.prepare("DELETE FROM refund_initiations").run();
+  // error, only 1 consecutive failure (would be WARN on failures alone), but last success 7h ago.
+  upsertJobRun("scheduler-reminders", {
+    lastRunAt: iso(5 * 60 * 1000),
+    lastSuccessAt: iso(7 * HOUR),
+    lastStatus: "error",
+    lastError: "frozen at consecutive_failures:1",
+    consecutiveFailures: 1,
+  });
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  assert.equal(
+    findSignal(report.signals, "scheduler-reminders")!.severity,
+    "critical",
+    "error branch + last success 7h ago → CRITICAL via staleness, not frozen at WARN",
+  );
+  // Contrast: the same error but a FRESH last success stays WARN (error-derived only).
+  upsertJobRun("scheduler-reminders", {
+    lastRunAt: iso(5 * 60 * 1000),
+    lastSuccessAt: iso(30 * 60 * 1000),
+    lastStatus: "error",
+    lastError: "recent error",
+    consecutiveFailures: 1,
+  });
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  assert.equal(findSignal(report.signals, "scheduler-reminders")!.severity, "warn", "error + fresh success → WARN");
+
+  // ---- FIX 4: Stripe signature misconfiguration WARNs; a benign scanner probe does NOT ----
+  // Misconfig pattern: recent + repeated rejects, no recent stripe-webhook success (absent here).
+  db.prepare("DELETE FROM job_runs").run();
+  upsertJobRun("stripe-webhook-rejected", { lastRunAt: iso(5 * 60 * 1000), lastStatus: "error", lastError: "sig", consecutiveFailures: 8 });
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  const misconfig = findSignal(report.signals, "stripe-webhook-signature");
+  assert.ok(misconfig && misconfig.severity === "warn", "persistent recent rejects + no recent success → WARN");
+
+  // Benign one-off scanner probe: a single, STALE reject with a healthy recent success → no warn.
+  db.prepare("DELETE FROM job_runs").run();
+  upsertJobRun("stripe-webhook-rejected", { lastRunAt: iso(10 * HOUR), lastStatus: "error", lastError: "sig", consecutiveFailures: 1 });
+  upsertJobRun("stripe-webhook", { lastRunAt: iso(30 * 60 * 1000), lastSuccessAt: iso(30 * 60 * 1000), lastStatus: "ok" });
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  assert.ok(!findSignal(report.signals, "stripe-webhook-signature"), "one-off stale reject + healthy recent success → NO warn");
+
+  // Active scanner (recent, repeated rejects) but a healthy recent success (secret is fine) → no warn.
+  db.prepare("DELETE FROM job_runs").run();
+  upsertJobRun("stripe-webhook-rejected", { lastRunAt: iso(5 * 60 * 1000), lastStatus: "error", lastError: "sig", consecutiveFailures: 8 });
+  upsertJobRun("stripe-webhook", { lastRunAt: iso(30 * 60 * 1000), lastSuccessAt: iso(30 * 60 * 1000), lastStatus: "ok" });
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  assert.ok(!findSignal(report.signals, "stripe-webhook-signature"), "recent rejects but healthy recent success → NO warn (discriminator is a stale/absent success)");
+
+  // ---- FIX 5: a finance-read failure → WARN (not green) + refund alert-key prefix degraded ----
+  db.prepare("DELETE FROM job_runs").run();
+  db.prepare("DELETE FROM refund_initiations").run();
+  for (const name of ["scheduler-reminders", "sequence-runner", "systems-monitor"]) {
+    upsertJobRun(name, { lastRunAt: iso(5 * 60 * 1000), lastSuccessAt: iso(5 * 60 * 1000), lastStatus: "ok" });
+  }
+  process.env.DEADMAN_PING_URL = "https://hc-ping.example/abc"; // arm so its INFO advisory drops
+  report = await computeSystemHealth({
+    now: NOW,
+    requiredJobEnabledAt: ENABLED_AT,
+    loadFinanceReport: async () => {
+      throw new Error("finance read down");
+    },
+  });
+  delete process.env.DEADMAN_PING_URL;
+  const recon = findSignal(report.signals, "reconciliation");
+  assert.ok(recon && recon.severity === "warn", "finance read failure → WARN reconciliation signal (not INFO)");
+  assert.notEqual(report.overall, "green", "a degraded finance read must NOT render green");
+  assert.equal(report.overall, "warn", "degraded finance read → overall WARN");
+  assert.ok(
+    (report.degradedAlertKeyPrefixes ?? []).includes("critical:refund_stuck:"),
+    "refund alert-key prefix marked degraded so the resolve sweep skips it",
+  );
+
+  // ---- MINOR: a FUTURE / unparseable required-since must not render a missing job green ----
+  db.prepare("DELETE FROM job_runs").run();
+  const FUTURE = new Date(NOW.getTime() + 5 * 24 * HOUR).toISOString();
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: FUTURE });
+  for (const name of ["scheduler-reminders", "sequence-runner", "systems-monitor"]) {
+    assert.equal(
+      findSignal(report.signals, name)!.severity,
+      "critical",
+      `${name} missing row + FUTURE since-date → maximally stale CRITICAL, not green (fail-toward-visible)`,
+    );
+  }
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: "not-a-real-date" });
+  assert.equal(
+    findSignal(report.signals, "scheduler-reminders")!.severity,
+    "critical",
+    "unparseable since-date fails toward CRITICAL (preserved behavior)",
+  );
+
   console.log("system-health tests passed");
 }
 

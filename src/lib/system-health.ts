@@ -27,7 +27,16 @@ export type SystemHealthReport = {
   generatedAt: string;
   overall: "green" | "warn" | "critical";
   signals: HealthSignal[];
+  // Alert-key prefixes whose SOURCE failed to read this run (e.g. the finance/refund read threw).
+  // The resolve sweep must NOT resolve/re-arm keys matching these — the condition may still be
+  // active but was unreadable this cycle (FIX 5).
+  degradedAlertKeyPrefixes?: string[];
 };
+
+const SEVERITY_RANK: Record<HealthSeverity, number> = { ok: 0, info: 1, warn: 2, critical: 3 };
+function maxSeverity(a: HealthSeverity, b: HealthSeverity): HealthSeverity {
+  return SEVERITY_RANK[a] >= SEVERITY_RANK[b] ? a : b;
+}
 
 // ---------------------------------------------------------------------------
 // Flag + config helpers (read in body; never as default params). MONITOR_ENABLED gates the
@@ -41,6 +50,17 @@ export function alertEmail(): string | null {
 }
 export function deadmanPingUrl(): string | null {
   return process.env.DEADMAN_PING_URL?.trim() || null;
+}
+
+// The intended default digest hour (8 ET). A config typo (empty / NaN / non-integer / out of
+// [0,23]) must not silently disable the digest — nor, via NaN, make easternHour() never match and
+// skip it forever. Pure + exported so the parse is unit-testable.
+export const DEFAULT_DIGEST_HOUR = 8;
+export function parseDigestHour(value: string | undefined | null): number {
+  if (typeof value !== "string" || value.trim() === "") return DEFAULT_DIGEST_HOUR;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 23) return DEFAULT_DIGEST_HOUR;
+  return parsed;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -101,6 +121,15 @@ const WEBHOOK_JOBS: Record<string, WebhookJobConfig> = {
   "inbound-inquiry": { label: "Inbound inquiry email", warnFailures: 3, criticalFailures: Number.POSITIVE_INFINITY },
 };
 
+// Stripe signature-misconfiguration signal (FIX 4). A rotated/wrong STRIPE_WEBHOOK_SECRET makes
+// every real event reject pre-verify (recorded under the non-alerting 'stripe-webhook-rejected'
+// key) while 'stripe-webhook' quietly stays ok/info and payments/refunds/disputes stop landing.
+// We WARN when rejects are RECENT + REPEATED and no stripe-webhook success is recent. Tuned so a
+// one-off scanner probe (a single, stale reject with a healthy recent success) does NOT warn.
+const STRIPE_REJECT_FRESH_MS = 6 * HOUR_MS; // a reject this recent counts as "real events rejecting now"
+const STRIPE_REJECT_MIN_COUNT = 2; // >1 so a single scanner probe never trips it
+const STRIPE_WEBHOOK_SUCCESS_FRESH_MS = 24 * HOUR_MS; // a success this recent means the secret is fine
+
 const BACKUP_STALE_MS = 36 * HOUR_MS; // matches deploy:preflight's <=36h D1 check
 const SEQUENCE_STUCK_MS = 2 * HOUR_MS; // a claimed send older than a run interval
 const SMS_FAILURE_WINDOW_MS = 24 * HOUR_MS;
@@ -112,11 +141,26 @@ function ageMs(now: number, iso: string | null): number {
   return Number.isFinite(t) ? now - t : Number.POSITIVE_INFINITY;
 }
 
+// Staleness for the REQUIRED-cadence branch. An UNPARSEABLE/NULL reference already yields
+// +Infinity (fail toward CRITICAL). A FUTURE reference (config typo — e.g. MONITOR_REQUIRED_SINCE
+// set ahead of now) yields a NEGATIVE age; clamp so it fails TOWARD stale, never green: a MISSING
+// required job is treated as maximally stale (+Infinity), a present job as at-least-zero age
+// (MINOR: future since-date must not render a missing required job green).
+function requiredStalenessMs(now: number, iso: string | null, missing: boolean): number {
+  const age = ageMs(now, iso);
+  if (age < 0) return missing ? Number.POSITIVE_INFINITY : 0;
+  return age;
+}
+
 export type ComputeHealthOptions = {
   now?: Date;
   // ISO enablement timestamp for the REQUIRED jobs (a missing/NULL row clocks staleness from
   // here). Config constant, overridable in tests. Falls back to MONITOR_REQUIRED_SINCE env.
   requiredJobEnabledAt?: string;
+  // Injectable finance/refund reconciliation loader (defaults to getAgentFinanceReport). When it
+  // THROWS, the source is treated as DEGRADED (FIX 5): the refund/reconciliation signals surface
+  // as WARN (never dropped to green) and their alert keys are protected from the resolve sweep.
+  loadFinanceReport?: () => Promise<Awaited<ReturnType<typeof getAgentFinanceReport>>>;
 };
 
 function requiredEnabledAt(options?: ComputeHealthOptions): string {
@@ -132,6 +176,8 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
   const nowMs = now.getTime();
   const enabledAt = requiredEnabledAt(options);
   const signals: HealthSignal[] = [];
+  // Alert-key prefixes whose source failed this run (FIX 5) — carried to the resolve sweep.
+  const degradedAlertKeyPrefixes: string[] = [];
 
   const jobRows = await readJobRuns();
   const jobByName = new Map(jobRows.map((row) => [row.jobName, row]));
@@ -142,12 +188,27 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
     // Recorded FAILURE branch: latest run errored → evaluate on last_status/consecutive_failures.
     if (row && row.lastStatus === "error") {
       const failures = row.consecutiveFailures || 1;
-      const severity: HealthSeverity = failures >= cfg.criticalFailures ? "critical" : failures >= cfg.warnFailures ? "warn" : "warn";
+      const errorSeverity: HealthSeverity = failures >= cfg.criticalFailures ? "critical" : "warn";
+      // FIX 3: a job frozen at last_status='error' must STILL escalate on staleness — otherwise a
+      // job stuck at consecutive_failures:1 renders WARN forever even months past its last success.
+      // Take the MAX of the error-derived severity and the staleness-derived severity.
+      const staleRef = row.lastSuccessAt ?? enabledAt;
+      const stale = requiredStalenessMs(nowMs, staleRef, !row.lastSuccessAt);
+      let staleSeverity: HealthSeverity = "ok";
+      if (stale >= cfg.criticalMs) staleSeverity = "critical";
+      else if (stale >= cfg.warnMs) staleSeverity = "warn";
+      const severity = maxSeverity(errorSeverity, staleSeverity);
+      const staleNote =
+        staleSeverity !== "ok" && !row.lastSuccessAt
+          ? ` No successful run on record (clocked from enablement ${enabledAt}).`
+          : staleSeverity !== "ok"
+            ? ` Last success ${row.lastSuccessAt} is stale.`
+            : "";
       signals.push({
         key: name,
         label: cfg.label,
         severity,
-        detail: `${cfg.label} last run FAILED (${failures} consecutive): ${row.lastError ?? "no detail"}.`,
+        detail: `${cfg.label} last run FAILED (${failures} consecutive): ${row.lastError ?? "no detail"}.${staleNote}`,
         value: failures,
         alertKey: severity === "critical" ? cfg.alertKey : undefined,
       });
@@ -155,8 +216,9 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
     }
 
     // Staleness branch. Missing row OR NULL last_success_at = maximally stale from enablement.
+    const missing = !row || !row.lastSuccessAt;
     const reference = row?.lastSuccessAt ?? enabledAt;
-    const stale = ageMs(nowMs, reference);
+    const stale = requiredStalenessMs(nowMs, reference, missing);
     let severity: HealthSeverity = "ok";
     if (stale >= cfg.criticalMs) severity = "critical";
     else if (stale >= cfg.warnMs) severity = "warn";
@@ -168,7 +230,6 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
       severity = "warn";
     }
 
-    const missing = !row || !row.lastSuccessAt;
     const detailBase = missing
       ? `${cfg.label} has NO recorded successful run (missing heartbeat) — clocked stale from enablement ${enabledAt}.`
       : `${cfg.label} last succeeded ${row?.lastSuccessAt}.`;
@@ -214,6 +275,28 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
     });
   }
 
+  // --- Stripe signature misconfiguration (FIX 4) -------------------------------------------
+  // A persistent rotated/wrong STRIPE_WEBHOOK_SECRET is otherwise INVISIBLE: real events reject
+  // pre-verify (→ 'stripe-webhook-rejected', in no catalog) while 'stripe-webhook' stays ok/info.
+  {
+    const rejected = jobByName.get("stripe-webhook-rejected");
+    const webhook = jobByName.get("stripe-webhook");
+    const rejectCount = rejected?.consecutiveFailures ?? 0;
+    const rejectsFresh = rejected ? ageMs(nowMs, rejected.lastRunAt) <= STRIPE_REJECT_FRESH_MS : false;
+    const webhookRecentlySucceeded = webhook
+      ? ageMs(nowMs, webhook.lastSuccessAt) <= STRIPE_WEBHOOK_SUCCESS_FRESH_MS
+      : false;
+    if (rejectsFresh && rejectCount >= STRIPE_REJECT_MIN_COUNT && !webhookRecentlySucceeded) {
+      signals.push({
+        key: "stripe-webhook-signature",
+        label: "Stripe webhook signature",
+        severity: "warn",
+        detail: `Stripe events are being REJECTED pre-verification (${rejectCount} recent rejects) while no stripe-webhook success is recent — likely a rotated/wrong STRIPE_WEBHOOK_SECRET; payments/refunds/disputes may be silently not landing. Re-check the webhook signing secret.`,
+        value: rejectCount,
+      });
+    }
+  }
+
   // --- Backup freshness (non-required; missing → not-configured) ----------------------------
   {
     const row = jobByName.get("backup-d1");
@@ -239,7 +322,7 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
 
   // --- Reconciliation queues (money-critical) ----------------------------------------------
   try {
-    const finance = await getAgentFinanceReport();
+    const finance = await (options?.loadFinanceReport ?? getAgentFinanceReport)();
     const refunds = finance.reconciliation.refundInitiations;
     for (const stuck of refunds.stuckSubmitting) {
       signals.push({
@@ -271,11 +354,17 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
       });
     }
   } catch {
+    // FIX 5: a finance-read failure must NOT drop the money-critical refund tripwires to green or
+    // silently resolve their active alerts. Surface as WARN (so overall is not green) and mark the
+    // refund-stuck alert-key prefix DEGRADED so the resolve sweep skips it — a flapping read must
+    // not re-email the same stuck refund every cycle, nor let a persistently failing read hide it.
+    degradedAlertKeyPrefixes.push("critical:refund_stuck:");
     signals.push({
       key: "reconciliation",
       label: "Reconciliation queues",
-      severity: "info",
-      detail: "Reconciliation report unavailable this run (read failed) — retried next run.",
+      severity: "warn",
+      detail:
+        "Reconciliation report unavailable this run (finance read failed) — refund/reconciliation tripwires could NOT be evaluated; treated as DEGRADED (not green) and active refund alerts are held (not resolved). Retried next run.",
       value: null,
     });
   }
@@ -351,7 +440,12 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
       ? "warn"
       : "green";
 
-  return { generatedAt: now.toISOString(), overall, signals };
+  return {
+    generatedAt: now.toISOString(),
+    overall,
+    signals,
+    degradedAlertKeyPrefixes: degradedAlertKeyPrefixes.length ? degradedAlertKeyPrefixes : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------

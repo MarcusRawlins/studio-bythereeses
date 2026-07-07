@@ -2,10 +2,12 @@ import { sendAdminAlertEmail } from "@/lib/email";
 import { processImmediateCriticalAlerts } from "@/lib/health-alerts";
 import { recordJobRun } from "@/lib/job-runs";
 import {
+  alertEmail,
   buildHealthDigest,
   computeSystemHealth,
   deadmanPingUrl,
   monitorEnabled,
+  parseDigestHour,
 } from "@/lib/system-health";
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "node:crypto";
@@ -57,16 +59,36 @@ export async function POST(request: NextRequest) {
     const report = await computeSystemHealth({ now });
     overall = report.overall;
 
+    // A send is only "properly configured" (and therefore a real delivery failure when it fails)
+    // when ALERT_EMAIL is set. ALERT_EMAIL-unset is an intended un-wired state (like flag-off):
+    // sends fail-closed to false, but that must NOT be treated as a delivery failure (FIX 2).
+    const alertConfigured = Boolean(alertEmail());
+    let deliveryFailed = false;
+
     // 1. Immediate critical alerts (deduped via health_alerts — email once per instance).
     const alerts = await processImmediateCriticalAlerts({ report, now });
     sentImmediate = alerts.emailedKeys.length;
+    if (alertConfigured && alerts.failedKeys.length > 0) deliveryFailed = true;
 
     // 2. Daily digest — once per day when the ET hour matches the configured digest hour. The
     //    green digest is itself the liveness signal (§4.3 dead-man's-switch, layer 1).
-    const digestHour = Number(process.env.MONITOR_DIGEST_HOUR ?? "8");
-    if (easternHour(now) === (Number.isFinite(digestHour) ? digestHour : 8)) {
+    if (easternHour(now) === parseDigestHour(process.env.MONITOR_DIGEST_HOUR)) {
       const digest = buildHealthDigest(report, { deadmanArmed: Boolean(deadmanPingUrl()) });
       sentDigest = await sendAdminAlertEmail(digest);
+      if (alertConfigured && !sentDigest) deliveryFailed = true;
+    }
+
+    // FIX 2: a properly-configured alert send was ATTEMPTED this run and FAILED. This is the exact
+    // worst-case the phase exists to prevent — an alerting layer that itself fails silently. Do
+    // NOT ping the dead-man URL, record the systems-monitor heartbeat as a FAILURE (so its own
+    // staleness/error surfaces), and return 500 so the fail-loud worker throws and Cloudflare logs
+    // it. (Nothing-to-send or all-sends-succeeded falls through to the healthy path below.)
+    if (deliveryFailed) {
+      await recordJobRun("systems-monitor", false, "Alert delivery failed: an admin alert email could not be sent this run.");
+      return NextResponse.json(
+        { error: "Alert delivery failed.", overall, immediateAlertsSent: sentImmediate, digestSent: sentDigest },
+        { status: 500 },
+      );
     }
 
     // 3. Outbound dead-man ping (§4.3, layer 2 — the only layer that survives a full-stack

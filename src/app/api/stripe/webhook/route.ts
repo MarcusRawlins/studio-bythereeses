@@ -47,7 +47,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ received: true, result });
   } catch (error) {
     console.error("Stripe webhook failed", error);
-    await recordJobRun("stripe-webhook", false, error instanceof Error ? error.message : "Stripe webhook failed.");
+    // Double-verify edge (MINOR): handleStripeCheckoutWebhook RE-verifies the signature. A legit
+    // event at the 300s tolerance boundary can pass the route pre-verify above yet fail this
+    // re-verify — that throw is a StripeWebhookSignatureError, a signature REJECT, NOT a
+    // money-state-drift processing failure. Classify it to the non-alerting 'stripe-webhook-
+    // rejected' key so it never poisons the CRITICAL 'stripe-webhook' counter.
+    if (error instanceof StripeWebhookSignatureError) {
+      await recordJobRun("stripe-webhook-rejected", false, error.message);
+    } else {
+      await recordJobRun("stripe-webhook", false, error instanceof Error ? error.message : "Stripe webhook failed.");
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Stripe webhook failed." },
       { status: 400 },
