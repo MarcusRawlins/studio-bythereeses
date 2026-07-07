@@ -69,6 +69,13 @@ Rules: prefer one well-scoped background agent over many; don't spin an agent fo
 can do directly; run independent agents in parallel; always **independently re-verify the build gate**
 in the main loop before committing an agent's work (don't trust "it's green" — run it).
 
+**Commit discipline while background agents run (learned the hard way):** when one or more build
+agents are editing the working tree in parallel, NEVER `git add -A` / `git add .` — it will sweep an
+in-progress agent's half-written files into an unrelated commit. Stage the exact paths for the change
+you're committing (`git add <path1> <path2> …`). (Phase 17's kanban files were accidentally bundled
+into the Phase 23 fix commit `dce88bf` this way — code was correct and gate-green, but the history is
+mixed. No history rewrite was done since it was pushed; the lesson is the fix.)
+
 ---
 
 ## 4. What's built (all DARK, flags OFF, on branch `claude/reese-crm-production-qa-4caxz0`)
@@ -93,6 +100,10 @@ The authoritative, always-current list is `docs/roadmap-competitive-parity.md`. 
 - **CR-2** — settings nav group (Settings raised; Activity/Data Health/System Status folded into a
   Settings tab strip, URLs unchanged). Dark (`SETTINGS_NAV_GROUP`).
 - **CR-3** — quick-find under-nav bug FIXED (unflagged repair; live on next deploy).
+- **Phase 22/CR-1, CR-2, CR-4 (SCHEDULER_MEET_LINKS), CR-5/Phase 23 (QUESTIONNAIRE_AUTOFILL_REVIEW)** —
+  all built dark + Fable-reviewed + pushed. Migrations 0094 (meet link) + 0095 (autofill review).
+- **Phase 17 kanban board** — built dark (`PROJECTS_BOARD_VIEW`); landed in commit `dce88bf`
+  (bundled with Phase 23 fixes — see the commit-discipline note above); Fable diff review pending.
 - **CR-4** — scheduler auto-generated Google Meet links. Dark (`SCHEDULER_MEET_LINKS`).
 - **Phase 23 / CR-5** — questionnaire autofill review-and-apply: closes the untrusted-input →
   canonical-write channel (public submissions produce a review proposal instead of direct writes to
