@@ -236,6 +236,15 @@ export function adminProofRequired(pathname: string): boolean {
   // Public booking pages.
   if (path.startsWith("/book/")) return false;
 
+  // Phase 19: the embeddable lead-form public surface (exact, DOT-FREE paths — the same paths the
+  // middleware page matcher now actually matches, I7/BLOCKER-1). The signed embed token + timing
+  // nonce are the credentials, not the admin proof (same posture as the inbound-intake/webhook
+  // exemptions above). Without these the tail `return true` would 404 all three under
+  // ADMIN_PROOF_ENFORCE=1. NOT origin-bypassed (proxy-only, Phase 24 trap); the /api/lead-form/
+  // settings editor is deliberately NOT here — it is a genuine admin surface.
+  if (path === "/embed/lead" || path === "/embed/lead/thanks") return false;
+  if (path === "/api/lead-form/submit") return false;
+
   // Private asset serving — signed URL / portal / proposal token is the credential;
   // the route itself enforces it, and the proxy never stamps a proof here.
   if (path.startsWith("/api/assets/")) return false;

@@ -1,7 +1,15 @@
 import { AppShell } from "@/components/AppShell";
 import { SettingsTabs } from "@/components/SettingsTabs";
+import { isLeadFormEnabled } from "@/lib/inbound-inquiry";
+import {
+  getLeadFormConfig,
+  LEAD_FORM_FIELD_LABELS,
+  OPTIONAL_LEAD_FORM_FIELDS,
+} from "@/lib/lead-form";
+import { createLeadFormEmbedToken } from "@/lib/lead-form-links";
+import { publicScheduleBaseUrl } from "@/lib/public-urls";
 import { enabledPaymentMethods, getAppSettings, type PaymentMethodKey } from "@/lib/settings";
-import { CreditCard, Landmark, Mail, Settings, ShieldCheck, WalletCards } from "lucide-react";
+import { Code2, CreditCard, Landmark, Mail, Settings, ShieldCheck, WalletCards } from "lucide-react";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +45,18 @@ export default async function SettingsPage() {
   // CR-2 (left-nav reorganization). Strict `=== "1"`, dark by default. Flag off ⇒ no tab strip,
   // page renders exactly as today.
   const settingsNavGroupEnabled = process.env.SETTINGS_NAV_GROUP === "1";
+
+  // Phase 19: the lead-form editor is shown only when LEAD_FORM_ENABLED is on (dark by default, so
+  // an off deploy renders Settings exactly as today). The embed snippet carries a freshly-signed
+  // token minted at the CURRENT config.rev (MEDIUM-7).
+  const leadFormEnabled = isLeadFormEnabled();
+  const leadFormConfig = leadFormEnabled ? await getLeadFormConfig() : null;
+  let leadFormSnippet = "";
+  if (leadFormConfig) {
+    const embedUrl = new URL("/embed/lead", publicScheduleBaseUrl());
+    embedUrl.searchParams.set("t", createLeadFormEmbedToken(leadFormConfig.rev));
+    leadFormSnippet = `<iframe src="${embedUrl.toString()}" title="Inquiry form" style="width:100%;border:0;min-height:720px" loading="lazy"></iframe>`;
+  }
 
   return (
     <AppShell>
@@ -156,6 +176,73 @@ export default async function SettingsPage() {
             </button>
           </section>
         </form>
+
+        {leadFormConfig && (
+          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5 shadow-sm">
+            <div className="flex items-center gap-2">
+              <Code2 className="h-4 w-4 text-[var(--ink-muted)]" />
+              <h2 className="text-lg font-semibold">Embeddable lead form</h2>
+            </div>
+            <p className="mt-1 text-sm text-[var(--ink-muted)]">
+              Customize the inquiry form embedded on your marketing site. Name, email, and message are always shown and required.
+            </p>
+
+            {/* DEDICATED action (MINOR-9) — posts ONLY the lead-form config; never resets business settings. */}
+            <form action="/api/lead-form/settings" method="post" className="mt-5 grid gap-4">
+              <label className="space-y-1.5 text-sm font-medium">
+                Intro text
+                <textarea name="introText" rows={2} maxLength={500} defaultValue={leadFormConfig.introText} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+              </label>
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="space-y-1.5 text-sm font-medium">
+                  Submit button text
+                  <input name="submitButtonText" maxLength={60} defaultValue={leadFormConfig.submitButtonText} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+                </label>
+                <label className="space-y-1.5 text-sm font-medium">
+                  Confirmation message
+                  <input name="confirmationMessage" maxLength={500} defaultValue={leadFormConfig.confirmationMessage} className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none" />
+                </label>
+              </div>
+
+              <div className="grid gap-2">
+                <div className="text-sm font-semibold">Optional fields</div>
+                {OPTIONAL_LEAD_FORM_FIELDS.map((field) => {
+                  const fieldConfig = leadFormConfig.fields[field];
+                  return (
+                    <div key={field} className="flex flex-wrap items-center gap-4 rounded-md border border-[var(--line)] px-3 py-2 text-sm">
+                      <span className="min-w-[180px] font-medium">{LEAD_FORM_FIELD_LABELS[field]}</span>
+                      <label className="inline-flex items-center gap-2">
+                        <input type="checkbox" name={`${field}Enabled`} defaultChecked={fieldConfig.enabled} className="h-4 w-4 accent-[var(--brand-brown)]" />
+                        Show
+                      </label>
+                      <label className="inline-flex items-center gap-2">
+                        <input type="checkbox" name={`${field}Required`} defaultChecked={fieldConfig.required} className="h-4 w-4 accent-[var(--brand-brown)]" />
+                        Required
+                      </label>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <label className="inline-flex items-center gap-2 text-sm text-[var(--ink-muted)]">
+                <input type="checkbox" name="bumpRev" className="h-4 w-4 accent-[var(--brand-brown)]" />
+                Revoke existing embed links (bump revision — you must re-copy and re-paste the snippet)
+              </label>
+
+              <button className="brand-primary-button w-full rounded-sm px-4 py-2.5 transition">
+                Save lead form
+              </button>
+            </form>
+
+            <div className="mt-6 space-y-1.5">
+              <div className="text-sm font-semibold">Copy embed snippet</div>
+              <p className="text-xs text-[var(--ink-muted)]">
+                Paste this iframe on your marketing site. It carries a signed token for the current revision (rev {leadFormConfig.rev}).
+              </p>
+              <textarea readOnly rows={3} value={leadFormSnippet} className="w-full rounded-md border border-[var(--line)] bg-[#faf7f1] px-3 py-2 font-mono text-xs outline-none" />
+            </div>
+          </section>
+        )}
       </div>
     </AppShell>
   );

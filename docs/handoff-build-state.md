@@ -110,9 +110,22 @@ The authoritative, always-current list is `docs/roadmap-competitive-parity.md`. 
   projects/clients/locations/events) and adds the missing "Apply timeline draft" step. Dark
   (`QUESTIONNAIRE_AUTOFILL_REVIEW`); migration 0095 applied ahead of the flag flip (additive,
   inert while off). See `docs/specs/phase-23-questionnaire-autofill-review.md`.
+- **Phase 19 — embeddable lead form** — a customizable inquiry form Tyler embeds (iframe) on
+  `bythereeses.com` that feeds the EXACT existing inquiry-intake pipeline via a sibling
+  `ingestWebFormInquiry` (staging `inbound_inquiries` row + authority-less review task only; zero new
+  canonical authority — the sole path to a canonical project stays `approveInquiryProjectCreation`).
+  New PUBLIC, unauthenticated, iframe-framed surface on the schedule host: `/embed/lead`,
+  `/embed/lead/thanks` (dot-free paths; the signed embed token rides in `?t=`), and
+  `/api/lead-form/submit` (every user-visible POST outcome is a 303; only a bad token is a raw 403).
+  In-house spam defense (signed revocable embed token + per-render timing nonce + honeypot + length
+  caps + CRM flood guard + dedicated `leadForm`/`leadFormPage` proxy rate kinds; no CAPTCHA). Config
+  in `app_settings.lead_form_config_json` (one additive column, migration **0097**). Dark
+  (**`LEAD_FORM_ENABLED`**, read `=== "true"` to match the intake-family sibling
+  `isInquiryIntakeEnabled`, NOT the `=== "1"` idiom used by the monitor/finance/portal flags — flag
+  off ⇒ all three routes 404). See `docs/specs/phase-19-embeddable-lead-form.md`.
 
 **Not yet built (parity backlog):** 13 autopay (money-gated), 16 mini-sessions (business-dependent),
-17 kanban board, 18 AI daily brief, 19 embeddable lead form, 20 structured meeting notes.
+17 kanban board, 18 AI daily brief, 20 structured meeting notes.
 
 **Confidence backlog:** golden-path end-to-end test (**built** — `src/lib/golden-path.e2e.test.ts`,
 full chain wired, no gaps found), config-verification preflight (**built** —

@@ -56,6 +56,16 @@ const RATE_LIMITS = {
   // legitimate burst of compliance-relevant complaint events. The SVIX signature at the origin is
   // the real trust boundary; this cap only bounds abuse volume, so err generous.
   resendWebhook: { max: 600, windowSeconds: 60 },
+  // Phase 19: a DEDICATED per-IP kind for the embeddable lead-form POST — NOT publicMutation.
+  // Form-spam volume is unrelated to booking volume, so a shared bucket would let one abuse the
+  // other; Tyler tunes this independently. This is a belt over the CRM-side flood guard + output
+  // ceiling (the real spam boundary), not a spam gate itself.
+  leadForm: { max: 10, windowSeconds: 600 },
+  // Phase 19 (MEDIUM-6): a modest kind for the embed-page GET. Unlike booking pages (proxy-cached
+  // 60s), the embed page is explicitly UNCACHED and every GET does origin SSR + an app_settings
+  // read + an HMAC nonce mint — so an unmetered GET would be free origin-load amplification +
+  // unlimited nonce farming. Own kind, not null.
+  leadFormPage: { max: 60, windowSeconds: 60 },
 };
 
 function base64UrlEncode(input) {
@@ -189,6 +199,35 @@ function applyAppCsp(headers, appCsp, appReportCsp) {
   if (appReportCsp) headers.set("content-security-policy-report-only", appReportCsp);
 }
 
+// Phase 19 (D2/I6): the lead-form embed PAGE, its thanks page, AND the submit redirect/re-render
+// response are the ONLY frameable surfaces, and ONLY by Tyler's marketing domains. The submit path
+// is included (MAJOR-3/BLOCKER-2) because the form POSTs same-origin and the POST RESPONSE BECOMES
+// THE FRAMED DOCUMENT — a non-relaxed 303/error re-render (or a leadForm 429, MINOR-8) would render
+// as a blocked/BLANK frame under frame-ancestors 'none'. Every OTHER route keeps the default
+// frame-ancestors 'none' + x-frame-options DENY from SECURITY_HEADERS.
+function isLeadFormFrameablePath(pathname) {
+  return (
+    pathname === "/embed/lead" ||
+    pathname === "/embed/lead/thanks" ||
+    pathname === "/api/lead-form/submit"
+  );
+}
+
+const LEAD_FORM_FRAME_CSP =
+  "base-uri 'self'; object-src 'none'; frame-ancestors 'self' https://bythereeses.com https://www.bythereeses.com; upgrade-insecure-requests";
+
+// Relax framing for the exact lead-form paths on the schedule host. Called AFTER
+// applySecurityHeaders/applyAppCsp so it WINS, and ALSO on the early rate-limit 429 (whose path
+// matches the submit route) so a rate-limited submit degrades visibly inside the frame instead of
+// blanking. Must drop x-frame-options — a lingering DENY blocks framing regardless of
+// frame-ancestors in browsers that honor XFO.
+function applyLeadFormFrameHeaders(responseHeaders, url) {
+  if (url.hostname === "schedule.bythereeses.com" && isLeadFormFrameablePath(url.pathname)) {
+    responseHeaders.set("content-security-policy", LEAD_FORM_FRAME_CSP);
+    responseHeaders.delete("x-frame-options");
+  }
+}
+
 function isStudioHost(url) {
   return url.hostname !== "schedule.bythereeses.com";
 }
@@ -290,6 +329,13 @@ export function isSchedulePublicPath(pathname) {
     /^\/questionnaires\/[^/]+\/preview\/?$/.test(pathname) ||
     /^\/questionnaires\/[^/]+\/confirmed\/?$/.test(pathname) ||
     /^\/api\/questionnaires\/[^/]+\/responses\/?$/.test(pathname) ||
+    // Phase 19: the embeddable lead-form surface (exact, DOT-FREE paths — the token rides in `?t=`,
+    // BLOCKER-1). These are the ONLY three lead-form paths that are schedule-public; every other
+    // route (incl. the admin /api/lead-form/settings editor) stays gated. NOT added to
+    // isStudioPublicPath (wrong host) and NOT to the origin-guard bypass (proxy-only; Phase 24 trap).
+    pathname === "/embed/lead" ||
+    pathname === "/embed/lead/thanks" ||
+    pathname === "/api/lead-form/submit" ||
     // Keep already-issued proposal links working, but never expose Studio admin routes on the public schedule host.
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/api/proposal/") ||
@@ -332,6 +378,15 @@ export function rateLimitKind(url, request) {
   // Match BEFORE the publicMutation branch below.
   if (request.method !== "GET" && pathname === "/api/resend/webhook") {
     return "resendWebhook";
+  }
+  // Phase 19: the lead-form POST gets its OWN kind (not publicMutation) so form spam and booking
+  // bursts never share a ceiling; the embed-page GET gets its own modest kind (MEDIUM-6). Both
+  // matched BEFORE the publicMutation branch below.
+  if (request.method !== "GET" && pathname === "/api/lead-form/submit") {
+    return "leadForm";
+  }
+  if (request.method === "GET" && (pathname === "/embed/lead" || pathname === "/embed/lead/thanks")) {
+    return "leadFormPage";
   }
   if (
     pathname.startsWith("/proposal/") ||
@@ -540,7 +595,12 @@ const pagesProxyWorker = {
     }
 
     const rateLimited = rateLimitResponse(request, incomingUrl);
-    if (rateLimited) return rateLimited;
+    if (rateLimited) {
+      // MINOR-8: a leadForm 429 is emitted for /api/lead-form/submit, so relax its frame-ancestors
+      // too — a rate-limited submit degrades visibly inside the frame rather than blanking.
+      applyLeadFormFrameHeaders(rateLimited.headers, incomingUrl);
+      return rateLimited;
+    }
 
     // M4 (§2): set true once a Studio admin session is verified on a genuine
     // admin surface, so the shared header-build site below mints the signed
@@ -687,6 +747,18 @@ const pagesProxyWorker = {
     responseHeaders.set("x-reese-cache", shouldCachePublicBookingPage ? "MISS" : "BYPASS");
     applySecurityHeaders(responseHeaders);
     applyAppCsp(responseHeaders, appCsp, appReportCsp);
+    // Phase 19 (D2): the frame-ancestors carve-out is applied AFTER applySecurityHeaders/applyAppCsp
+    // so it WINS, and drops x-frame-options for the exact lead-form paths on the schedule host.
+    applyLeadFormFrameHeaders(responseHeaders, incomingUrl);
+    // MAJOR-2: the embed pages are uncached + mint a per-request nonce, so pin no-store on them (the
+    // page also exports force-dynamic; this is the belt guaranteeing a cached page can never freeze
+    // one nonce → silent lead loss).
+    if (
+      incomingUrl.hostname === "schedule.bythereeses.com" &&
+      (incomingUrl.pathname === "/embed/lead" || incomingUrl.pathname === "/embed/lead/thanks")
+    ) {
+      responseHeaders.set("cache-control", "private, no-store");
+    }
     responseHeaders.set("referrer-policy", referrerPolicyFor(incomingUrl.pathname));
     if (location?.startsWith(WORKER_ORIGIN)) {
       responseHeaders.set("location", location.replace(WORKER_ORIGIN, incomingUrl.origin));

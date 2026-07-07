@@ -88,7 +88,14 @@ export type JobName =
   // read by the `resend-webhook-signature` misconfiguration WARN: an unconfigured endpoint (or a
   // scanner hitting one) must not masquerade as a "rotated/wrong secret" alert — the unconfigured
   // state is surfaced by config-preflight instead.
-  | "resend-webhook-unconfigured";
+  | "resend-webhook-unconfigured"
+  // Phase 19 (MEDIUM-5): a visibility counter for when the GLOBAL inbound_inquiries hourly insert
+  // cap trips during web-form ingest. isRateLimited counts ALL inbound rows regardless of source,
+  // so a web-form flood can push the global count to GLOBAL_HOURLY_INSERT_CAP, after which genuine
+  // EMAIL inquiries are auto-marked spam. Recording this (instead of letting it stay silent) makes
+  // a cross-channel starvation event visible. NON-ALERTING (not in the health catalog) — a raw
+  // counter/heartbeat, a follow-up (per-source scoping) is deferred unless it fires in practice.
+  | "lead-form-global-flood";
 
 export type JobRunRecord = {
   jobName: string;

@@ -224,6 +224,9 @@ export const appSettings = sqliteTable("app_settings", {
   forecastTrailingMonths: integer("forecast_trailing_months"),
   monthlyCapacityTarget: integer("monthly_capacity_target"),
   leadSourceTaxonomyJson: text("lead_source_taxonomy_json"),
+  // Phase 19 — embeddable lead-form config (display/config artifact; safe code
+  // defaults when NULL). Normalized against code defaults, never agent-written.
+  leadFormConfigJson: text("lead_form_config_json"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });

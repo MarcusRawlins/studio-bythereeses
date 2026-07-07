@@ -6,6 +6,8 @@ import { createProjectFromAgent, type AgentProjectCreateInput } from "@/lib/crm"
 // suppression gate (isEmailSuppressed). This closes the bypass — the intake surface used to
 // reimplement the raw Resend fetch here and never checked suppression.
 import { sendInquiryReplyEmail } from "@/lib/email";
+// Phase 19 (MEDIUM-5): visibility counter when the GLOBAL flood cap trips during web-form ingest.
+import { recordJobRun } from "@/lib/job-runs";
 import { and, desc, eq, gte, inArray } from "drizzle-orm";
 
 // =============================================================================
@@ -380,15 +382,21 @@ export type InquiryDraft = {
   draftReplyBody: string;
 };
 
-export function draftFromInquiry(inquiry: {
-  id: string;
-  subject: string | null;
-  bodyText: string | null;
-  parsedName: string | null;
-  parsedEmail: string | null;
-  parsedEventDate: string | null;
-  parsedVenue: string | null;
-}): InquiryDraft {
+export function draftFromInquiry(
+  inquiry: {
+    id: string;
+    subject: string | null;
+    bodyText: string | null;
+    parsedName: string | null;
+    parsedEmail: string | null;
+    parsedEventDate: string | null;
+    parsedVenue: string | null;
+  },
+  // D5: the true intake source. Defaults to today's email posture so the EMAIL path stays
+  // byte-for-byte unchanged; the web form passes "web_form" so the draft's intakeSource records the
+  // real origin (crm.ts:1402,1408 treat kind/capturedBy as free text). No canonical authority added.
+  origin: "inquiry" | "web_form" = "inquiry",
+): InquiryDraft {
   const name = inquiry.parsedName?.trim() || null;
   const [firstName, ...rest] = (name ?? "").split(/\s+/).filter(Boolean);
   const projectLabel = name ? `${name} — Wedding Inquiry` : "Wedding Inquiry";
@@ -407,10 +415,10 @@ export function draftFromInquiry(inquiry: {
       role: "primary",
     },
     intakeSource: {
-      kind: "inquiry",
+      kind: origin === "web_form" ? "web_form" : "inquiry",
       title: (inquiry.subject ?? "Inbound inquiry").slice(0, 200),
       body: inquiry.bodyText ?? "(no body)",
-      capturedBy: "Inbound Inquiry Intake",
+      capturedBy: origin === "web_form" ? "Embedded Lead Form" : "Inbound Inquiry Intake",
       sourceType: "inbound_inquiry",
       sourceId: inquiry.id,
     },
@@ -482,6 +490,20 @@ async function isRateLimited(envelopeFrom: string | null, now: Date): Promise<bo
   if (!domain) return false;
   const perDomain = recent.filter((row) => domainOf(row.envelopeFrom) === domain).length;
   return perDomain >= DOMAIN_HOURLY_INSERT_CAP;
+}
+
+// Phase 19 (MEDIUM-5): a separate, read-only check for whether the GLOBAL cap specifically tripped
+// (distinct from the per-domain cap). isRateLimited stays reused VERBATIM for the spam decision;
+// this only decides whether to surface the cross-channel-starvation counter, and runs solely on
+// the already-rate-limited path (rare).
+async function globalInsertCapTripped(now: Date): Promise<boolean> {
+  const windowStart = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  const recent = await db.query.inboundInquiries.findMany({
+    where: gte(inboundInquiries.receivedAt, windowStart),
+    columns: { id: true },
+    limit: GLOBAL_HOURLY_INSERT_CAP + 1,
+  });
+  return recent.length >= GLOBAL_HOURLY_INSERT_CAP;
 }
 
 export async function ingestInboundInquiry(payload: InboundEmailPayload): Promise<IngestInboundInquiryResult> {
@@ -615,6 +637,175 @@ export async function ingestInboundInquiry(payload: InboundEmailPayload): Promis
   });
 
   await db.update(inboundInquiries)
+    .set({
+      status: "proposed",
+      proposedProjectJson: JSON.stringify(draft.proposedProject),
+      draftReplySubject: draft.draftReplySubject,
+      draftReplyBody: draft.draftReplyBody,
+      parsedJson: JSON.stringify(parsedJson),
+      agentTaskId: taskId,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(inboundInquiries.id, id));
+
+  return { id, status: "proposed", deduped: false };
+}
+
+// ===========================================================================
+// Phase 19 — web-form inquiry ingest (the I2/I3 hinge).
+//
+// A sibling to ingestInboundInquiry: it REUSES the exact caps, sanitizers, flood guard, drafter,
+// and agent-task insert, but skips the email-only MIME/auth parsing (the input is already
+// structured). It has NO canonical-mutation authority — like draftFromInquiry it can only ever
+// write an inbound_inquiries staging row + an authority-less agent_tasks review row. The only path
+// from here to a canonical project stays approveInquiryProjectCreation (admin-gated, unchanged).
+// A lead-form submission is JUST ONE MORE INQUIRY SOURCE.
+// ===========================================================================
+
+export type WebFormInquiryInput = {
+  name: string;
+  email: string;
+  phone?: string | null;
+  eventDate?: string | null;
+  eventType?: string | null;
+  message: string;
+  referralSource?: string | null;
+  // A crypto.randomUUID() from the signed per-render nonce → synthetic message_id (idempotency).
+  nonceId: string;
+};
+
+export async function ingestWebFormInquiry(input: WebFormInquiryInput): Promise<IngestInboundInquiryResult> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  // 1. Cap + sanitize every field (I5), reusing the inbound caps + sanitizers VERBATIM.
+  const parsedName = sanitizeLine(input.name, MAX_PARSED_NAME_LENGTH);
+  const parsedEmail = normalizeEmail(input.email); // rejects non-single-address / over-cap → null
+  const phone = sanitizeLine(input.phone, 50);
+  const eventTypeText = sanitizeLine(input.eventType, 200);
+  const referralSource = sanitizeLine(input.referralSource, 200);
+  const message = sanitizeBody(input.message, MAX_BODY_TEXT_LENGTH);
+  // Store the submitted date directly; fall back to parsing a free-text date out of the message.
+  const submittedEventDate = sanitizeLine(input.eventDate, MAX_EVENT_DATE_LENGTH);
+  const parsedEventDate = submittedEventDate ?? parseEventDate(message);
+
+  // 2. Compose bodyText = the message plus a labeled block of the structured fields, so the triage
+  //    UI and the drafter get full context.
+  const detailLines: string[] = [];
+  if (eventTypeText) detailLines.push(`Event type: ${eventTypeText}`);
+  if (submittedEventDate) detailLines.push(`Event date: ${submittedEventDate}`);
+  if (phone) detailLines.push(`Phone: ${phone}`);
+  if (referralSource) detailLines.push(`How they heard about us: ${referralSource}`);
+  const bodyText = sanitizeBody(
+    `${message ?? ""}${detailLines.length ? `\n\n---\n${detailLines.join("\n")}` : ""}`,
+    MAX_BODY_TEXT_LENGTH,
+  );
+
+  const subject = sanitizeLine(
+    parsedName ? `Lead form inquiry from ${parsedName}` : "Lead form inquiry",
+    MAX_SUBJECT_LENGTH,
+  );
+
+  // 3. Synthetic message_id from the per-render nonce id → the existing INSERT-OR-IGNORE on
+  //    message_id (B2) makes a double-submit of the SAME rendered form idempotent (one row, one
+  //    task). The nonceId is a crypto.randomUUID() (MEDIUM-1), so two simultaneous loads never
+  //    collide on the dedup and lose a lead.
+  const messageId = `webform:${input.nonceId}`.slice(0, MAX_MESSAGE_ID_LENGTH);
+
+  const id = crypto.randomUUID();
+  // 4. parsed_json.source = "web_form" (D4 provenance). No new column on inbound_inquiries.
+  const baseValues = {
+    id,
+    status: "new",
+    messageId,
+    // envelope/header From = the submitted email so domainOf still feeds the flood guard.
+    envelopeFrom: parsedEmail,
+    headerFrom: parsedEmail,
+    toAddress: null,
+    subject,
+    bodyText,
+    parsedName,
+    parsedEmail,
+    parsedEventDate,
+    parsedVenue: null,
+    parsedJson: JSON.stringify({ source: "web_form" }),
+    receivedAt: nowIso,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  // INSERT-OR-IGNORE on message_id (never UPDATE from untrusted input, B2).
+  await db.insert(inboundInquiries).values(baseValues).onConflictDoNothing({ target: inboundInquiries.messageId });
+
+  const ours = await db.query.inboundInquiries.findFirst({ where: eq(inboundInquiries.id, id) });
+  if (!ours) {
+    const existing = await db.query.inboundInquiries.findFirst({ where: eq(inboundInquiries.messageId, messageId) });
+    // Idempotent replay of the same rendered form: one row, one task, no UPDATE of the existing row.
+    return { id: existing?.id ?? id, status: existing?.status ?? "new", deduped: true };
+  }
+
+  // ---- everything below only ever writes THIS row's own draft columns ----
+
+  const parsedJson: Record<string, unknown> = { source: "web_form" };
+
+  // 5. Flood guard (isRateLimited, reused VERBATIM): over-cap → status "spam", no agent task.
+  if (await isRateLimited(parsedEmail, now)) {
+    parsedJson.spamReason = "rate_limited";
+    // MEDIUM-5: surface a cross-channel starvation event when the GLOBAL cap specifically trips —
+    // a web-form flood can starve genuine EMAIL inquiries. Visible counter instead of silent.
+    if (await globalInsertCapTripped(now)) {
+      await recordJobRun(
+        "lead-form-global-flood",
+        false,
+        "Global inbound_inquiries hourly insert cap tripped during web-form ingest — genuine email inquiries may be auto-marked spam this hour.",
+      );
+      console.warn("[lead-form] GLOBAL inbound insert cap tripped by web-form volume — cross-channel starvation risk.");
+    }
+    await db
+      .update(inboundInquiries)
+      .set({ status: "spam", parsedJson: JSON.stringify(parsedJson), updatedAt: new Date().toISOString() })
+      .where(eq(inboundInquiries.id, id));
+    return { id, status: "spam", deduped: false };
+  }
+
+  // Soft-duplicate signal (read-only): surface a possible existing client for triage. No write.
+  if (parsedEmail) {
+    const existingClient = await db.query.clients.findFirst({ where: eq(clients.email, parsedEmail) });
+    if (existingClient) parsedJson.possibleExistingClientId = existingClient.id;
+  }
+
+  // 6. Deterministic draft (B1 — no canonical-mutation authority), origin "web_form" (D5).
+  const draft = draftFromInquiry(
+    {
+      id,
+      subject,
+      bodyText,
+      parsedName,
+      parsedEmail,
+      parsedEventDate,
+      parsedVenue: null,
+    },
+    "web_form",
+  );
+
+  // 7. Authority-less review task to surface the item in the Inbox (same shape as the email path).
+  const taskId = crypto.randomUUID();
+  await db.insert(agentTasks).values({
+    id: taskId,
+    title: `Review inquiry: ${subject ?? "(lead form)"}`.slice(0, 200),
+    instructions: "Web-form lead awaiting Tyler review. Draft only — approve to create a canonical project or send a reply.",
+    status: "queued",
+    priority: "normal",
+    requestedBy: "lead_form_intake",
+    assignedAgent: "Intake Agent",
+    sourceType: "inbound_inquiry",
+    sourceId: id,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  await db
+    .update(inboundInquiries)
     .set({
       status: "proposed",
       proposedProjectJson: JSON.stringify(draft.proposedProject),
@@ -766,4 +957,15 @@ export const INQUIRY_INTAKE_ENABLED_FLAG = "INQUIRY_INTAKE_ENABLED";
 
 export function isInquiryIntakeEnabled(): boolean {
   return process.env.INQUIRY_INTAKE_ENABLED === "true";
+}
+
+// Phase 19 (I1): flag OFF ⇒ the embed page, thanks page, and submit POST all 404 — the flag flip is
+// the only surface change. Read as `=== "true"` to MATCH the sibling isInquiryIntakeEnabled above
+// (the intake family — INQUIRY_INTAKE_ENABLED / INBOUND_PROJECT_EMAIL_ENABLED — reads "true", which
+// is also the spec §1 literal). Note: the monitor/finance/portal flags read `=== "1"`; this
+// deliberately follows the intake-family idiom, not that one.
+export const LEAD_FORM_ENABLED_FLAG = "LEAD_FORM_ENABLED";
+
+export function isLeadFormEnabled(): boolean {
+  return process.env.LEAD_FORM_ENABLED === "true";
 }

@@ -1301,6 +1301,12 @@ function migrate(database: LocalDatabase) {
       generated_at  TEXT NOT NULL
     );
   `);
+
+  // Phase 19 (migration 0097): embeddable lead-form config. Additive + idempotent nullable
+  // column on app_settings (app_settings is read on always-on paths, so it must exist before the
+  // lead-form config path reads it). NON-CANONICAL: a display/config artifact — losing it reverts
+  // to code defaults, no business state. Dark behind LEAD_FORM_ENABLED; safe to migrate ahead.
+  addColumnIfMissing(database, "app_settings", "lead_form_config_json", "TEXT");
 }
 
 function getD1Binding() {
