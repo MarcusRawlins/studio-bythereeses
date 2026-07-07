@@ -1,6 +1,7 @@
 import { db } from "@/db/client";
 import { activityLogs, projectTimelineItems, projects } from "@/db/schema";
 import type { TimelineDraft } from "@/lib/timeline-draft";
+import { createHash } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 
 export type CreateProjectTimelineItemInput = {
@@ -302,6 +303,17 @@ function parseTimelineDraftOutput(outputJson: string | null): TimelineDraftOutpu
   }
 }
 
+// Phase 23 review MEDIUM-1 — anti-TOCTOU version token for the "Apply timeline
+// draft" action (the second apply door; mirrors the questionnaire proposal's
+// contentHash/D8). The draft card renders this over the CURRENT `outputJson`;
+// the apply route recomputes it and rejects when it differs, so a Timeline
+// Agent re-run (which rewrites outputJson from client answers) between Tyler's
+// review and his click cannot silently apply an UNREVIEWED draft (and delete
+// the previously applied items via replace-by-source).
+export function timelineDraftVersion(outputJson: string | null): string {
+  return createHash("sha256").update(outputJson ?? "").digest("hex").slice(0, 32);
+}
+
 // M5: draft `startAt` values are 12-hour strings like "02:00 PM" (the exact
 // format `maybeTime` in timeline-draft.ts produces), never ISO. Written
 // straight through they break `formatDate` (renders "Date TBD"), the
@@ -331,7 +343,11 @@ function composeTimelineDraftStartAt(
 
   const hh = String(parsed.hour).padStart(2, "0");
   const mm = String(parsed.minute).padStart(2, "0");
-  return { startAt: `${eventDate}T${hh}:${mm}:00.000Z`, unparsedText: null };
+  // MINOR-5: store a NAIVE local datetime (no `Z`) matching the `datetime-local`
+  // edit-input format hand-entered timeline items use. Stamping ET wall-clock as
+  // `Z` would shift 4–5h the moment any America/New_York-aware formatter (e.g.
+  // the reminder email's formatDateTime) renders the item.
+  return { startAt: `${eventDate}T${hh}:${mm}`, unparsedText: null };
 }
 
 export type ApplyProjectTimelineDraftResult =

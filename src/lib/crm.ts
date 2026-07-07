@@ -5,6 +5,7 @@ import { createGoogleCalendarAllDayEvent, deleteGoogleCalendarEvent, updateGoogl
 import { invoiceClientPayableBalanceCents } from "@/lib/invoice-balances";
 import { generatePortalLink, revokePortalToken } from "@/lib/portal";
 import { projectEventCalendarStatusAfterEdit } from "@/lib/project-event-calendar";
+import { BOARD_MAX_ROWS, dedupeRowsByProjectId } from "@/lib/project-board";
 import { getSchedulerSettings } from "@/lib/scheduler";
 import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
@@ -24,6 +25,14 @@ export const projectStageOptions = projectStages.map((value) => ({
   value,
   label: value.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase()),
 }));
+
+// Phase 17 (kanban board, dark behind PROJECTS_BOARD_VIEW), spec rev 2 MAJOR 2: the board's
+// default column set when no `stages` filter is active — every stage except `completed`.
+// `completed`-stage projects stay `status: "active"` forever and the board's default sort would
+// otherwise let an unbounded `completed` column crowd out the newest inquiries once
+// `BOARD_MAX_ROWS` truncates. Derived from `projectStages` (not a second hardcoded list) so it can
+// never drift from the canonical stage catalog.
+const inFlightProjectStages = projectStages.filter((stage) => stage !== "completed");
 
 export type ProjectIndexSort = "eventDate" | "createdAt" | "name";
 
@@ -334,6 +343,60 @@ export async function listProjectIndex(input: {
     pageSize,
     rangeStart: filteredCount ? offset + 1 : 0,
     rangeEnd: offset + rows.length,
+  };
+}
+
+// Phase 17 (kanban board, dark behind PROJECTS_BOARD_VIEW), spec §3. Reuses `projectIndexWhere`
+// and `projectIndexOrderBy` verbatim (no second, drifting filter implementation — spec §4 test 7)
+// but with NO `.limit()/.offset()` page window: this is a plain filtered `SELECT`, not an
+// `inArray(id, [...])` batch lookup, so the D1 100-bound-param cap that constrains Phase 22's
+// per-id batched fetches (`db-batch.ts`) doesn't apply here at all (spec §1 D3). Instead:
+//   - Rev 2 MAJOR 2: an empty/absent `stages` input defaults to the 6 in-flight stages, not "no
+//     stage filter" — `completed` requires an explicit `stages` selection that includes it.
+//   - Rev 2 MINOR 7: the same seen-`project.id` de-duplication `listProjects` already applies
+//     (~231-236 above), so a project with more than one primary-flagged participant row can't
+//     yield duplicate cards or a wrong `truncated` flag.
+//   - Rev 2 MEDIUM 3: capped at `BOARD_MAX_ROWS` (300) AFTER dedup, so `filteredCount`/`truncated`
+//     reflect the true distinct-project count, not a pre-dedup row count.
+export async function listProjectBoardIndex(input: {
+  q?: string | null;
+  stages?: string[] | null;
+  sort?: ProjectIndexSort | null;
+} = {}) {
+  const sort = input.sort === "createdAt" || input.sort === "name" ? input.sort : "eventDate";
+  const requestedStages = (input.stages ?? []).filter((stage) => projectStages.includes(stage));
+  const stages = requestedStages.length ? requestedStages : inFlightProjectStages;
+  const where = projectIndexWhere({ q: input.q, stages });
+  const primaryParticipantJoin = and(
+    eq(projectParticipants.projectId, projects.id),
+    eq(projectParticipants.isPrimaryContact, true),
+  );
+
+  const rowsQuery = db
+    .select({
+      project: projects,
+      client: clients,
+    })
+    .from(projects)
+    .leftJoin(projectParticipants, primaryParticipantJoin)
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .$dynamic();
+  const filteredRowsQuery = where ? rowsQuery.where(where) : rowsQuery;
+  const rawRows = await filteredRowsQuery.orderBy(...projectIndexOrderBy(sort)) as Array<{
+    project: typeof projects.$inferSelect;
+    client: typeof clients.$inferSelect | null;
+  }>;
+
+  const dedupedRows = dedupeRowsByProjectId(rawRows);
+
+  const filteredCount = dedupedRows.length;
+  const rows = dedupedRows.slice(0, BOARD_MAX_ROWS);
+
+  return {
+    rows,
+    stages,
+    filteredCount,
+    truncated: filteredCount > rows.length,
   };
 }
 

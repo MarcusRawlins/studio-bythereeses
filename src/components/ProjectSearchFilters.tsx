@@ -16,7 +16,23 @@ type ProjectSearchFiltersProps = {
   selectedStages: string[];
   sort: string;
   stages: ProjectStageOption[];
+  // Phase 17 (kanban board, dark behind PROJECTS_BOARD_VIEW), rev 2 MINOR 6. Optional — when
+  // absent (the board flag off, or the list view), this component's rendered markup is
+  // byte-identical to before this phase (spec §4 test 8/17).
+  view?: string;
 };
+
+// Rev 2 MINOR 6: the existing "Clear filters" link drops every query param, including `view` —
+// without this fix, clearing filters from the board silently bounced to the list. Built to be
+// byte-identical to the pre-Phase-17 link when `view` is absent.
+// Exported (not just used internally) so it's directly unit-testable without needing to render
+// the filter panel open — that panel is gated behind client-only `isOpen` state, which stays
+// `false` under `renderToStaticMarkup` (see `ProjectSearchFilters.test.tsx`).
+export function clearFiltersHref(rawSearch: string, view?: string) {
+  const base = rawSearch ? `/projects?q=${encodeURIComponent(rawSearch)}` : "/projects";
+  if (!view) return base;
+  return `${base}${base.includes("?") ? "&" : "?"}view=${encodeURIComponent(view)}`;
+}
 
 export function ProjectSearchFilters({
   pageSize,
@@ -25,6 +41,7 @@ export function ProjectSearchFilters({
   selectedStages,
   sort,
   stages,
+  view,
 }: ProjectSearchFiltersProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [nextStages, setNextStages] = useState(selectedStages);
@@ -44,6 +61,7 @@ export function ProjectSearchFilters({
         <input type="hidden" name="sort" value={sort} />
         <input type="hidden" name="pageSize" value={pageSize} />
         {selectedStages.length > 0 && <input type="hidden" name="stages" value={selectedStages.join(",")} />}
+        {view && <input type="hidden" name="view" value={view} />}
         <label className="relative min-w-0">
           <span className="sr-only">Search projects</span>
           <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-3)]" />
@@ -78,6 +96,7 @@ export function ProjectSearchFilters({
         >
           <input type="hidden" name="q" value={rawSearch} />
           {nextStages.length > 0 && <input type="hidden" name="stages" value={nextStages.join(",")} />}
+          {view && <input type="hidden" name="view" value={view} />}
           <div className="flex items-start justify-between gap-4">
             <div>
               <p className="studio-caps text-[0.58rem] text-[var(--ink-3)]">Project filters</p>
@@ -133,7 +152,7 @@ export function ProjectSearchFilters({
           </div>
 
           <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <Link href={rawSearch ? `/projects?q=${encodeURIComponent(rawSearch)}` : "/projects"} prefetch={false} className="text-sm font-semibold text-[var(--ink-3)] transition hover:text-[var(--ink)]">
+            <Link href={clearFiltersHref(rawSearch, view)} prefetch={false} className="text-sm font-semibold text-[var(--ink-3)] transition hover:text-[var(--ink)]">
               Clear filters
             </Link>
             <button className="brand-primary-button min-h-10 px-5 py-2.5">Apply filters</button>

@@ -8,6 +8,7 @@ import { getProject } from "@/lib/crm";
 import { formatActivityAction, formatDate, formatMoney } from "@/lib/format";
 import { isGalleryUrlSafe } from "@/lib/gallery";
 import { computeProjectMilestones, type MilestoneInput } from "@/lib/project-milestones";
+import { timelineDraftVersion } from "@/lib/project-timeline";
 import { projectWorkingNotes } from "@/lib/project-notes";
 import {
   emailApprovalHash,
@@ -1776,6 +1777,7 @@ export default async function ProjectDetailPage({
                                 <form action={`/api/projects/${data.project.id}/timeline-draft/apply`} method="post">
                                   <input type="hidden" name="taskId" value={task.id} />
                                   <input type="hidden" name="confirmReplace" value="1" />
+                                  <input type="hidden" name="draftVersion" value={timelineDraftVersion(task.outputJson)} />
                                   <button className="inline-flex items-center gap-2 rounded-sm border border-[var(--danger)] px-3 py-2 text-sm font-semibold text-[var(--danger)] transition hover:bg-[#fdf1f1]">
                                     Confirm replace draft-sourced items
                                   </button>
@@ -1784,6 +1786,7 @@ export default async function ProjectDetailPage({
                             ) : (
                               <form action={`/api/projects/${data.project.id}/timeline-draft/apply`} method="post">
                                 <input type="hidden" name="taskId" value={task.id} />
+                                <input type="hidden" name="draftVersion" value={timelineDraftVersion(task.outputJson)} />
                                 <button className="brand-primary-button inline-flex items-center gap-2 rounded-sm px-3 py-2 text-sm">
                                   Apply timeline draft
                                 </button>

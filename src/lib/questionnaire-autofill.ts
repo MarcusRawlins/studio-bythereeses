@@ -92,6 +92,23 @@ export async function applyQuestionnaireAutofillProposal({
     return { rejected: true, error: "The stored proposal is corrupt. Ask the client to re-submit." };
   }
 
+  // MINOR-3: defense-in-depth shape check before trusting stored JSON at apply.
+  // A poisoned proposal (future compute bug, or a direct DB write) shouldn't be
+  // applied verbatim — require the expected version + array shapes. The
+  // per-field allowlist and apply-time re-validation are the primary guards;
+  // this rejects a structurally-wrong artifact outright.
+  if (
+    proposal.version !== 1
+    || typeof proposal.contentHash !== "string"
+    || typeof proposal.computedAt !== "string"
+    || !Array.isArray(proposal.project)
+    || !Array.isArray(proposal.projectEvent)
+    || !Array.isArray(proposal.client)
+    || !Array.isArray(proposal.locations)
+  ) {
+    return { rejected: true, error: "The stored proposal is malformed. Ask the client to re-submit." };
+  }
+
   // D8/B1: the version-identity guard. Compares the STORED proposal's own
   // token (computed at D4-recompute time) to what Tyler was shown, not a
   // freshly recomputed hash — the point is proposal IDENTITY, not content

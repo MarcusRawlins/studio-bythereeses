@@ -10,7 +10,15 @@ async function main() {
   const { db } = await import("@/db/client");
   const { projectTimelineItems } = await import("@/db/schema");
   const { eq } = await import("drizzle-orm");
-  const { applyProjectTimelineDraft } = await import("./project-timeline");
+  const { applyProjectTimelineDraft, timelineDraftVersion } = await import("./project-timeline");
+
+  // MEDIUM-1 version-token basis: stable for identical outputJson, differs when
+  // the draft changes (a Timeline Agent re-run) — this is what the apply route
+  // echoes and re-checks to refuse an unreviewed re-run.
+  const v1 = timelineDraftVersion('{"timelineDraft":{"timelineItems":[{"title":"Ceremony"}]}}');
+  assert.equal(v1, timelineDraftVersion('{"timelineDraft":{"timelineItems":[{"title":"Ceremony"}]}}'), "version token is stable for identical drafts");
+  assert.notEqual(v1, timelineDraftVersion('{"timelineDraft":{"timelineItems":[{"title":"Ceremony (moved)"}]}}'), "version token changes when the draft changes");
+  assert.notEqual(v1, timelineDraftVersion(null), "null outputJson has a distinct version token");
 
   const stamp = Date.now();
   const now = "2026-06-01T12:00:00.000Z";
@@ -62,7 +70,7 @@ async function main() {
   assert.equal(rows1.length, 2);
 
   const ceremonyRow = rows1.find((row) => row.title === "Ceremony");
-  assert.equal(ceremonyRow?.startAt, "2026-09-19T14:00:00.000Z", "a parsable 12-hour time must compose into ISO, anchored to project.eventDate");
+  assert.equal(ceremonyRow?.startAt, "2026-09-19T14:00", "a parsable 12-hour time composes into a naive local datetime (no Z), anchored to project.eventDate — matching the datetime-local edit format (MINOR-5)");
 
   const receptionRow = rows1.find((row) => row.title === "Reception entrance");
   assert.equal(receptionRow?.startAt, null, "an unparsable time must never produce a non-ISO startAt");

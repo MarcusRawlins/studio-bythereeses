@@ -72,6 +72,70 @@ async function main() {
   assert.match(filteredMarkup, /0 of 55 canonical projects shown/);
   assert.match(filteredMarkup, /Clear filters/);
 
+  // ---------------------------------------------------------------------------
+  // Phase 17 (kanban board) — Test 8: flag-off purity. PROJECTS_BOARD_VIEW is unset (default) at
+  // this point in the file — `?view=board` must render byte-identical markup to plain `/projects`
+  // (no board container, no List/Board toggle, `view` never appears in the URL), proving
+  // `listProjectBoardIndex` is never reachable when the flag is off (spec §4 test 8).
+  // ---------------------------------------------------------------------------
+  assert.equal(process.env.PROJECTS_BOARD_VIEW, undefined, "board flag must be unset for the flag-off assertion below");
+  const flagOffPlainMarkup = renderToStaticMarkup(await ProjectsPage({ searchParams: Promise.resolve({}) }));
+  const flagOffBoardQueryMarkup = renderToStaticMarkup(await ProjectsPage({ searchParams: Promise.resolve({ view: "board" }) }));
+  assert.equal(flagOffBoardQueryMarkup, flagOffPlainMarkup, "?view=board renders byte-identical markup to /projects when the flag is off");
+  assert.doesNotMatch(flagOffPlainMarkup, /data-testid="project-board"/);
+  assert.doesNotMatch(flagOffPlainMarkup, /view=board/);
+  assert.doesNotMatch(flagOffPlainMarkup, /Projects view toggle/);
+
+  console.log("test 8 (flag-off purity) passed");
+
+  // ---------------------------------------------------------------------------
+  // Phase 17 — flip the flag on for the remaining board-mode tests.
+  // ---------------------------------------------------------------------------
+  process.env.PROJECTS_BOARD_VIEW = "1";
+
+  insertClient.run("client-secret", "Secret", "Client", "secret@example.com", now, now);
+  insertProject.run("project-secret", "Secret Wedding", "wedding", "inquiry", "2026-11-11", now, now);
+  insertParticipant.run("participant-secret", "project-secret", "client-secret", now);
+  database.prepare("UPDATE projects SET notes = ?, venue_name = ? WHERE id = ?").run(
+    "SECRET_NOTE_MARKER",
+    "SECRET_VENUE_MARKER",
+    "project-secret",
+  );
+
+  // ---------------------------------------------------------------------------
+  // Test 14 — Slim card shape (rev 2, MEDIUM 3): the board only ever receives id, name, stage,
+  // dateLabel, budgetLabel, client{id,firstName,lastName,email}|null, milestoneSummary — no other
+  // project/client column (e.g. notes, venueName) leaks into the client-component boundary.
+  // ---------------------------------------------------------------------------
+  const boardMarkup = renderToStaticMarkup(await ProjectsPage({
+    searchParams: Promise.resolve({ view: "board", q: "secret" }),
+  }));
+  assert.match(boardMarkup, /data-testid="project-board"/, "the board container renders when the flag is on and view=board");
+  assert.match(boardMarkup, /Secret Wedding/);
+  assert.match(boardMarkup, /Secret Client/);
+  assert.doesNotMatch(boardMarkup, /SECRET_NOTE_MARKER/, "raw project.notes must not cross into the board's client props");
+  assert.doesNotMatch(boardMarkup, /SECRET_VENUE_MARKER/, "raw project.venueName must not cross into the board's client props");
+
+  console.log("test 14 (slim card shape) passed");
+
+  // ---------------------------------------------------------------------------
+  // Test 9 — Milestone graceful-off: PROJECT_PROGRESS_TIMELINE stays unset here, so every board
+  // card's milestoneSummary is null and only the value line renders — no broken layout, no thrown
+  // error (straight reuse of Phase 22's own rendering guard, asserted from the board's markup).
+  // ---------------------------------------------------------------------------
+  assert.equal(process.env.PROJECT_PROGRESS_TIMELINE, undefined, "milestone timeline flag must be unset for the graceful-off assertion");
+  assert.doesNotMatch(boardMarkup, /Overdue/);
+
+  console.log("test 9 (milestone graceful-off) passed");
+
+  // ---------------------------------------------------------------------------
+  // Board toggle + default in-flight scope sanity: the List/Board toggle renders once the flag is
+  // on, and the board (no explicit stages filter) excludes nothing relevant to this fixture set
+  // (no `completed`-stage fixtures exist here; the dedicated default-scope test lives in
+  // project-board-index.test.ts).
+  // ---------------------------------------------------------------------------
+  assert.match(boardMarkup, /Projects view toggle/);
+
   console.log("projects page tests passed");
 }
 

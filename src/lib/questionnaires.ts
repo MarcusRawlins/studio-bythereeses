@@ -1842,6 +1842,14 @@ export async function backfillSubmittedQuestionnaireResponseSources() {
       clientId: row.response.clientId,
     };
 
+    // Phase 23 review MEDIUM-2 — when the review flag is ON, this backfill's
+    // canonical location/event applies would re-open the untrusted-input write
+    // channel the flag exists to close (client-submitted answers → canonical
+    // rows with actorType "system", no review). The transcript source sync above
+    // is always safe (non-canonical); gate ONLY the canonical applies. (This
+    // function is currently unwired — test-only caller — so this is defensive.)
+    const backfillReviewGated = questionnaireAutofillReviewEnabled();
+
     const existingLocations = await db.query.projectLocations.findMany({
       where: eq(projectLocations.projectId, row.response.projectId as string),
     });
@@ -1850,7 +1858,7 @@ export async function backfillSubmittedQuestionnaireResponseSources() {
       existingLocations,
       answers: semanticAnswers,
     });
-    if (locationChanges.length) {
+    if (!backfillReviewGated && locationChanges.length) {
       const acceptedLocationFields = new Set(locationChanges.flatMap((change, index) => change.action === "create"
         ? [`locations.create.${index}`]
         : LOCATION_UPDATE_FIELDS.map((field) => `locations.${change.existingId}.${field}`)));
@@ -1875,7 +1883,7 @@ export async function backfillSubmittedQuestionnaireResponseSources() {
       existingEvents,
       answers: semanticAnswers,
     });
-    if (eventChanges.length) {
+    if (!backfillReviewGated && eventChanges.length) {
       await applyProjectEventChanges({
         responseContext: backfillResponseContext,
         projectId: row.response.projectId as string,
