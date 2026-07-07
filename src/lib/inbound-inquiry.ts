@@ -2,6 +2,10 @@ import { db } from "@/db/client";
 import { agentTasks, clients, inboundInquiries, projectCommunications } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { createProjectFromAgent, type AgentProjectCreateInput } from "@/lib/crm";
+// Phase 24 (CR-6, §5): the canonical Resend sender lives in email.ts, co-located with the
+// suppression gate (isEmailSuppressed). This closes the bypass — the intake surface used to
+// reimplement the raw Resend fetch here and never checked suppression.
+import { sendInquiryReplyEmail } from "@/lib/email";
 import { and, desc, eq, gte, inArray } from "drizzle-orm";
 
 // =============================================================================
@@ -688,6 +692,10 @@ export async function approveInquiryProjectCreation(
 // Approve + send reply → composed by our template through Resend with our From.
 // Gated on the project existing so the outbound communication has a canonical
 // home. CRLF-strips the subject before send (N6).
+// Rev 2 (MEDIUM 6) — this function is currently UNWIRED (no caller anywhere in `src/`); this fix
+// closes the suppression bypass regardless, but there is no live path exercising the `suppressed`
+// branch in production today. Returns `{ sent, suppressed }` (rather than collapsing "suppressed"
+// and "transport failure" into the same `sent: false`) so a future caller can distinguish them.
 export async function approveInquiryReply(inquiryId: string, admin: AdminActor) {
   const inquiry = await loadInquiryForApproval(inquiryId);
   if (!inquiry.projectId) throw new Error("Approve project creation before sending a reply.");
@@ -697,7 +705,7 @@ export async function approveInquiryReply(inquiryId: string, admin: AdminActor) 
   const subject = stripReplySubjectForSend(inquiry.draftReplySubject ?? "Re: Your inquiry");
   const body = sanitizeBody(inquiry.draftReplyBody, MAX_BODY_TEXT_LENGTH) ?? "";
 
-  const sent = await sendInquiryReplyEmail({ to: recipient, subject, text: body });
+  const { delivered: sent, suppressed } = await sendInquiryReplyEmail({ to: recipient, subject, text: body });
   const now = new Date().toISOString();
 
   await db.insert(projectCommunications).values({
@@ -720,13 +728,15 @@ export async function approveInquiryReply(inquiryId: string, admin: AdminActor) 
 
   await logActivity({
     projectId: inquiry.projectId,
-    action: "inquiry.reply_sent",
+    // A suppressed recipient gets a distinct activity action (rather than a silent sent:false) so
+    // Tyler sees WHY it didn't send, same rationale as the rest of this phase.
+    action: suppressed ? "inquiry.reply_suppressed" : "inquiry.reply_sent",
     actorType: "admin",
     actorName: admin.actorName,
-    metadata: { inquiryId, recipient, sent },
+    metadata: { inquiryId, recipient, sent, suppressed },
   });
 
-  return { sent };
+  return { sent, suppressed };
 }
 
 export async function dismissInquiry(inquiryId: string, admin: AdminActor, status: "dismissed" | "spam", reason?: string) {
@@ -741,26 +751,6 @@ export async function dismissInquiry(inquiryId: string, admin: AdminActor, statu
     metadata: { inquiryId, reason: reason ?? null },
   });
   return { status };
-}
-
-// Self-contained Resend sender for approved replies. Mirrors the private helper
-// in src/lib/email.ts (returns false, never throws, when RESEND_API_KEY is
-// unset). Kept local so the intake surface has no incidental import of the
-// canonical email module.
-async function sendInquiryReplyEmail(input: { to: string; subject: string; text: string }): Promise<boolean> {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) return false;
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from: process.env.RESEND_FROM_EMAIL || "The Reeses <hello@bythereeses.com>",
-      to: input.to,
-      subject: input.subject,
-      text: input.text,
-    }),
-  });
-  return response.ok;
 }
 
 // Recent inquiries for the admin triage list (describe-only UI in slice A).

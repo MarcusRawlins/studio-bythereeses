@@ -162,6 +162,24 @@ export async function sendSequenceEmail(input: {
   return { ok: false, reason: "unknown" }; // 5xx or no-key — ambiguous, never auto-retry
 }
 
+// Phase 24 (CR-6, §5) — the canonical Resend sender for approved inbound-inquiry replies. Fix #3
+// of the email-deliverability audit: `inbound-inquiry.ts` used to reimplement this raw Resend
+// `fetch` and never checked suppression. Co-locates the suppression gate with the transport
+// (structurally mirrors sendSequenceEmail above): a suppressed recipient refuses with NO Resend
+// call and no false success (I8). Reuses the private resendRequest, which already returns
+// `delivered:false` (never throws) when RESEND_API_KEY is unset, preserving the prior helper's
+// "returns false, never throws" contract.
+export async function sendInquiryReplyEmail(input: {
+  to: string;
+  subject: string;
+  text: string;
+}): Promise<{ delivered: boolean; suppressed: boolean }> {
+  const to = input.to.trim().toLowerCase();
+  if (await isEmailSuppressed(to)) return { delivered: false, suppressed: true };
+  const { delivered } = await resendRequest({ to, subject: input.subject, text: input.text });
+  return { delivered, suppressed: false };
+}
+
 // Phase 21 — owner-only ops alert sender (the daily digest + immediate critical email). The
 // recipient is ALWAYS process.env.ALERT_EMAIL (Tyler's OWN address) — a FIXED config value,
 // NEVER anything derived from client data. This is the structural guarantee that the monitor

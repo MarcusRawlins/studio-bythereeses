@@ -49,6 +49,9 @@ export const SECRET_CATALOG = [
   { name: "SCHEDULER_ADMIN_EMAIL", tier: "OPTIONAL", feature: "Resend email", note: "Has a code default (hello@bythereeses.com)." },
   { name: "RESEND_UNSUBSCRIBE_MAILBOX", tier: "OPTIONAL", feature: "Resend email", note: "Has a code default (unsubscribe@bythereeses.com); only used by sequence email." },
 
+  // --- Resend bounce/complaint webhook (Phase 24, CR-6 — ships dark: unset secret → 503 no-op) ---
+  { name: "RESEND_WEBHOOK_SECRET", tier: "ENABLEMENT", feature: "Resend bounce/complaint webhook", note: "SVIX signature verification in verifyResendWebhookPayload (resend-webhook.ts). Unset → route 503 no-op (the dark mechanism, by design). If RESEND_API_KEY is set but this is unset, bounces/complaints are silently dropped on the floor — see docs/email-deliverability.md fix #2. A rotated/wrong secret is NOT caught here; that is covered by the resend-webhook-signature WARN heartbeat signal instead." },
+
   // --- Cron auth (live: scheduler-reminders runs hourly today) ---
   { name: "CRON_SECRET", tier: "REQUIRED", feature: "Cron auth", note: "Bearer secret for /api/cron/scheduler-reminders (live), /sequences, /systems-monitor, /heartbeat. 503 unset / 401 wrong." },
 

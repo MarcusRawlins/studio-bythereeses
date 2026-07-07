@@ -35,6 +35,9 @@ const SECRET_ENV_NAMES = [
   "ADMIN_SESSION_SECRET",
   "TWILIO_AUTH_TOKEN",
   "INBOUND_INTAKE_SECRET",
+  // Phase 24 (rev 2 note tied to MINOR 9): mandatory, not optional — a leaked webhook secret in a
+  // stored error message is exactly the class of mistake SECRET_ENV_NAMES exists to prevent.
+  "RESEND_WEBHOOK_SECRET",
 ] as const;
 
 // Defense-in-depth: strip any configured secret value out of the message, then cap. A future
@@ -63,7 +66,13 @@ export type JobName =
   | "backup-d1"
   // A separate, NON-ALERTING key for pre-verification Stripe signature rejects — kept OUT of
   // the CRITICAL catalog so a scanner spamming bad signatures cannot grief the money-drift alert.
-  | "stripe-webhook-rejected";
+  | "stripe-webhook-rejected"
+  // Phase 24 (CR-6) — the Resend bounce/complaint webhook. Event-driven, WARN-only (never
+  // CRITICAL): a failing bounce webhook degrades deliverability hygiene, not money state.
+  | "resend-webhook"
+  // A separate, NON-ALERTING key for pre-verification Resend/SVIX signature rejects (I5) — kept
+  // OUT of the health catalog so a scanner spamming bad signatures cannot grief the real counter.
+  | "resend-webhook-rejected";
 
 export type JobRunRecord = {
   jobName: string;

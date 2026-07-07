@@ -796,7 +796,7 @@ export const activityLogs = sqliteTable("activity_logs", {
 export const emailSuppressions = sqliteTable("email_suppressions", {
   email: text("email").primaryKey(), // lowercased; PRIMARY KEY = dedupe
   suppressedAt: text("suppressed_at").notNull(),
-  source: text("source"), // "unsubscribe_link" | "admin" | "bounce"
+  source: text("source"), // "unsubscribe_link" | "admin" | "bounce" | "complaint"
   note: text("note"),
 });
 

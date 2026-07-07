@@ -49,6 +49,13 @@ const RATE_LIMITS = {
   // only an abuse ceiling, and exceeding it forwards-to-human (throughput cost,
   // not a safety hole), so err generous.
   inboundProjectEmail: { max: 600, windowSeconds: 60 },
+  // Phase 24 (CR-6): a DEDICATED, GENEROUS ceiling for the Resend bounce/complaint webhook — NOT
+  // publicMutation. Same twilioWebhook rationale verbatim: bounce/complaint events arrive in
+  // bursts (one send that hits many dead addresses fans out) from Resend/SVIX's concentrated
+  // egress IPs (one bucket key), so the tight publicMutation cap (20/300s) would risk dropping a
+  // legitimate burst of compliance-relevant complaint events. The SVIX signature at the origin is
+  // the real trust boundary; this cap only bounds abuse volume, so err generous.
+  resendWebhook: { max: 600, windowSeconds: 60 },
 };
 
 function base64UrlEncode(input) {
@@ -257,6 +264,15 @@ export function isStudioPublicPath(pathname) {
     // NOT in the origin-guard bypass — it belongs on the proxy path (POST is a
     // public unauthenticated mutation → publicMutation rate-limit kind).
     pathname === "/api/email/unsubscribe" ||
+    // Phase 24 (CR-6): the Resend bounce/complaint webhook. Self-authenticated by the SVIX
+    // signature (HMAC-SHA256 over svix-id.svix-timestamp.rawBody), so it must NOT be gated
+    // behind the admin Google session — otherwise Resend/SVIX's unauthenticated POST is 303'd to
+    // /admin/login (a 200 login PAGE), Resend/SVIX would read a non-2xx as a delivery failure and
+    // keep retrying (noisy, not silently lost, but still never reaches the handler). Same posture
+    // as Twilio/unsubscribe: NOT in the origin-guard bypass (isPublicOriginBypassApiPath stays
+    // false for this path — see origin-guard.test.ts); reachable only through the proxy, which is
+    // exactly what the route's own guardDirectWorkerApiRequest call also enforces.
+    pathname === "/api/resend/webhook" ||
     pathname.startsWith("/proposal/") ||
     pathname.startsWith("/api/proposal/") ||
     // Private R2 asset serving (Phase 6 §1b): signed-URL / portal / proposal
@@ -310,6 +326,12 @@ export function rateLimitKind(url, request) {
   // Match BEFORE the publicMutation branch below.
   if (request.method !== "GET" && pathname === "/api/inbound/project-email") {
     return "inboundProjectEmail";
+  }
+  // Phase 24 (CR-6): the Resend bounce/complaint webhook gets its own generous kind (NOT
+  // publicMutation) — one provider, concentrated egress, a burst of complaints must not 429.
+  // Match BEFORE the publicMutation branch below.
+  if (request.method !== "GET" && pathname === "/api/resend/webhook") {
+    return "resendWebhook";
   }
   if (
     pathname.startsWith("/proposal/") ||

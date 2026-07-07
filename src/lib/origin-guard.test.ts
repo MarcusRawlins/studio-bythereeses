@@ -260,4 +260,26 @@ assert.equal(
   "direct workers.dev POST to refund/prepare (no origin secret) must be 404'd",
 );
 
+// --------------------------------------------------------------------------
+// Phase 24 (CR-6, rev 2 MAJOR 1) — the Resend bounce/complaint webhook is PROXY-ONLY, the exact
+// Twilio posture: it calls guardDirectWorkerApiRequest itself (in-route), and is deliberately NOT
+// added to the origin-guard bypass list (that would be dead code — guardDirectWorkerApiRequest
+// never consults PUBLIC_API_PREFIXES at all). Pin both halves so a future edit can't silently
+// re-add the dead bypass entry, or drop the in-route guard call.
+// --------------------------------------------------------------------------
+assert.equal(
+  isPublicOriginBypassApiPath("/api/resend/webhook"),
+  false,
+  "the Resend bounce/complaint webhook must NOT bypass the origin guard (PROXY-ONLY, SVIX signature is the trust boundary)",
+);
+assert.equal(
+  guardDirectWorkerApiRequest(
+    new Request("https://reese-photography-crm.solitary-flower-c3ab.workers.dev/api/resend/webhook", {
+      method: "POST",
+    }),
+  )?.status,
+  404,
+  "direct workers.dev POST to the Resend webhook (no origin secret) must be 404'd",
+);
+
 console.log("origin guard tests passed");

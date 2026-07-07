@@ -6,7 +6,7 @@
 // to INFO rather than throwing the whole report (monitoring is best-effort).
 
 import { db } from "@/db/client";
-import { projectCommunications, sequenceSends } from "@/db/schema";
+import { emailSuppressions, projectCommunications, sequenceSends } from "@/db/schema";
 import { readJobRuns } from "@/lib/job-runs";
 import { getAgentFinanceReport } from "@/lib/agent-finance";
 import { and, eq, inArray, lt } from "drizzle-orm";
@@ -119,6 +119,9 @@ const WEBHOOK_JOBS: Record<string, WebhookJobConfig> = {
   "twilio-status": { label: "Twilio status webhook", warnFailures: 5, criticalFailures: Number.POSITIVE_INFINITY },
   "twilio-inbound": { label: "Twilio inbound webhook", warnFailures: 5, criticalFailures: Number.POSITIVE_INFINITY },
   "inbound-inquiry": { label: "Inbound inquiry email", warnFailures: 3, criticalFailures: Number.POSITIVE_INFINITY },
+  // Phase 24 (CR-6) — WARN-only, mirrors twilio-inbound/inbound-inquiry: a failing bounce/
+  // complaint webhook degrades deliverability hygiene, not money state, so it should never page.
+  "resend-webhook": { label: "Resend bounce/complaint webhook", warnFailures: 3, criticalFailures: Number.POSITIVE_INFINITY },
 };
 
 // Stripe signature-misconfiguration signal (FIX 4). A rotated/wrong STRIPE_WEBHOOK_SECRET makes
@@ -129,6 +132,14 @@ const WEBHOOK_JOBS: Record<string, WebhookJobConfig> = {
 const STRIPE_REJECT_FRESH_MS = 6 * HOUR_MS; // a reject this recent counts as "real events rejecting now"
 const STRIPE_REJECT_MIN_COUNT = 2; // >1 so a single scanner probe never trips it
 const STRIPE_WEBHOOK_SUCCESS_FRESH_MS = 24 * HOUR_MS; // a success this recent means the secret is fine
+
+// Phase 24 (CR-6, rev 2 MAJOR 2) — the identical Resend/SVIX misconfiguration signal, mirroring
+// the Stripe constants immediately above. A rotated/wrong RESEND_WEBHOOK_SECRET makes every real
+// event reject pre-verify (recorded only under the non-alerting 'resend-webhook-rejected' key)
+// while 'resend-webhook' quietly stops accumulating successes and never escalates on its own.
+const RESEND_REJECT_FRESH_MS = 6 * HOUR_MS;
+const RESEND_REJECT_MIN_COUNT = 2;
+const RESEND_WEBHOOK_SUCCESS_FRESH_MS = 24 * HOUR_MS;
 
 const BACKUP_STALE_MS = 36 * HOUR_MS; // matches deploy:preflight's <=36h D1 check
 const SEQUENCE_STUCK_MS = 2 * HOUR_MS; // a claimed send older than a run interval
@@ -295,6 +306,58 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
         value: rejectCount,
       });
     }
+  }
+
+  // --- Resend webhook signature misconfiguration (Phase 24, rev 2 MAJOR 2 — mirrors FIX 4) -----
+  // A persistent rotated/wrong RESEND_WEBHOOK_SECRET is otherwise INVISIBLE: real events reject
+  // pre-verify (→ 'resend-webhook-rejected', in no catalog) while 'resend-webhook' stays ok/info.
+  {
+    const rejected = jobByName.get("resend-webhook-rejected");
+    const webhook = jobByName.get("resend-webhook");
+    const rejectCount = rejected?.consecutiveFailures ?? 0;
+    const rejectsFresh = rejected ? ageMs(nowMs, rejected.lastRunAt) <= RESEND_REJECT_FRESH_MS : false;
+    const webhookRecentlySucceeded = webhook
+      ? ageMs(nowMs, webhook.lastSuccessAt) <= RESEND_WEBHOOK_SUCCESS_FRESH_MS
+      : false;
+    if (rejectsFresh && rejectCount >= RESEND_REJECT_MIN_COUNT && !webhookRecentlySucceeded) {
+      signals.push({
+        key: "resend-webhook-signature",
+        label: "Resend webhook signature",
+        severity: "warn",
+        detail: `Resend bounce/complaint events are being REJECTED pre-verification (${rejectCount} recent rejects) while no resend-webhook success is recent — likely a rotated/wrong RESEND_WEBHOOK_SECRET; bounces/complaints may be silently not landing. Re-check the webhook signing secret.`,
+        value: rejectCount,
+      });
+    }
+  }
+
+  // --- Email suppressions (Phase 24, §6 — INFO only; a suppression is healthy, expected --------
+  // behavior, never an alert). Pure read over email_suppressions, wrapped best-effort like the
+  // other blocks in this function so a read failure degrades to "signal skipped," never a throw.
+  try {
+    const rows = await db
+      .select({ source: emailSuppressions.source, suppressedAt: emailSuppressions.suppressedAt })
+      .from(emailSuppressions);
+    const bySource = new Map<string, number>();
+    let mostRecent: string | null = null;
+    for (const row of rows) {
+      const key = row.source ?? "unknown";
+      bySource.set(key, (bySource.get(key) ?? 0) + 1);
+      if (row.suppressedAt && (!mostRecent || row.suppressedAt > mostRecent)) mostRecent = row.suppressedAt;
+    }
+    const unsubscribeCount = bySource.get("unsubscribe_link") ?? 0;
+    const bounceCount = bySource.get("bounce") ?? 0;
+    const complaintCount = bySource.get("complaint") ?? 0;
+    signals.push({
+      key: "email-suppressions",
+      label: "Email suppressions",
+      severity: "info",
+      detail: rows.length > 0
+        ? `${rows.length} suppressed address(es) (unsubscribe ${unsubscribeCount}, bounce ${bounceCount}, complaint ${complaintCount}); most recent ${mostRecent ?? "unknown"}.`
+        : "No suppressed email addresses on record.",
+      value: rows.length,
+    });
+  } catch {
+    // Best-effort; a read failure here must not affect any other signal.
   }
 
   // --- Backup freshness (non-required; missing → not-configured) ----------------------------
