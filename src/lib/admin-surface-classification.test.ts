@@ -83,6 +83,42 @@ assert.equal(adminProofRequired("/api/projects/project-1/communications/send-ema
 assert.equal(isStudioPublicPath("/api/projects/project-1/communications/send-email"), false, "send-email must NOT be proxy-public");
 assert.equal(isPublicOriginBypassApiPath("/api/projects/project-1/communications/send-email"), false, "send-email must NOT be origin-bypassed");
 
+// Phase 23 (CR-5): the questionnaire-autofill apply route and the timeline-
+// draft apply route are GENUINE admin surfaces — NOT public, NOT origin-
+// bypassed, admin-proof required (identical trust model to send-email). This
+// is the ONE canonical-write door for the autofill proposal (I3); pin it so it
+// can never drift into an agent/machine-reachable or public-bypass path.
+assert.equal(
+  adminProofRequired("/api/questionnaires/questionnaire-1/responses/response-1/apply"),
+  true,
+  "questionnaire autofill apply must require an admin proof",
+);
+assert.equal(
+  isStudioPublicPath("/api/questionnaires/questionnaire-1/responses/response-1/apply"),
+  false,
+  "questionnaire autofill apply must NOT be proxy-public",
+);
+assert.equal(
+  isPublicOriginBypassApiPath("/api/questionnaires/questionnaire-1/responses/response-1/apply"),
+  false,
+  "questionnaire autofill apply must NOT be origin-bypassed",
+);
+assert.equal(
+  adminProofRequired("/api/projects/project-1/timeline-draft/apply"),
+  true,
+  "timeline draft apply must require an admin proof",
+);
+assert.equal(
+  isStudioPublicPath("/api/projects/project-1/timeline-draft/apply"),
+  false,
+  "timeline draft apply must NOT be proxy-public",
+);
+assert.equal(
+  isPublicOriginBypassApiPath("/api/projects/project-1/timeline-draft/apply"),
+  false,
+  "timeline draft apply must NOT be origin-bypassed",
+);
+
 // Phase 15 (PWA): the manifest + sw path are static, non-sensitive assets that
 // must load UNAUTHENTICATED (a login-walled manifest = broken install), added in
 // lockstep to the proxy `isPublicAssetPath` and the app `isStaticAssetPath`.

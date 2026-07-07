@@ -93,6 +93,12 @@ The authoritative, always-current list is `docs/roadmap-competitive-parity.md`. 
 - **CR-2** — settings nav group (Settings raised; Activity/Data Health/System Status folded into a
   Settings tab strip, URLs unchanged). Dark (`SETTINGS_NAV_GROUP`).
 - **CR-3** — quick-find under-nav bug FIXED (unflagged repair; live on next deploy).
+- **CR-4** — scheduler auto-generated Google Meet links. Dark (`SCHEDULER_MEET_LINKS`).
+- **Phase 23 / CR-5** — questionnaire autofill review-and-apply: closes the untrusted-input →
+  canonical-write channel (public submissions produce a review proposal instead of direct writes to
+  projects/clients/locations/events) and adds the missing "Apply timeline draft" step. Dark
+  (`QUESTIONNAIRE_AUTOFILL_REVIEW`); migration 0095 applied ahead of the flag flip (additive,
+  inert while off). See `docs/specs/phase-23-questionnaire-autofill-review.md`.
 
 **Not yet built (parity backlog):** 13 autopay (money-gated), 16 mini-sessions (business-dependent),
 17 kanban board, 18 AI daily brief, 19 embeddable lead form, 20 structured meeting notes.

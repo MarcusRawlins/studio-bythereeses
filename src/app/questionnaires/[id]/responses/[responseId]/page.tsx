@@ -1,5 +1,9 @@
 import { AppShell } from "@/components/AppShell";
-import { getQuestionnaireResponseDetail, questionnaireResponseStatus } from "@/lib/questionnaires";
+import {
+  getQuestionnaireResponseDetail,
+  questionnaireAutofillReviewEnabled,
+  questionnaireResponseStatus,
+} from "@/lib/questionnaires";
 import { Bot, CalendarDays, FolderKanban, Mail, Pencil, UserRound } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -26,16 +30,89 @@ function displayClient(response: {
   return name || response.clientEmail || "No linked client";
 }
 
+const FIELD_LABELS: Record<string, string> = {
+  eventDate: "Event date",
+  venueName: "Venue name",
+  venueAddress: "Venue address",
+  city: "City",
+  state: "State",
+  instagramHandle: "Instagram",
+  phone: "Phone",
+  communicationPreference: "Communication preference",
+  referralSource: "Referral source",
+  preferredName: "Preferred name",
+  firstName: "First name",
+  lastName: "Last name",
+  email: "Email",
+  notes: "Wedding day notes",
+  name: "Location name",
+  address: "Location address",
+};
+
+function fieldLabel(field: string) {
+  return FIELD_LABELS[field] ?? field.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (char) => char.toUpperCase());
+}
+
+function FieldChangeRow({
+  sectionField,
+  current,
+  proposed,
+  questionTitle,
+  stale,
+  checkboxName,
+}: {
+  sectionField: string;
+  current: string | null;
+  proposed: string;
+  questionTitle?: string;
+  stale: boolean;
+  checkboxName: string;
+}) {
+  return (
+    <label className="flex items-start gap-3 border-b border-[var(--line-soft)] p-4 last:border-b-0">
+      <input type="checkbox" name="acceptedFields" value={checkboxName} defaultChecked className="mt-1 h-4 w-4" />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-semibold">{fieldLabel(sectionField)}</span>
+          {stale && (
+            <span className="rounded-full border border-[var(--brand-brown)] px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-[0.08em] text-[var(--brand-brown)]">
+              Changed since computed
+            </span>
+          )}
+        </div>
+        <div className="mt-1 grid gap-1 text-sm sm:grid-cols-2">
+          <div className="text-[var(--ink-muted)]">
+            <span className="text-xs uppercase tracking-[0.08em]">Current</span>
+            <div className="whitespace-pre-wrap">{current || "(empty)"}</div>
+          </div>
+          <div>
+            <span className="text-xs uppercase tracking-[0.08em] text-[var(--ink-muted)]">Proposed</span>
+            <div className="whitespace-pre-wrap font-semibold">{proposed}</div>
+          </div>
+        </div>
+        {questionTitle && <div className="mt-1 text-xs text-[var(--ink-muted)]">From: {questionTitle}</div>}
+      </div>
+    </label>
+  );
+}
+
 export default async function QuestionnaireResponseDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string; responseId: string }>;
+  searchParams?: Promise<{ saved?: string; applyError?: string }>;
 }) {
   const { id, responseId } = await params;
+  const query = (await searchParams) ?? {};
   const detail = await getQuestionnaireResponseDetail(responseId);
   if (!detail || detail.response.questionnaireId !== id) notFound();
 
-  const { response, answers } = detail;
+  const { response, answers, proposal } = detail;
+  const autofillReviewOn = questionnaireAutofillReviewEnabled();
+  const hasSuggestedChanges = Boolean(
+    proposal && (proposal.project.length || proposal.client.length || proposal.projectEvent.length || proposal.locations.length),
+  );
   const status = questionnaireResponseStatus(response);
   const respondent = response.respondentName || response.respondentEmail || displayClient(response);
   const backHref = response.projectId ? `/projects/${response.projectId}` : `/questionnaires/${id}/responses`;
@@ -117,6 +194,126 @@ export default async function QuestionnaireResponseDetailPage({
             <div className="mt-1 truncate font-semibold">{formatTimestamp(response.submittedAt ?? response.updatedAt)}</div>
           </div>
         </section>
+
+        {autofillReviewOn && (
+          <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] shadow-sm">
+            <div className="border-b border-[var(--line)] p-5">
+              <h2 className="text-lg font-semibold">Suggested changes</h2>
+              <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                Autofill review (CR-5): nothing below has been written to the project or client yet. Uncheck any field
+                to skip it, then apply.
+              </p>
+              {query.saved === "applied" && (
+                <p className="mt-2 rounded-md border border-[var(--brand-brown)] bg-[#fbf6ef] px-3 py-2 text-sm text-[var(--brand-brown)]">
+                  Applied. Canonical records now reflect the accepted fields.
+                </p>
+              )}
+              {query.applyError && (
+                <p className="mt-2 rounded-md border border-[var(--danger)] bg-[#fdf1f1] px-3 py-2 text-sm text-[var(--danger)]">
+                  {query.applyError}
+                </p>
+              )}
+            </div>
+            {!hasSuggestedChanges ? (
+              <div className="p-5 text-sm text-[var(--ink-muted)]">No suggested changes.</div>
+            ) : (
+              <form action={`/api/questionnaires/${id}/responses/${responseId}/apply`} method="post">
+                <input type="hidden" name="proposalComputedAt" value={proposal?.computedAt ?? ""} />
+                <input type="hidden" name="proposalContentHash" value={proposal?.contentHash ?? ""} />
+                {proposal!.project.length > 0 && (
+                  <div>
+                    <div className="studio-caps border-b border-[var(--line-soft)] bg-[var(--paper-2)] px-4 py-2 text-[0.6rem] text-[var(--ink-3)]">Project</div>
+                    {proposal!.project.map((change) => (
+                      <FieldChangeRow
+                        key={`project-${change.field}`}
+                        sectionField={change.field}
+                        current={change.current}
+                        proposed={change.proposed}
+                        questionTitle={change.questionTitle}
+                        stale={change.stale}
+                        checkboxName={change.field}
+                      />
+                    ))}
+                  </div>
+                )}
+                {proposal!.projectEvent.length > 0 && (
+                  <div>
+                    <div className="studio-caps border-b border-[var(--line-soft)] bg-[var(--paper-2)] px-4 py-2 text-[0.6rem] text-[var(--ink-3)]">Wedding day event</div>
+                    {proposal!.projectEvent.map((change) => (
+                      <FieldChangeRow
+                        key={`event-${change.field}`}
+                        sectionField={change.field}
+                        current={change.current}
+                        proposed={change.proposed}
+                        questionTitle={change.questionTitle}
+                        stale={change.stale}
+                        checkboxName={change.field}
+                      />
+                    ))}
+                  </div>
+                )}
+                {proposal!.client.length > 0 && (
+                  <div>
+                    <div className="studio-caps border-b border-[var(--line-soft)] bg-[var(--paper-2)] px-4 py-2 text-[0.6rem] text-[var(--ink-3)]">Client</div>
+                    {proposal!.client.map((change) => (
+                      <FieldChangeRow
+                        key={`client-${change.field}`}
+                        sectionField={change.field}
+                        current={change.current}
+                        proposed={change.proposed}
+                        questionTitle={change.questionTitle}
+                        stale={change.stale}
+                        checkboxName={change.field}
+                      />
+                    ))}
+                  </div>
+                )}
+                {proposal!.locations.length > 0 && (
+                  <div>
+                    <div className="studio-caps border-b border-[var(--line-soft)] bg-[var(--paper-2)] px-4 py-2 text-[0.6rem] text-[var(--ink-3)]">Locations</div>
+                    {proposal!.locations.map((change, index) => change.action === "create" ? (
+                      <label key={`location-create-${index}`} className="flex items-start gap-3 border-b border-[var(--line-soft)] p-4 last:border-b-0">
+                        <input type="checkbox" name="acceptedFields" value={`locations.create.${index}`} defaultChecked className="mt-1 h-4 w-4" />
+                        <div className="min-w-0 flex-1 text-sm">
+                          <div className="font-semibold">New {change.type.replaceAll("_", " ")} location: {change.proposed.name}</div>
+                          {change.proposed.address && <div className="mt-1 text-[var(--ink-muted)]">{change.proposed.address}</div>}
+                          {change.proposed.notes && <div className="mt-1 whitespace-pre-wrap text-[var(--ink-muted)]">{change.proposed.notes}</div>}
+                        </div>
+                      </label>
+                    ) : (
+                      <div key={`location-update-${change.existingId}`} className="border-b border-[var(--line-soft)] p-4 last:border-b-0">
+                        <div className="text-sm font-semibold">Update {change.type.replaceAll("_", " ")} location</div>
+                        {change.missing ? (
+                          <p className="mt-1 text-xs text-[var(--danger)]">This location was deleted — it will be skipped on apply.</p>
+                        ) : (
+                          <div className="mt-2 space-y-2">
+                            {(["name", "address", "city", "state", "notes"] as const)
+                              .filter((field) => change.proposed[field] !== (change.current?.[field] ?? null))
+                              .map((field) => (
+                                <FieldChangeRow
+                                  key={field}
+                                  sectionField={field}
+                                  current={change.current?.[field] ?? null}
+                                  proposed={change.proposed[field] ?? ""}
+                                  stale={Boolean(change.liveCurrent && change.liveCurrent[field] !== (change.current?.[field] ?? null))}
+                                  checkboxName={`locations.${change.existingId}.${field}`}
+                                />
+                              ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="flex items-center justify-end gap-3 p-4">
+                  <button className="brand-primary-button inline-flex items-center justify-center gap-2 rounded-sm px-4 py-2.5 text-sm transition">
+                    Apply to project
+                  </button>
+                </div>
+              </form>
+            )}
+          </section>
+        )}
 
         <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] shadow-sm">
           <div className="border-b border-[var(--line)] p-5">

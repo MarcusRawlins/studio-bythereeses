@@ -1617,6 +1617,10 @@ async function questionnaireResponseResult(responseId: string) {
       value: answer.value,
       formattedValue: answer.formattedValue,
     })),
+    // D1/M3: flag ON routes this caller through the proposal path (no canonical
+    // write, I2). Surface the proposal so the MCP round-trip sees the
+    // suggested changes instead of assuming a silent canonical write happened.
+    suggestedChanges: detail.proposal,
   };
 }
 

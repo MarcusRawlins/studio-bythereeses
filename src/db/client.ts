@@ -1280,6 +1280,15 @@ function migrate(database: LocalDatabase) {
     );
     CREATE INDEX IF NOT EXISTS idx_health_alerts_unresolved ON health_alerts(resolved_at);
   `);
+
+  // Phase 23 (migration 0095): questionnaire autofill review-and-apply (CR-5). Additive +
+  // idempotent. NON-CANONICAL: suggested_changes_json/computed_at hold a review artifact
+  // (never a canonical write) and semantic_key is an optional admin-assigned mapping hint —
+  // losing any of these three columns loses no business state. Dark behind
+  // QUESTIONNAIRE_AUTOFILL_REVIEW; safe to migrate ahead of the flag flip.
+  addColumnIfMissing(database, "questionnaire_responses", "suggested_changes_json", "TEXT");
+  addColumnIfMissing(database, "questionnaire_responses", "suggested_changes_computed_at", "TEXT");
+  addColumnIfMissing(database, "questionnaire_questions", "semantic_key", "TEXT");
 }
 
 function getD1Binding() {

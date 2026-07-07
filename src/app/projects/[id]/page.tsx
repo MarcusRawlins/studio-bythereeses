@@ -18,7 +18,12 @@ import {
 import { isEmailSuppressed } from "@/lib/email";
 import { getProjectFinancialSummary } from "@/lib/project-finance";
 import { listProjectWorkflowRuns, sixFigureAutomationSteps } from "@/lib/project-workflow-automation";
-import { listProjectQuestionnaireResponses, listQuestionnaires, questionnaireResponseStatus } from "@/lib/questionnaires";
+import {
+  listProjectQuestionnaireResponses,
+  listQuestionnaires,
+  questionnaireAutofillReviewEnabled,
+  questionnaireResponseStatus,
+} from "@/lib/questionnaires";
 import { listProjectBookingLinks } from "@/lib/scheduler";
 import { listProjectSequenceEnrollments } from "@/lib/sequences";
 import { isNumberSuppressed, smsEnabled, toE164 } from "@/lib/sms";
@@ -203,10 +208,20 @@ export default async function ProjectDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ portalLink?: string; saved?: string; error?: string; smsError?: string; emailError?: string }>;
+  searchParams: Promise<{
+    portalLink?: string;
+    saved?: string;
+    error?: string;
+    smsError?: string;
+    emailError?: string;
+    applyError?: string;
+    applyConfirm?: string;
+    applyConfirmCount?: string;
+  }>;
 }) {
   const { id } = await params;
-  const { portalLink, saved, error, smsError, emailError } = await searchParams;
+  const { portalLink, saved, error, smsError, emailError, applyError, applyConfirm, applyConfirmCount } = await searchParams;
+  const autofillReviewOn = questionnaireAutofillReviewEnabled();
   if (id.startsWith("seed-project-")) {
     redirect("/projects?pageSize=200");
   }
@@ -438,6 +453,18 @@ export default async function ProjectDetailPage({
         {emailError && (
           <div className="rounded-md border border-[var(--danger)] bg-[#fff5f2] p-4 text-sm font-semibold text-[var(--danger)]">
             {emailSendErrorMessages[emailError] ?? "The email could not be sent."}
+          </div>
+        )}
+
+        {saved === "timeline_draft_applied" && (
+          <div className="rounded-md border border-[var(--accent)] bg-[#edf6f1] p-4 text-sm font-semibold text-[var(--accent-strong)]">
+            Timeline draft applied.
+          </div>
+        )}
+
+        {applyError && (
+          <div className="rounded-md border border-[var(--danger)] bg-[#fff5f2] p-4 text-sm font-semibold text-[var(--danger)]">
+            {applyError}
           </div>
         )}
 
@@ -1738,6 +1765,33 @@ export default async function ProjectDetailPage({
                             </ul>
                           </div>
                         </div>
+                        {autofillReviewOn && (
+                          <div className="mt-3 border-t border-[var(--line)] pt-3">
+                            {applyConfirm === task.id ? (
+                              <div className="space-y-2">
+                                <p className="text-sm text-[var(--danger)]">
+                                  {applyConfirmCount ?? "Some"} hand-edited timeline item{applyConfirmCount === "1" ? "" : "s"} would be
+                                  overwritten by this re-apply — confirm to replace the draft-sourced items.
+                                </p>
+                                <form action={`/api/projects/${data.project.id}/timeline-draft/apply`} method="post">
+                                  <input type="hidden" name="taskId" value={task.id} />
+                                  <input type="hidden" name="confirmReplace" value="1" />
+                                  <button className="inline-flex items-center gap-2 rounded-sm border border-[var(--danger)] px-3 py-2 text-sm font-semibold text-[var(--danger)] transition hover:bg-[#fdf1f1]">
+                                    Confirm replace draft-sourced items
+                                  </button>
+                                </form>
+                              </div>
+                            ) : (
+                              <form action={`/api/projects/${data.project.id}/timeline-draft/apply`} method="post">
+                                <input type="hidden" name="taskId" value={task.id} />
+                                <button className="brand-primary-button inline-flex items-center gap-2 rounded-sm px-3 py-2 text-sm">
+                                  Apply timeline draft
+                                </button>
+                                <p className="mt-1 text-xs text-[var(--ink-3)]">Re-applying replaces the draft-sourced timeline items.</p>
+                              </form>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

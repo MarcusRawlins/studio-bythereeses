@@ -1006,6 +1006,19 @@ async function main() {
     "refund_initiations should be indexed by payment, Stripe refund id, and status",
   );
 
+  // Phase 23 (migration 0095) — questionnaire autofill review-and-apply (CR-5). Additive,
+  // non-canonical columns: the proposal artifact on questionnaire_responses and the optional
+  // semantic mapping key on questionnaire_questions.
+  assert.ok(
+    columnNames("questionnaire_responses").has("suggested_changes_json")
+      && columnNames("questionnaire_responses").has("suggested_changes_computed_at"),
+    "questionnaire responses should carry the CR-5 autofill proposal artifact columns",
+  );
+  assert.ok(
+    columnNames("questionnaire_questions").has("semantic_key"),
+    "questionnaire questions should carry the optional semantic mapping key column",
+  );
+
   // The refund dedupe write is INSERT ... ON CONFLICT DO NOTHING — the UNIQUE index is
   // what makes a redelivered webhook converge instead of double-recording.
   const refundCanonNow = new Date("2026-07-01T12:00:00.000Z").toISOString();

@@ -264,6 +264,10 @@ export const questionnaireQuestions = sqliteTable("questionnaire_questions", {
   required: integer("required", { mode: "boolean" }).notNull().default(false),
   optionsJson: text("options_json"),
   sortOrder: integer("sort_order").notNull().default(0),
+  // Phase 23 (migration 0095): optional admin-assigned semantic mapping key (§5 of the CR-5
+  // spec). Additive/nullable; a migration never auto-populates it. NULL = keyword-fallback
+  // matching (today's behavior, unchanged).
+  semanticKey: text("semantic_key"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });
@@ -278,6 +282,13 @@ export const questionnaireResponses = sqliteTable("questionnaire_responses", {
   submittedAt: text("submitted_at"),
   sourceResponseId: text("source_response_id"),
   answersJson: text("answers_json").notNull(),
+  // Phase 23 (migration 0095): the CR-5 autofill review proposal artifact (§3). Non-canonical —
+  // a review artifact, never a business record. suggestedChangesJson is the serialized
+  // QuestionnaireAutofillProposal (carries its own contentHash version token);
+  // suggestedChangesComputedAt mirrors the proposal's computedAt (the other half of the D8
+  // version token) and drives the stale-render freshness check.
+  suggestedChangesJson: text("suggested_changes_json"),
+  suggestedChangesComputedAt: text("suggested_changes_computed_at"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });

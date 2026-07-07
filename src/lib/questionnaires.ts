@@ -8,7 +8,14 @@ import {
   getTimelineQuestionnaireCallUrl,
   weddingTimelineQuestionnaireId,
 } from "@/lib/questionnaire-links";
+import {
+  keywordAnswers,
+  resolveSemanticValue,
+  type SemanticAnswer,
+  type SemanticKey,
+} from "@/lib/questionnaire-semantic-keys";
 import { and, asc, desc, eq, isNotNull, isNull } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -68,6 +75,69 @@ type StoredQuestionnaireAnswer = {
 
 export type QuestionnaireAnswerValue = string | string[];
 export type QuestionnaireAnswerInput = Record<string, QuestionnaireAnswerValue | null | undefined>;
+
+// -----------------------------------------------------------------------------
+// Phase 23 (CR-5) — autofill review-and-apply proposal shapes (spec §3/§4).
+//
+// Each of the four canonical syncs below is split into a PURE compute half
+// (returns FieldChange[] / LocationChange[], never writes) and an apply half
+// (performs the db.update/insert for accepted, non-stale fields). Flag OFF calls
+// compute() then apply()-with-everything-accepted in the same request (today's
+// behavior, I1); flag ON stores the compute result as a proposal and defers
+// apply to the admin action in questionnaire-autofill.ts. This keeps exactly
+// ONE extraction implementation for both paths.
+// -----------------------------------------------------------------------------
+export type FieldChange = {
+  field: string;
+  current: string | null;
+  proposed: string;
+  questionTitle: string;
+  semanticKey?: string;
+};
+
+export type LocationChange = {
+  action: "create" | "update";
+  type: string;
+  proposed: {
+    name: string;
+    address: string | null;
+    city: string | null;
+    state: string | null;
+    notes: string | null;
+  };
+  current?: {
+    name: string | null;
+    address: string | null;
+    city: string | null;
+    state: string | null;
+    notes: string | null;
+  };
+  existingId?: string;
+};
+
+export type FieldApplyOutcome = {
+  applied: string[];
+  alreadyApplied: string[];
+  skipped: Array<{ field: string; reason: string }>;
+};
+
+export type QuestionnaireAutofillActor = {
+  actorType: "admin" | "system";
+  actorName: string;
+};
+
+const PROJECT_PROFILE_FIELD_ALLOWLIST = new Set(["eventDate", "venueName", "venueAddress", "city", "state"]);
+const CLIENT_PROFILE_FIELD_ALLOWLIST = new Set([
+  "instagramHandle",
+  "phone",
+  "communicationPreference",
+  "referralSource",
+  "preferredName",
+  "firstName",
+  "lastName",
+  "email",
+]);
+const PROJECT_EVENT_FIELD_ALLOWLIST = new Set(["notes"]);
 
 export type AgentQuestionnaireLinkInput = {
   questionnaireId?: string | null;
@@ -657,109 +727,218 @@ function splitFullName(value: string) {
   };
 }
 
-async function syncQuestionnaireResponseClientProfile({
-  response,
-  answers,
-}: {
-  response: typeof questionnaireResponses.$inferSelect;
-  answers: Array<{ title: string; value: QuestionnaireAnswerValue }>;
-}) {
-  if (!response.clientId) return;
-
-  const client = await db.query.clients.findFirst({
-    where: eq(clients.id, response.clientId),
-  });
-  if (!client) return;
-
-  const participant = response.projectId
-    ? await db.query.projectParticipants.findFirst({
-      where: and(
-        eq(projectParticipants.projectId, response.projectId),
-        eq(projectParticipants.clientId, response.clientId),
-      ),
-    })
-    : null;
-  const participantRole = participant?.role ?? null;
-
-  const instagramHandle = (() => {
-    const answer = answers.find((entry) =>
-      normalizedQuestionTitle(entry.title).includes("instagram") &&
-      answerAppliesToParticipant(entry.title, participantRole));
-    return answer ? cleanInstagramAnswer(answer.value) : null;
-  })();
-  const phone = textAnswerForClient(answers, participantRole, (title) => title.includes("phone"));
-  const communicationPreference = textAnswerForClient(
-    answers,
-    participantRole,
-    (title) => title.includes("communication") || title.includes("preferred contact") || title.includes("contact preference"),
-  );
-  const referralSource = textAnswerForClient(
-    answers,
-    participantRole,
-    (title) => title.includes("referral") || title.includes("how did you hear") || title === "source",
-  );
-  const preferredName = textAnswerForClient(
-    answers,
-    participantRole,
-    (title) => title.includes("preferred name"),
-  );
-  const fullName = textAnswerForClient(
-    answers,
-    participantRole,
-    (title) => title.includes("full name") || title === "your names" || title === "your name",
-  );
-  const email = (() => {
-    const answer = answers.find((entry) =>
-      normalizedQuestionTitle(entry.title).includes("email") &&
-      answerAppliesToParticipant(entry.title, participantRole));
-    return answer ? cleanEmailAnswer(answer.value) : null;
-  })();
-
-  const updates: Partial<typeof clients.$inferInsert> = {};
-  if (instagramHandle && instagramHandle !== client.instagramHandle) updates.instagramHandle = instagramHandle;
-  if (phone && phone !== client.phone) updates.phone = phone;
-  if (communicationPreference && communicationPreference !== client.communicationPreference) updates.communicationPreference = communicationPreference;
-  if (referralSource && referralSource !== client.referralSource) updates.referralSource = referralSource;
-  if (preferredName && preferredName !== client.preferredName) updates.preferredName = preferredName;
-
-  if (fullName) {
-    const parsedName = splitFullName(fullName);
-    if (parsedName.firstName && !client.firstName) updates.firstName = parsedName.firstName;
-    if (parsedName.lastName && !client.lastName) updates.lastName = parsedName.lastName;
-    if (!updates.preferredName && !client.preferredName) updates.preferredName = fullName;
-  }
-
-  if (email && email !== client.email) {
-    const existingEmailClient = await db.query.clients.findFirst({
-      where: eq(clients.email, email),
-    });
-    if (!existingEmailClient || existingEmailClient.id === client.id) {
-      updates.email = email;
+// Semantic-first match against a client field: try the keyed answer first (role
+// scoping preserved, M8), falling back to the ORIGINAL, unchanged
+// `textAnswerForClient` keyword matcher restricted to keyword-eligible answers
+// (keyed answers excluded from the keyword scan, M8 rule 1). Reuses
+// `textAnswerForClient` as the value-extraction authority so the computed value
+// is byte-identical to today's whether or not a semantic key is involved.
+function clientTextAnswerField(
+  answers: SemanticAnswer[],
+  semanticKey: SemanticKey,
+  participantRole: string | null | undefined,
+  matcher: (title: string) => boolean,
+): { value: string; title: string; semanticKey?: string } | null {
+  const semanticRaw = resolveSemanticValue(answers, semanticKey, participantRole);
+  if (semanticRaw !== null) {
+    const cleaned = cleanTextAnswer(semanticRaw);
+    if (cleaned) {
+      const source = answers.find((answer) => answer.semanticKey === semanticKey);
+      return { value: cleaned, title: source?.title ?? "", semanticKey };
     }
   }
 
-  const changedFields = Object.entries(updates)
-    .filter(([key, value]) => key !== "updatedAt" && client[key as keyof typeof client] !== value)
-    .map(([key]) => key);
-  if (!changedFields.length) return;
+  const eligible = keywordAnswers(answers);
+  const value = textAnswerForClient(eligible, participantRole, matcher);
+  if (!value) return null;
+  const source = eligible.find((answer) =>
+    matcher(normalizedQuestionTitle(answer.title)) &&
+    answerAppliesToParticipant(answer.title, participantRole) &&
+    cleanTextAnswer(answer.value) === value);
+  return { value, title: source?.title ?? "" };
+}
 
-  const now = new Date().toISOString();
-  await db.update(clients)
-    .set({ ...updates, updatedAt: now })
-    .where(eq(clients.id, client.id));
+// Same idea for the `answers.find(...)` + custom-clean fields (instagram/email)
+// the original sync computed inline rather than via `textAnswerForClient`.
+function clientDirectAnswerField(
+  answers: SemanticAnswer[],
+  semanticKey: SemanticKey,
+  participantRole: string | null | undefined,
+  matcher: (title: string) => boolean,
+  clean: (value: QuestionnaireAnswerValue) => string | null,
+): { value: string; title: string; semanticKey?: string } | null {
+  const semanticRaw = resolveSemanticValue(answers, semanticKey, participantRole);
+  if (semanticRaw !== null) {
+    const cleaned = clean(semanticRaw);
+    if (cleaned) {
+      const source = answers.find((answer) => answer.semanticKey === semanticKey);
+      return { value: cleaned, title: source?.title ?? "", semanticKey };
+    }
+  }
 
-  await logActivity({
-    action: "client.profile_synced_from_questionnaire",
-    projectId: response.projectId || undefined,
-    clientId: client.id,
-    actorType: "system",
-    actorName: "The Reeses Studio",
-    metadata: {
-      questionnaireId: response.questionnaireId,
-      responseId: response.id,
-      changedFields,
-    },
-  });
+  const eligible = keywordAnswers(answers);
+  const match = eligible.find((entry) =>
+    matcher(normalizedQuestionTitle(entry.title)) &&
+    answerAppliesToParticipant(entry.title, participantRole));
+  if (!match) return null;
+  const cleaned = clean(match.value);
+  return cleaned ? { value: cleaned, title: match.title } : null;
+}
+
+/**
+ * Compute half of the client-profile sync (§4). Pure — no DB reads/writes.
+ * `client`/`participantRole` are pre-fetched by the caller. Returns the exact
+ * same diffs the original direct-write sync computed (byte-for-byte, I1),
+ * plus semantic-key-first resolution (§5) when a question carries one.
+ */
+export function computeClientProfileChanges({
+  response,
+  client,
+  participantRole,
+  answers,
+}: {
+  response: { clientId: string | null };
+  client: typeof clients.$inferSelect | null;
+  participantRole: string | null | undefined;
+  answers: SemanticAnswer[];
+}): FieldChange[] {
+  if (!response.clientId || !client) return [];
+
+  const changes: FieldChange[] = [];
+  const push = (field: string, proposed: string | null, current: string | null, match: { title: string; semanticKey?: string } | null) => {
+    if (!proposed || proposed === current) return;
+    changes.push({ field, current, proposed, questionTitle: match?.title ?? "", semanticKey: match?.semanticKey });
+  };
+
+  const instagram = clientDirectAnswerField(answers, "client_instagram", participantRole, (title) => title.includes("instagram"), cleanInstagramAnswer);
+  push("instagramHandle", instagram?.value ?? null, client.instagramHandle, instagram);
+
+  const phone = clientTextAnswerField(answers, "client_phone", participantRole, (title) => title.includes("phone"));
+  push("phone", phone?.value ?? null, client.phone, phone);
+
+  const communicationPreference = clientTextAnswerField(
+    answers,
+    "communication_preference",
+    participantRole,
+    (title) => title.includes("communication") || title.includes("preferred contact") || title.includes("contact preference"),
+  );
+  push("communicationPreference", communicationPreference?.value ?? null, client.communicationPreference, communicationPreference);
+
+  const referralSource = clientTextAnswerField(
+    answers,
+    "referral_source",
+    participantRole,
+    (title) => title.includes("referral") || title.includes("how did you hear") || title === "source",
+  );
+  push("referralSource", referralSource?.value ?? null, client.referralSource, referralSource);
+
+  // No semantic key for "preferred name" in the §5 vocabulary — keyword-only,
+  // still excluded-from-keyword-scan for any OTHER keyed answer (M8 rule 1).
+  const eligibleForPreferredName = keywordAnswers(answers);
+  const preferredName = textAnswerForClient(eligibleForPreferredName, participantRole, (title) => title.includes("preferred name"));
+  push("preferredName", preferredName, client.preferredName, preferredName ? { title: "Preferred name" } : null);
+
+  const fullName = clientTextAnswerField(
+    answers,
+    "client_full_name",
+    participantRole,
+    (title) => title.includes("full name") || title === "your names" || title === "your name",
+  );
+  if (fullName?.value) {
+    const parsedName = splitFullName(fullName.value);
+    if (parsedName.firstName && !client.firstName) {
+      changes.push({ field: "firstName", current: client.firstName, proposed: parsedName.firstName, questionTitle: fullName.title, semanticKey: fullName.semanticKey });
+    }
+    if (parsedName.lastName && !client.lastName) {
+      changes.push({ field: "lastName", current: client.lastName, proposed: parsedName.lastName, questionTitle: fullName.title, semanticKey: fullName.semanticKey });
+    }
+    const preferredNameAlreadyProposed = changes.some((change) => change.field === "preferredName");
+    if (!preferredNameAlreadyProposed && !client.preferredName) {
+      changes.push({ field: "preferredName", current: client.preferredName, proposed: fullName.value, questionTitle: fullName.title, semanticKey: fullName.semanticKey });
+    }
+  }
+
+  const email = clientDirectAnswerField(answers, "client_email", participantRole, (title) => title.includes("email"), cleanEmailAnswer);
+  push("email", email?.value ?? null, client.email, email);
+
+  return changes;
+}
+
+/**
+ * Apply half of the client-profile sync. Re-reads the live client row (D5 stale
+ * guard) and re-runs the email-uniqueness collision check at apply time (D9/M2)
+ * rather than trusting the compute-time snapshot. Used both by the flag-OFF
+ * direct-write path (accept-all, called immediately after compute) and the
+ * flag-ON admin apply action (Tyler's accepted subset, possibly much later).
+ */
+export async function applyClientProfileChanges({
+  responseContext,
+  clientId,
+  changes,
+  acceptedFields,
+  actor,
+}: {
+  responseContext: { questionnaireId: string; projectId: string | null; responseId: string };
+  clientId: string;
+  changes: FieldChange[];
+  acceptedFields: Set<string>;
+  actor: QuestionnaireAutofillActor;
+}): Promise<FieldApplyOutcome> {
+  const client = await db.query.clients.findFirst({ where: eq(clients.id, clientId) });
+  const applied: string[] = [];
+  const alreadyApplied: string[] = [];
+  const skipped: Array<{ field: string; reason: string }> = [];
+  if (!client) return { applied, alreadyApplied, skipped };
+
+  const updates: Partial<typeof clients.$inferInsert> = {};
+
+  for (const change of changes) {
+    if (!acceptedFields.has(change.field)) continue;
+    if (!CLIENT_PROFILE_FIELD_ALLOWLIST.has(change.field)) {
+      skipped.push({ field: change.field, reason: "unknown_field" });
+      continue;
+    }
+    const live = client[change.field as keyof typeof client] as string | null;
+    if (live === change.proposed) {
+      alreadyApplied.push(change.field);
+      continue;
+    }
+    if (live !== change.current) {
+      skipped.push({ field: change.field, reason: "changed" });
+      continue;
+    }
+    if (change.field === "email") {
+      const existingEmailClient = await db.query.clients.findFirst({ where: eq(clients.email, change.proposed) });
+      if (existingEmailClient && existingEmailClient.id !== clientId) {
+        skipped.push({ field: "email", reason: "email_collision" });
+        continue;
+      }
+    }
+    (updates as Record<string, unknown>)[change.field] = change.proposed;
+    applied.push(change.field);
+  }
+
+  if (applied.length) {
+    const now = new Date().toISOString();
+    await db.update(clients)
+      .set({ ...updates, updatedAt: now })
+      .where(eq(clients.id, clientId));
+
+    await logActivity({
+      action: "client.profile_synced_from_questionnaire",
+      projectId: responseContext.projectId || undefined,
+      clientId,
+      actorType: actor.actorType,
+      actorName: actor.actorName,
+      metadata: {
+        questionnaireId: responseContext.questionnaireId,
+        responseId: responseContext.responseId,
+        changedFields: applied,
+      },
+    });
+  }
+
+  return { applied, alreadyApplied, skipped };
 }
 
 function textAnswerForProject(
@@ -829,120 +1008,251 @@ function questionnaireLocationLabel(title: string, type: string) {
   return "Other locations";
 }
 
-function questionnaireLocationInputs(answers: Array<{ title: string; value: QuestionnaireAnswerValue }>) {
-  const inputs: Array<{
-    type: string;
-    name: string;
-    address: string | null;
-    city: string | null;
-    state: string | null;
-    notes: string | null;
-  }> = [];
+type QuestionnaireLocationInput = {
+  type: string;
+  name: string;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  notes: string | null;
+};
+
+function locationInputFromValue(type: string, label: string, value: string): QuestionnaireLocationInput | null {
+  const normalizedValue = normalizedLocationName(value);
+  if (!normalizedValue || normalizedValue === "na" || normalizedValue === "n a" || normalizedValue === "none" || normalizedValue === "same as ceremony") return null;
+
+  if (type === "other") {
+    return { type, name: label, address: null, city: null, state: null, notes: value };
+  }
+
+  const parsed = splitLocationAnswer(value);
+  const name = type === "getting_ready" && label !== "Other locations"
+    ? `${label}: ${parsed.name}`
+    : parsed.name;
+  return { type, name: name || label, address: parsed.address, city: null, state: null, notes: parsed.notes };
+}
+
+function questionnaireLocationInputs(answers: Array<{ title: string; value: QuestionnaireAnswerValue }>): QuestionnaireLocationInput[] {
+  const inputs: QuestionnaireLocationInput[] = [];
 
   for (const answer of answers) {
     const type = questionnaireLocationType(answer.title);
     const value = cleanTextAnswer(answer.value);
     if (!type || !value) continue;
 
-    const normalizedValue = normalizedLocationName(value);
-    if (!normalizedValue || normalizedValue === "na" || normalizedValue === "n a" || normalizedValue === "none" || normalizedValue === "same as ceremony") continue;
-
-    if (type === "other") {
-      inputs.push({
-        type,
-        name: questionnaireLocationLabel(answer.title, type),
-        address: null,
-        city: null,
-        state: null,
-        notes: value,
-      });
-      continue;
-    }
-
-    const parsed = splitLocationAnswer(value);
     const label = questionnaireLocationLabel(answer.title, type);
-    const name = type === "getting_ready" && label !== "Other locations"
-      ? `${label}: ${parsed.name}`
-      : parsed.name;
-    inputs.push({
-      type,
-      name: name || label,
-      address: parsed.address,
-      city: null,
-      state: null,
-      notes: parsed.notes,
-    });
+    const input = locationInputFromValue(type, label, value);
+    if (input) inputs.push(input);
   }
 
   return inputs;
 }
 
-async function syncQuestionnaireResponseProjectLocations({
+// §5 semantic keys for the five location roles. Purely additive — a keyed
+// answer is resolved here FIRST; the keyword pass above only ever sees
+// keyword-eligible (unkeyed) answers (M8 rule 1), so there is no double-match.
+const LOCATION_SEMANTIC_KEYS: Partial<Record<SemanticKey, { type: string; label: string }>> = {
+  getting_ready_location_bride: { type: "getting_ready", label: "Bride getting ready" },
+  getting_ready_location_groom: { type: "getting_ready", label: "Groom getting ready" },
+  ceremony_location: { type: "ceremony", label: "Ceremony" },
+  reception_location: { type: "reception", label: "Reception" },
+  portrait_location: { type: "portrait", label: "Portrait location" },
+};
+
+function semanticLocationInputs(answers: SemanticAnswer[]): QuestionnaireLocationInput[] {
+  const inputs: QuestionnaireLocationInput[] = [];
+  for (const [key, info] of Object.entries(LOCATION_SEMANTIC_KEYS) as Array<[SemanticKey, { type: string; label: string }]>) {
+    const raw = resolveSemanticValue(answers, key);
+    const value = raw !== null ? cleanTextAnswer(raw) : null;
+    if (!value) continue;
+    const input = locationInputFromValue(info.type, info.label, value);
+    if (input) inputs.push(input);
+  }
+  return inputs;
+}
+
+function allQuestionnaireLocationInputs(answers: SemanticAnswer[]): QuestionnaireLocationInput[] {
+  return [...semanticLocationInputs(answers), ...questionnaireLocationInputs(keywordAnswers(answers))];
+}
+
+/**
+ * Compute half of the locations sync. Pure — `existingLocations` is pre-fetched
+ * by the caller. D5/M1: `current` is a full field snapshot of the matched row at
+ * compute time, so the apply half can detect per-field drift.
+ */
+export function computeProjectLocationsChanges({
   response,
+  existingLocations,
   answers,
 }: {
-  response: typeof questionnaireResponses.$inferSelect;
-  answers: Array<{ title: string; value: QuestionnaireAnswerValue }>;
-}) {
-  if (!response.projectId || !response.submittedAt) return;
+  response: { projectId: string | null; submittedAt: string | null; id: string };
+  existingLocations: Array<typeof projectLocations.$inferSelect>;
+  answers: SemanticAnswer[];
+}): LocationChange[] {
+  if (!response.projectId || !response.submittedAt) return [];
 
-  const locations = questionnaireLocationInputs(answers);
-  if (!locations.length) return;
+  const locations = allQuestionnaireLocationInputs(answers);
+  if (!locations.length) return [];
 
-  const now = new Date().toISOString();
-  const existing = await db.query.projectLocations.findMany({
-    where: (location, { eq }) => eq(location.projectId, response.projectId as string),
-  });
-
-  for (const location of locations) {
-    const existingLocation = existing.find((entry) =>
+  return locations.map((location): LocationChange => {
+    const existingLocation = existingLocations.find((entry) =>
       entry.sourceType === "questionnaire_response" &&
       entry.sourceId === response.id &&
       entry.type === location.type &&
       normalizedLocationName(entry.name) === normalizedLocationName(location.name));
 
-    if (existingLocation) {
-      await db.update(projectLocations)
-        .set({
-          name: location.name,
-          address: location.address,
-          city: location.city,
-          state: location.state,
-          notes: location.notes,
-          updatedAt: now,
-        })
-        .where(eq(projectLocations.id, existingLocation.id));
-      continue;
-    }
-
-    await db.insert(projectLocations).values({
-      id: crypto.randomUUID(),
-      projectId: response.projectId,
-      type: location.type,
+    const proposed = {
       name: location.name,
       address: location.address,
       city: location.city,
       state: location.state,
       notes: location.notes,
-      sourceType: "questionnaire_response",
-      sourceId: response.id,
-      createdAt: now,
-      updatedAt: now,
+    };
+
+    if (!existingLocation) {
+      return { action: "create", type: location.type, proposed };
+    }
+
+    return {
+      action: "update",
+      type: location.type,
+      proposed,
+      current: {
+        name: existingLocation.name,
+        address: existingLocation.address,
+        city: existingLocation.city,
+        state: existingLocation.state,
+        notes: existingLocation.notes,
+      },
+      existingId: existingLocation.id,
+    };
+  });
+}
+
+const LOCATION_UPDATE_FIELDS = ["name", "address", "city", "state", "notes"] as const;
+
+/**
+ * Apply half of the locations sync. `create` entries are accepted/rejected as a
+ * whole row (key `locations.create.<index>`); `update` entries are accepted
+ * per-field (key `locations.<existingId>.<field>`), each independently re-read
+ * against the LIVE row (D5/M1): a field whose live value drifted from the
+ * compute-time snapshot is skipped (`reason:"changed"`); an `existingId` whose
+ * row was deleted between compute and apply skips that whole entry
+ * (`reason:"existing_missing"`) rather than re-inserting or throwing.
+ */
+export async function applyProjectLocationsChanges({
+  responseContext,
+  projectId,
+  changes,
+  acceptedFields,
+  actor,
+}: {
+  responseContext: { questionnaireId: string; responseId: string; clientId: string | null };
+  projectId: string;
+  changes: LocationChange[];
+  acceptedFields: Set<string>;
+  actor: QuestionnaireAutofillActor;
+}): Promise<FieldApplyOutcome> {
+  const applied: string[] = [];
+  const alreadyApplied: string[] = [];
+  const skipped: Array<{ field: string; reason: string }> = [];
+  let touchedCount = 0;
+  const now = new Date().toISOString();
+
+  for (const [index, change] of changes.entries()) {
+    if (change.action === "create") {
+      const key = `locations.create.${index}`;
+      if (!acceptedFields.has(key)) continue;
+
+      // M9-equivalent idempotency for creates: a prior apply (or the flag-OFF
+      // accept-all path) may already have inserted this exact row (same
+      // matching key the compute half uses: sourceType/sourceId/type/name). A
+      // double-apply must be a no-op here too, not a duplicate insert.
+      const candidates = await db.query.projectLocations.findMany({
+        where: (location, { and, eq }) => and(
+          eq(location.projectId, projectId),
+          eq(location.sourceType, "questionnaire_response"),
+          eq(location.sourceId, responseContext.responseId),
+          eq(location.type, change.type),
+        ),
+      });
+      const alreadyExists = candidates.some((location) => normalizedLocationName(location.name) === normalizedLocationName(change.proposed.name));
+      if (alreadyExists) {
+        alreadyApplied.push(key);
+        continue;
+      }
+
+      await db.insert(projectLocations).values({
+        id: crypto.randomUUID(),
+        projectId,
+        type: change.type,
+        name: change.proposed.name,
+        address: change.proposed.address,
+        city: change.proposed.city,
+        state: change.proposed.state,
+        notes: change.proposed.notes,
+        sourceType: "questionnaire_response",
+        sourceId: responseContext.responseId,
+        createdAt: now,
+        updatedAt: now,
+      });
+      applied.push(key);
+      touchedCount += 1;
+      continue;
+    }
+
+    if (!change.existingId) continue;
+    const acceptedFieldNames = LOCATION_UPDATE_FIELDS.filter((field) => acceptedFields.has(`locations.${change.existingId}.${field}`));
+    if (!acceptedFieldNames.length) continue;
+
+    const liveLocation = await db.query.projectLocations.findFirst({ where: eq(projectLocations.id, change.existingId) });
+    if (!liveLocation) {
+      for (const field of acceptedFieldNames) {
+        skipped.push({ field: `locations.${change.existingId}.${field}`, reason: "existing_missing" });
+      }
+      continue;
+    }
+
+    const updates: Partial<typeof projectLocations.$inferInsert> = {};
+    for (const field of acceptedFieldNames) {
+      const key = `locations.${change.existingId}.${field}`;
+      const proposedValue = change.proposed[field];
+      const currentSnapshot = change.current?.[field] ?? null;
+      const liveValue = liveLocation[field];
+      if (liveValue === proposedValue) {
+        alreadyApplied.push(key);
+        continue;
+      }
+      if (liveValue !== currentSnapshot) {
+        skipped.push({ field: key, reason: "changed" });
+        continue;
+      }
+      (updates as Record<string, unknown>)[field] = proposedValue;
+      applied.push(key);
+    }
+
+    if (Object.keys(updates).length) {
+      await db.update(projectLocations).set({ ...updates, updatedAt: now }).where(eq(projectLocations.id, change.existingId));
+      touchedCount += 1;
+    }
+  }
+
+  if (touchedCount > 0) {
+    await logActivity({
+      action: "project.locations_synced_from_questionnaire",
+      projectId,
+      clientId: responseContext.clientId || undefined,
+      actorType: actor.actorType,
+      actorName: actor.actorName,
+      metadata: {
+        questionnaireId: responseContext.questionnaireId,
+        responseId: responseContext.responseId,
+        locationCount: touchedCount,
+      },
     });
   }
 
-  await logActivity({
-    action: "project.locations_synced_from_questionnaire",
-    projectId: response.projectId,
-    clientId: response.clientId || undefined,
-    actorType: "system",
-    actorName: "The Reeses Studio",
-    metadata: {
-      questionnaireId: response.questionnaireId,
-      responseId: response.id,
-      locationCount: locations.length,
-    },
-  });
+  return { applied, alreadyApplied, skipped };
 }
 
 function questionnaireWeddingDayEventNotes(answers: Array<{ title: string; value: QuestionnaireAnswerValue }>) {
@@ -967,33 +1277,109 @@ function questionnaireWeddingDayEventNotes(answers: Array<{ title: string; value
   return sections.length ? sections.join("\n\n") : null;
 }
 
-async function syncQuestionnaireResponseProjectEvent({
-  response,
-  answers,
-}: {
-  response: typeof questionnaireResponses.$inferSelect;
-  answers: Array<{ title: string; value: QuestionnaireAnswerValue }>;
-}) {
-  if (!response.projectId || !response.submittedAt) return;
-
-  const notes = questionnaireWeddingDayEventNotes(answers);
-  if (!notes) return;
-
-  const project = await db.query.projects.findFirst({
-    where: eq(projects.id, response.projectId),
-  });
-  if (!project) return;
-
-  const now = new Date().toISOString();
-  const existingEvents = await db.query.projectEvents.findMany({
-    where: eq(projectEvents.projectId, response.projectId),
-    orderBy: asc(projectEvents.createdAt),
-  });
-  const event = existingEvents.find((entry) => entry.title.toLowerCase() === "wedding day")
+function resolveWeddingDayEvent(existingEvents: Array<typeof projectEvents.$inferSelect>) {
+  return existingEvents.find((entry) => entry.title.toLowerCase() === "wedding day")
     ?? existingEvents.find((entry) => entry.type === "wedding")
     ?? existingEvents[0]
     ?? null;
+}
 
+// §5: "ceremony_time" is the only vocabulary key overlapping the composite
+// event-notes blob. A keyed answer is resolved first and prepended; the
+// keyword pass (unchanged `questionnaireWeddingDayEventNotes`) only ever sees
+// keyword-eligible answers (M8 rule 1), so there's no duplicate section.
+function computeWeddingDayEventNotes(answers: SemanticAnswer[]): string | null {
+  const sections: string[] = [];
+  const semanticCeremonyTime = resolveSemanticValue(answers, "ceremony_time");
+  const ceremonyTimeValue = semanticCeremonyTime !== null ? cleanTextAnswer(semanticCeremonyTime) : null;
+  if (ceremonyTimeValue) sections.push(`Ceremony time:\n${ceremonyTimeValue}`);
+
+  const keywordNotes = questionnaireWeddingDayEventNotes(keywordAnswers(answers));
+  if (keywordNotes) sections.push(keywordNotes);
+
+  return sections.length ? sections.join("\n\n") : null;
+}
+
+/**
+ * Compute half of the "Wedding day" project_events sync. v1 only proposes the
+ * composite `notes` field (§3) — the venue/date/type/title backfill is
+ * re-derived from LIVE state at apply time (D9/M6), not proposed to Tyler as a
+ * separate diffable field.
+ */
+export function computeProjectEventChanges({
+  response,
+  project,
+  existingEvents,
+  answers,
+}: {
+  response: { projectId: string | null; submittedAt: string | null };
+  project: typeof projects.$inferSelect | null;
+  existingEvents: Array<typeof projectEvents.$inferSelect>;
+  answers: SemanticAnswer[];
+}): FieldChange[] {
+  if (!response.projectId || !response.submittedAt || !project) return [];
+
+  const notes = computeWeddingDayEventNotes(answers);
+  if (!notes) return [];
+
+  const event = resolveWeddingDayEvent(existingEvents);
+  const current = event?.notes ?? null;
+  if (notes === current) return [];
+
+  return [{ field: "notes", current, proposed: notes, questionTitle: "Wedding day notes" }];
+}
+
+/**
+ * Apply half of the event sync. D9/M6: re-resolves which project_events row to
+ * target (same fallback chain as compute) and re-derives the venue/date
+ * backfill from LIVE project + event state — never the compute-time snapshot —
+ * because either could have changed between compute and apply. Callers MUST
+ * invoke this AFTER `applyProjectProfileChanges` so the backfill inherits the
+ * freshly-applied project venue/date rather than pre-apply values.
+ */
+export async function applyProjectEventChanges({
+  responseContext,
+  projectId,
+  changes,
+  acceptedFields,
+  actor,
+}: {
+  responseContext: { questionnaireId: string; responseId: string; clientId: string | null };
+  projectId: string;
+  changes: FieldChange[];
+  acceptedFields: Set<string>;
+  actor: QuestionnaireAutofillActor;
+}): Promise<FieldApplyOutcome> {
+  const applied: string[] = [];
+  const alreadyApplied: string[] = [];
+  const skipped: Array<{ field: string; reason: string }> = [];
+
+  const change = changes.find((entry) => entry.field === "notes");
+  if (!change || !acceptedFields.has("notes")) return { applied, alreadyApplied, skipped };
+  if (!PROJECT_EVENT_FIELD_ALLOWLIST.has(change.field)) {
+    skipped.push({ field: change.field, reason: "unknown_field" });
+    return { applied, alreadyApplied, skipped };
+  }
+
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  if (!project) return { applied, alreadyApplied, skipped };
+  const existingEvents = await db.query.projectEvents.findMany({
+    where: eq(projectEvents.projectId, projectId),
+    orderBy: asc(projectEvents.createdAt),
+  });
+  const event = resolveWeddingDayEvent(existingEvents);
+  const liveNotes = event?.notes ?? null;
+
+  if (liveNotes === change.proposed) {
+    alreadyApplied.push("notes");
+    return { applied, alreadyApplied, skipped };
+  }
+  if (liveNotes !== change.current) {
+    skipped.push({ field: "notes", reason: "changed" });
+    return { applied, alreadyApplied, skipped };
+  }
+
+  const now = new Date().toISOString();
   const updates = {
     type: event?.type || project.type || "wedding",
     title: event?.title || "Wedding day",
@@ -1003,9 +1389,9 @@ async function syncQuestionnaireResponseProjectEvent({
     city: event?.city || project.city,
     state: event?.state || project.state,
     calendarSyncStatus: event?.calendarSyncStatus || (project.eventDate ? "needs_google_connection" : "not_connected"),
-    notes,
+    notes: change.proposed,
     sourceType: "questionnaire_response",
-    sourceId: response.id,
+    sourceId: responseContext.responseId,
     updatedAt: now,
   };
 
@@ -1016,98 +1402,255 @@ async function syncQuestionnaireResponseProjectEvent({
   } else {
     await db.insert(projectEvents).values({
       id: crypto.randomUUID(),
-      projectId: response.projectId,
+      projectId,
       ...updates,
       createdAt: now,
     });
   }
+  applied.push("notes");
 
   await logActivity({
     action: "project.event_synced_from_questionnaire",
-    projectId: response.projectId,
-    clientId: response.clientId || undefined,
-    actorType: "system",
-    actorName: "The Reeses Studio",
+    projectId,
+    clientId: responseContext.clientId || undefined,
+    actorType: actor.actorType,
+    actorName: actor.actorName,
     metadata: {
-      questionnaireId: response.questionnaireId,
-      responseId: response.id,
+      questionnaireId: responseContext.questionnaireId,
+      responseId: responseContext.responseId,
       eventTitle: updates.title,
     },
   });
+
+  return { applied, alreadyApplied, skipped };
 }
 
-async function syncQuestionnaireResponseProjectProfile({
+// Semantic-first match against a project field: try the keyed answer first,
+// falling back to the ORIGINAL, unchanged `textAnswerForProject`/
+// `dateAnswerForProject` keyword matchers restricted to keyword-eligible
+// answers (keyed answers excluded, M8 rule 1). Reuses those functions as the
+// value-extraction authority (byte-identical values either way).
+function projectFieldValue(
+  answers: SemanticAnswer[],
+  semanticKey: SemanticKey,
+  matcher: (title: string) => boolean,
+  isDate: boolean,
+): { value: string; title: string; semanticKey?: string } | null {
+  const semanticRaw = resolveSemanticValue(answers, semanticKey);
+  if (semanticRaw !== null) {
+    const cleaned = cleanTextAnswer(semanticRaw);
+    const value = isDate ? (cleaned && /^\d{4}-\d{2}-\d{2}$/.test(cleaned) ? cleaned : null) : cleaned;
+    if (value) {
+      const source = answers.find((answer) => answer.semanticKey === semanticKey);
+      return { value, title: source?.title ?? "", semanticKey };
+    }
+  }
+
+  const eligible = keywordAnswers(answers);
+  const value = isDate ? dateAnswerForProject(eligible, matcher) : textAnswerForProject(eligible, matcher);
+  if (!value) return null;
+  const source = eligible.find((answer) => matcher(normalizedQuestionTitle(answer.title)) && cleanTextAnswer(answer.value) === value);
+  return { value, title: source?.title ?? "" };
+}
+
+/**
+ * Compute half of the project-profile sync. Pure — `project` is pre-fetched by
+ * the caller. Preserves the exact original extraction/diff semantics (I1),
+ * plus semantic-key-first resolution (§5).
+ */
+export function computeProjectProfileChanges({
   response,
+  project,
   answers,
 }: {
-  response: typeof questionnaireResponses.$inferSelect;
-  answers: Array<{ title: string; value: QuestionnaireAnswerValue }>;
-}) {
-  if (!response.projectId) return;
+  response: { projectId: string | null };
+  project: typeof projects.$inferSelect | null;
+  answers: SemanticAnswer[];
+}): FieldChange[] {
+  if (!response.projectId || !project) return [];
 
-  const project = await db.query.projects.findFirst({
-    where: eq(projects.id, response.projectId),
-  });
-  if (!project) return;
+  const changes: FieldChange[] = [];
 
-  const eventDate = !project.eventDate
-    ? dateAnswerForProject(
-      answers,
-      (title) => title.includes("wedding date") || title.includes("event date") || title === "date",
-    )
+  const eventDateMatch = !project.eventDate
+    ? projectFieldValue(answers, "event_date", (title) => title.includes("wedding date") || title.includes("event date") || title === "date", true)
     : null;
-  const venueName = textAnswerForProject(
-    answers,
-    (title) => (title.includes("venue") || title.includes("location")) && !title.includes("address"),
-  );
-  const venueAddress = textAnswerForProject(
-    answers,
-    (title) => title.includes("venue address") || title === "address" || title.includes("location address"),
-  );
-  const city = textAnswerForProject(
-    answers,
-    (title) => title.includes("wedding city") || title.includes("event city") || title === "city",
-  );
-  const state = textAnswerForProject(
-    answers,
-    (title) => title.includes("wedding state") || title.includes("event state") || title === "state",
-  );
+  if (eventDateMatch && eventDateMatch.value !== project.eventDate) {
+    changes.push({ field: "eventDate", current: project.eventDate, proposed: eventDateMatch.value, questionTitle: eventDateMatch.title, semanticKey: eventDateMatch.semanticKey });
+  }
+
+  const venueNameMatch = projectFieldValue(answers, "venue_name", (title) => (title.includes("venue") || title.includes("location")) && !title.includes("address"), false);
+  if (venueNameMatch && venueNameMatch.value !== project.venueName) {
+    changes.push({ field: "venueName", current: project.venueName, proposed: venueNameMatch.value, questionTitle: venueNameMatch.title, semanticKey: venueNameMatch.semanticKey });
+  }
+
+  const venueAddressMatch = projectFieldValue(answers, "venue_address", (title) => title.includes("venue address") || title === "address" || title.includes("location address"), false);
+  if (venueAddressMatch && venueAddressMatch.value !== project.venueAddress) {
+    changes.push({ field: "venueAddress", current: project.venueAddress, proposed: venueAddressMatch.value, questionTitle: venueAddressMatch.title, semanticKey: venueAddressMatch.semanticKey });
+  }
+
+  const cityMatch = projectFieldValue(answers, "city", (title) => title.includes("wedding city") || title.includes("event city") || title === "city", false);
+  if (cityMatch && cityMatch.value !== project.city) {
+    changes.push({ field: "city", current: project.city, proposed: cityMatch.value, questionTitle: cityMatch.title, semanticKey: cityMatch.semanticKey });
+  }
+
+  const stateMatch = projectFieldValue(answers, "state", (title) => title.includes("wedding state") || title.includes("event state") || title === "state", false);
+  if (stateMatch && stateMatch.value !== project.state) {
+    changes.push({ field: "state", current: project.state, proposed: stateMatch.value, questionTitle: stateMatch.title, semanticKey: stateMatch.semanticKey });
+  }
+
+  return changes;
+}
+
+/**
+ * Apply half of the project-profile sync. D9/M7: `calendarSyncStatus` is
+ * recomputed from the LIVE `googleCalendarEventId` at apply time (never
+ * trusted from compute) — it is a derived companion of an accepted `eventDate`
+ * change, not an independently-checkboxed field, and is NOT in the allowlist.
+ */
+export async function applyProjectProfileChanges({
+  responseContext,
+  projectId,
+  changes,
+  acceptedFields,
+  actor,
+}: {
+  responseContext: { questionnaireId: string; responseId: string; clientId: string | null };
+  projectId: string;
+  changes: FieldChange[];
+  acceptedFields: Set<string>;
+  actor: QuestionnaireAutofillActor;
+}): Promise<FieldApplyOutcome> {
+  const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
+  const applied: string[] = [];
+  const alreadyApplied: string[] = [];
+  const skipped: Array<{ field: string; reason: string }> = [];
+  if (!project) return { applied, alreadyApplied, skipped };
 
   const updates: Partial<typeof projects.$inferInsert> = {};
-  if (eventDate && eventDate !== project.eventDate) {
-    updates.eventDate = eventDate;
+
+  for (const change of changes) {
+    if (!acceptedFields.has(change.field)) continue;
+    if (!PROJECT_PROFILE_FIELD_ALLOWLIST.has(change.field)) {
+      skipped.push({ field: change.field, reason: "unknown_field" });
+      continue;
+    }
+    const live = project[change.field as keyof typeof project] as string | null;
+    if (live === change.proposed) {
+      alreadyApplied.push(change.field);
+      continue;
+    }
+    if (live !== change.current) {
+      skipped.push({ field: change.field, reason: "changed" });
+      continue;
+    }
+    (updates as Record<string, unknown>)[change.field] = change.proposed;
+    applied.push(change.field);
+  }
+
+  if (applied.includes("eventDate")) {
     updates.calendarSyncStatus = projectEventCalendarStatusAfterEdit({
-      eventDate,
+      eventDate: updates.eventDate as string,
       googleCalendarEventId: project.googleCalendarEventId,
     });
   }
-  if (venueName && venueName !== project.venueName) updates.venueName = venueName;
-  if (venueAddress && venueAddress !== project.venueAddress) updates.venueAddress = venueAddress;
-  if (city && city !== project.city) updates.city = city;
-  if (state && state !== project.state) updates.state = state;
 
-  const changedFields = Object.entries(updates)
-    .filter(([key, value]) => key !== "updatedAt" && project[key as keyof typeof project] !== value)
-    .map(([key]) => key);
-  if (!changedFields.length) return;
+  if (applied.length) {
+    const now = new Date().toISOString();
+    await db.update(projects)
+      .set({ ...updates, updatedAt: now })
+      .where(eq(projects.id, projectId));
 
-  const now = new Date().toISOString();
-  await db.update(projects)
-    .set({ ...updates, updatedAt: now })
-    .where(eq(projects.id, project.id));
+    await logActivity({
+      action: "project.profile_synced_from_questionnaire",
+      projectId,
+      clientId: responseContext.clientId || undefined,
+      actorType: actor.actorType,
+      actorName: actor.actorName,
+      metadata: {
+        questionnaireId: responseContext.questionnaireId,
+        responseId: responseContext.responseId,
+        changedFields: applied,
+      },
+    });
+  }
 
-  await logActivity({
-    action: "project.profile_synced_from_questionnaire",
-    projectId: project.id,
-    clientId: response.clientId || undefined,
-    actorType: "system",
-    actorName: "The Reeses Studio",
-    metadata: {
-      questionnaireId: response.questionnaireId,
-      responseId: response.id,
-      changedFields,
-    },
+  return { applied, alreadyApplied, skipped };
+}
+
+// -----------------------------------------------------------------------------
+// Phase 23 (CR-5) §3 — the proposal artifact + orchestration.
+// -----------------------------------------------------------------------------
+export type QuestionnaireAutofillProposal = {
+  version: 1;
+  responseId: string;
+  computedAt: string;
+  contentHash: string;
+  project: FieldChange[];
+  projectEvent: FieldChange[];
+  client: FieldChange[];
+  locations: LocationChange[];
+};
+
+// Modeled on `financeRefundRecordingMode`/`unifiedSignPayEnabled` (finance-flags.ts):
+// read from process.env INSIDE the body (never a default param) so the narrow
+// param type never absorbs the weak ProcessEnv type; strict `=== "1"` (unset,
+// "", "0", "true", "on", any typo -> OFF).
+export function questionnaireAutofillReviewEnabled(env?: { QUESTIONNAIRE_AUTOFILL_REVIEW?: string }): boolean {
+  return (env ?? process.env).QUESTIONNAIRE_AUTOFILL_REVIEW === "1";
+}
+
+/**
+ * Orchestrates the four compute halves into a single proposal (§3), including
+ * the D8 version token (`computedAt` + `contentHash`) and the §3 size cap
+ * (fails soft — returns null rather than throwing/blocking the submission).
+ */
+export function buildQuestionnaireAutofillProposal({
+  response,
+  project,
+  client,
+  participantRole,
+  existingEvents,
+  existingLocations,
+  answers,
+}: {
+  response: { id: string; projectId: string | null; clientId: string | null; submittedAt: string | null };
+  project: typeof projects.$inferSelect | null;
+  client: typeof clients.$inferSelect | null;
+  participantRole: string | null | undefined;
+  existingEvents: Array<typeof projectEvents.$inferSelect>;
+  existingLocations: Array<typeof projectLocations.$inferSelect>;
+  answers: SemanticAnswer[];
+}): QuestionnaireAutofillProposal | null {
+  const projectChanges = computeProjectProfileChanges({ response, project, answers });
+  const clientChanges = computeClientProfileChanges({ response, client, participantRole, answers });
+  const projectEventChanges = computeProjectEventChanges({ response, project, existingEvents, answers });
+  const locationChanges = computeProjectLocationsChanges({ response, existingLocations, answers });
+
+  const computedAt = new Date().toISOString();
+  const contentBasis = JSON.stringify({
+    responseId: response.id,
+    project: projectChanges,
+    projectEvent: projectEventChanges,
+    client: clientChanges,
+    locations: locationChanges,
   });
+  const contentHash = createHash("sha256").update(contentBasis).digest("hex");
+
+  const proposal: QuestionnaireAutofillProposal = {
+    version: 1,
+    responseId: response.id,
+    computedAt,
+    contentHash,
+    project: projectChanges,
+    projectEvent: projectEventChanges,
+    client: clientChanges,
+    locations: locationChanges,
+  };
+
+  const serialized = JSON.stringify(proposal);
+  if (serialized.length > maxSerializedAnswersLength) return null;
+
+  return proposal;
 }
 
 function validateAnswerPayload(answer: { title: string; value: QuestionnaireAnswerValue }) {
@@ -1155,6 +1698,22 @@ function buildStoredAnswers(
         value,
       };
     });
+}
+
+// Zips a question's `semanticKey` onto each stored answer for the compute
+// halves (§5). Deliberately NOT persisted into `answersJson` — the stored
+// answer shape stays byte-identical to today (I1); this is an in-memory join
+// used only to drive proposal computation.
+function withSemanticKeys(
+  answers: Array<{ title: string; value: QuestionnaireAnswerValue; questionId?: string }>,
+  questions: Array<{ id: string; semanticKey?: string | null }>,
+): SemanticAnswer[] {
+  const semanticKeyById = new Map(questions.map((question) => [question.id, question.semanticKey ?? null]));
+  return answers.map((answer) => ({
+    title: answer.title,
+    value: answer.value,
+    semanticKey: answer.questionId ? semanticKeyById.get(answer.questionId) ?? null : null,
+  }));
 }
 
 function questionnaireSourceBody(answers: StoredQuestionnaireAnswer[]) {
@@ -1268,20 +1827,63 @@ export async function backfillSubmittedQuestionnaireResponseSources() {
     });
     const parsedAnswers = parseQuestionnaireAnswers(row.response.answersJson);
     const typedAnswers = parsedAnswers.map((answer) => ({
+      questionId: answer.questionId,
       title: String(answer.title ?? ""),
       value: Array.isArray(answer.value)
         ? answer.value.map((entry) => String(entry))
         : String(answer.value ?? ""),
     }));
+    const backfillQuestions = await listQuestionnaireQuestions(row.response.questionnaireId);
+    const semanticAnswers = withSemanticKeys(typedAnswers, backfillQuestions);
+    const backfillActor: QuestionnaireAutofillActor = { actorType: "system", actorName: "The Reeses Studio" };
+    const backfillResponseContext = {
+      questionnaireId: row.response.questionnaireId,
+      responseId: row.response.id,
+      clientId: row.response.clientId,
+    };
 
-    await syncQuestionnaireResponseProjectLocations({
-      response: row.response,
-      answers: typedAnswers,
+    const existingLocations = await db.query.projectLocations.findMany({
+      where: eq(projectLocations.projectId, row.response.projectId as string),
     });
-    await syncQuestionnaireResponseProjectEvent({
-      response: row.response,
-      answers: typedAnswers,
+    const locationChanges = computeProjectLocationsChanges({
+      response: { projectId: row.response.projectId, submittedAt: row.response.submittedAt, id: row.response.id },
+      existingLocations,
+      answers: semanticAnswers,
     });
+    if (locationChanges.length) {
+      const acceptedLocationFields = new Set(locationChanges.flatMap((change, index) => change.action === "create"
+        ? [`locations.create.${index}`]
+        : LOCATION_UPDATE_FIELDS.map((field) => `locations.${change.existingId}.${field}`)));
+      await applyProjectLocationsChanges({
+        responseContext: backfillResponseContext,
+        projectId: row.response.projectId as string,
+        changes: locationChanges,
+        acceptedFields: acceptedLocationFields,
+        actor: backfillActor,
+      });
+    }
+
+    const backfillProject = row.response.projectId
+      ? await db.query.projects.findFirst({ where: eq(projects.id, row.response.projectId) }) ?? null
+      : null;
+    const existingEvents = row.response.projectId
+      ? await db.query.projectEvents.findMany({ where: eq(projectEvents.projectId, row.response.projectId), orderBy: asc(projectEvents.createdAt) })
+      : [];
+    const eventChanges = computeProjectEventChanges({
+      response: { projectId: row.response.projectId, submittedAt: row.response.submittedAt },
+      project: backfillProject,
+      existingEvents,
+      answers: semanticAnswers,
+    });
+    if (eventChanges.length) {
+      await applyProjectEventChanges({
+        responseContext: backfillResponseContext,
+        projectId: row.response.projectId as string,
+        changes: eventChanges,
+        acceptedFields: new Set(eventChanges.map((change) => change.field)),
+        actor: backfillActor,
+      });
+    }
 
     const after = await db.query.projectSources.findFirst({
       where: (source, { and, eq }) => and(
@@ -1358,10 +1960,35 @@ export async function listProjectQuestionnaireResponses(projectId: string) {
     .limit(80);
 }
 
+// D5 "changed since computed" annotation for the response-detail review card:
+// re-diffs each FieldChange against the LIVE row (never trusted from compute
+// time) so Tyler sees drift before applying. Purely a render concern — the
+// authoritative stale check happens again, independently, at apply time.
+type FieldChangeView = FieldChange & { live: string | null; stale: boolean };
+type LocationChangeView = LocationChange & {
+  liveCurrent?: { name: string | null; address: string | null; city: string | null; state: string | null; notes: string | null };
+  missing?: boolean;
+};
+export type QuestionnaireAutofillProposalView = Omit<QuestionnaireAutofillProposal, "project" | "projectEvent" | "client" | "locations"> & {
+  project: FieldChangeView[];
+  projectEvent: FieldChangeView[];
+  client: FieldChangeView[];
+  locations: LocationChangeView[];
+};
+
+function annotateFieldChanges(changes: FieldChange[], live: Record<string, unknown> | null): FieldChangeView[] {
+  return changes.map((change) => {
+    const liveValue = live ? (live[change.field] as string | null | undefined) ?? null : null;
+    return { ...change, live: liveValue, stale: liveValue !== change.current };
+  });
+}
+
 export async function getQuestionnaireResponseDetail(responseId: string) {
   const [response] = await db.select({
     ...responseSummarySelect(),
     answersJson: questionnaireResponses.answersJson,
+    suggestedChangesJson: questionnaireResponses.suggestedChangesJson,
+    suggestedChangesComputedAt: questionnaireResponses.suggestedChangesComputedAt,
   })
     .from(questionnaireResponses)
     .innerJoin(questionnaires, eq(questionnaireResponses.questionnaireId, questionnaires.id))
@@ -1386,6 +2013,54 @@ export async function getQuestionnaireResponseDetail(responseId: string) {
   const answersByQuestionId = new Map(storedAnswers.map((answer) => [answer.questionId, answer]));
   const answersByTitle = new Map(storedAnswers.map((answer) => [answer.title, answer]));
 
+  let proposal: QuestionnaireAutofillProposalView | null = null;
+  if (response.suggestedChangesJson) {
+    try {
+      const parsed = JSON.parse(response.suggestedChangesJson) as QuestionnaireAutofillProposal;
+      const liveProject = response.projectId && (parsed.project.length || parsed.projectEvent.length)
+        ? await db.query.projects.findFirst({ where: eq(projects.id, response.projectId) })
+        : null;
+      const liveClient = response.clientId && parsed.client.length
+        ? await db.query.clients.findFirst({ where: eq(clients.id, response.clientId) })
+        : null;
+      const liveEvent = response.projectId && parsed.projectEvent.length
+        ? resolveWeddingDayEvent(await db.query.projectEvents.findMany({
+            where: eq(projectEvents.projectId, response.projectId),
+            orderBy: asc(projectEvents.createdAt),
+          }))
+        : null;
+      const liveLocationsById = response.projectId && parsed.locations.length
+        ? new Map((await db.query.projectLocations.findMany({
+            where: eq(projectLocations.projectId, response.projectId),
+          })).map((location) => [location.id, location]))
+        : new Map<string, typeof projectLocations.$inferSelect>();
+
+      proposal = {
+        ...parsed,
+        project: annotateFieldChanges(parsed.project, liveProject as unknown as Record<string, unknown> | null),
+        client: annotateFieldChanges(parsed.client, liveClient as unknown as Record<string, unknown> | null),
+        projectEvent: annotateFieldChanges(parsed.projectEvent, { notes: liveEvent?.notes ?? null }),
+        locations: parsed.locations.map((change): LocationChangeView => {
+          if (change.action === "create" || !change.existingId) return { ...change };
+          const liveLocation = liveLocationsById.get(change.existingId);
+          if (!liveLocation) return { ...change, missing: true };
+          return {
+            ...change,
+            liveCurrent: {
+              name: liveLocation.name,
+              address: liveLocation.address,
+              city: liveLocation.city,
+              state: liveLocation.state,
+              notes: liveLocation.notes,
+            },
+          };
+        }),
+      };
+    } catch {
+      proposal = null;
+    }
+  }
+
   return {
     response: {
       ...response,
@@ -1405,6 +2080,7 @@ export async function getQuestionnaireResponseDetail(responseId: string) {
         formattedValue: question.type === "section" ? "" : formatQuestionnaireAnswerValue(value),
       };
     }),
+    proposal,
   };
 }
 
@@ -1530,6 +2206,20 @@ export async function createQuestionnaireLinkFromAgent(
   return link;
 }
 
+/**
+ * D1/D2/I2 flag hinge. Flag OFF: today's four direct-write syncs, unchanged
+ * (I1) — now implemented as compute()-then-apply()-with-everything-accepted in
+ * the same request, so there is exactly ONE extraction implementation shared
+ * with the flag-ON path. Flag ON: computes a proposal and stores it on the
+ * response row; NO canonical write happens (I2) — the four canonical syncs are
+ * not called. The `project_sources` transcript sync runs in BOTH branches
+ * (non-canonical, unaffected by the flag).
+ *
+ * Return shape: flag OFF returns the bare `responseId` string (unchanged, I1);
+ * flag ON returns `{ responseId, proposal }` (M3) so the agent-API/MCP callers
+ * (via `questionnaireResponseResult`) and the admin action (via the redirect
+ * target) can surface the proposal instead of silently dead-ending.
+ */
 export async function updateQuestionnaireResponseAnswers({
   responseId,
   answers,
@@ -1538,7 +2228,7 @@ export async function updateQuestionnaireResponseAnswers({
   responseId: string;
   answers: QuestionnaireAnswerInput;
   submit?: boolean;
-}) {
+}): Promise<string | { responseId: string; proposal: QuestionnaireAutofillProposal | null }> {
   const response = await db.query.questionnaireResponses.findFirst({
     where: eq(questionnaireResponses.id, responseId),
   });
@@ -1562,7 +2252,7 @@ export async function updateQuestionnaireResponseAnswers({
 
   const now = new Date().toISOString();
   const client = response.clientId
-    ? await db.query.clients.findFirst({ where: eq(clients.id, response.clientId) })
+    ? await db.query.clients.findFirst({ where: eq(clients.id, response.clientId) }) ?? null
     : null;
   const respondentName =
     firstTextAnswer(storedAnswers, (title) => title.includes("full name") || title === "your names") ||
@@ -1586,68 +2276,125 @@ export async function updateQuestionnaireResponseAnswers({
     })
     .where(eq(questionnaireResponses.id, responseId));
 
+  const updatedResponse = {
+    ...response,
+    respondentName,
+    respondentEmail,
+    submittedAt,
+    answersJson: serializedAnswers,
+    updatedAt: now,
+  };
+
   const questionnaire = await db.query.questionnaires.findFirst({
     where: eq(questionnaires.id, response.questionnaireId),
   });
   if (questionnaire) {
     await syncQuestionnaireResponseProjectSource({
-      response: {
-        ...response,
-        respondentName,
-        respondentEmail,
-        submittedAt,
-        answersJson: serializedAnswers,
-        updatedAt: now,
-      },
+      response: updatedResponse,
       questionnaireTitle: questionnaire.title,
       answers: storedAnswers,
       submittedAt,
     });
   }
-  await syncQuestionnaireResponseProjectProfile({
-    response: {
-      ...response,
-      respondentName,
-      respondentEmail,
-      submittedAt,
-      answersJson: serializedAnswers,
-      updatedAt: now,
-    },
-    answers: storedAnswers,
-  });
-  await syncQuestionnaireResponseProjectLocations({
-    response: {
-      ...response,
-      respondentName,
-      respondentEmail,
-      submittedAt,
-      answersJson: serializedAnswers,
-      updatedAt: now,
-    },
-    answers: storedAnswers,
-  });
-  await syncQuestionnaireResponseProjectEvent({
-    response: {
-      ...response,
-      respondentName,
-      respondentEmail,
-      submittedAt,
-      answersJson: serializedAnswers,
-      updatedAt: now,
-    },
-    answers: storedAnswers,
-  });
-  await syncQuestionnaireResponseClientProfile({
-    response: {
-      ...response,
-      respondentName,
-      respondentEmail,
-      submittedAt,
-      answersJson: serializedAnswers,
-      updatedAt: now,
-    },
-    answers: storedAnswers,
-  });
+
+  const answersForProposal = withSemanticKeys(storedAnswers, questions);
+  const participant = response.projectId && response.clientId
+    ? await db.query.projectParticipants.findFirst({
+        where: and(eq(projectParticipants.projectId, response.projectId), eq(projectParticipants.clientId, response.clientId)),
+      })
+    : null;
+  const participantRole = participant?.role ?? null;
+  const project = response.projectId
+    ? await db.query.projects.findFirst({ where: eq(projects.id, response.projectId) }) ?? null
+    : null;
+  const existingLocations = response.projectId
+    ? await db.query.projectLocations.findMany({ where: eq(projectLocations.projectId, response.projectId) })
+    : [];
+  const existingEvents = response.projectId
+    ? await db.query.projectEvents.findMany({ where: eq(projectEvents.projectId, response.projectId), orderBy: asc(projectEvents.createdAt) })
+    : [];
+
+  if (questionnaireAutofillReviewEnabled()) {
+    const proposal = buildQuestionnaireAutofillProposal({
+      response: updatedResponse,
+      project,
+      client,
+      participantRole,
+      existingEvents,
+      existingLocations,
+      answers: answersForProposal,
+    });
+
+    await db.update(questionnaireResponses)
+      .set({
+        suggestedChangesJson: proposal ? JSON.stringify(proposal) : null,
+        suggestedChangesComputedAt: proposal ? proposal.computedAt : null,
+      })
+      .where(eq(questionnaireResponses.id, responseId));
+
+    await logActivity({
+      action: submit ? "questionnaire.response.submitted" : "questionnaire.response.edited",
+      projectId: response.projectId || undefined,
+      clientId: response.clientId || undefined,
+      metadata: { questionnaireId: response.questionnaireId, responseId },
+    });
+
+    return { responseId, proposal };
+  }
+
+  // Flag OFF (I1): the same four canonical syncs as today, now expressed as
+  // compute()-then-apply()-with-everything-accepted so there is exactly ONE
+  // extraction implementation. Ordering matches D9/M6 (project-profile before
+  // projectEvent) even though same-request drift can't occur here.
+  const responseContext = { questionnaireId: response.questionnaireId, responseId, projectId: response.projectId, clientId: response.clientId };
+  const systemActor: QuestionnaireAutofillActor = { actorType: "system", actorName: "The Reeses Studio" };
+
+  const projectChanges = computeProjectProfileChanges({ response: updatedResponse, project, answers: answersForProposal });
+  if (projectChanges.length && response.projectId) {
+    await applyProjectProfileChanges({
+      responseContext,
+      projectId: response.projectId,
+      changes: projectChanges,
+      acceptedFields: new Set(projectChanges.map((change) => change.field)),
+      actor: systemActor,
+    });
+  }
+
+  const eventChanges = computeProjectEventChanges({ response: updatedResponse, project, existingEvents, answers: answersForProposal });
+  if (eventChanges.length && response.projectId) {
+    await applyProjectEventChanges({
+      responseContext,
+      projectId: response.projectId,
+      changes: eventChanges,
+      acceptedFields: new Set(eventChanges.map((change) => change.field)),
+      actor: systemActor,
+    });
+  }
+
+  const locationChanges = computeProjectLocationsChanges({ response: updatedResponse, existingLocations, answers: answersForProposal });
+  if (locationChanges.length && response.projectId) {
+    const acceptedLocationFields = new Set(locationChanges.flatMap((change, index) => change.action === "create"
+      ? [`locations.create.${index}`]
+      : LOCATION_UPDATE_FIELDS.map((field) => `locations.${change.existingId}.${field}`)));
+    await applyProjectLocationsChanges({
+      responseContext,
+      projectId: response.projectId,
+      changes: locationChanges,
+      acceptedFields: acceptedLocationFields,
+      actor: systemActor,
+    });
+  }
+
+  const clientChanges = computeClientProfileChanges({ response: updatedResponse, client, participantRole, answers: answersForProposal });
+  if (clientChanges.length && response.clientId) {
+    await applyClientProfileChanges({
+      responseContext,
+      clientId: response.clientId,
+      changes: clientChanges,
+      acceptedFields: new Set(clientChanges.map((change) => change.field)),
+      actor: systemActor,
+    });
+  }
 
   await logActivity({
     action: submit ? "questionnaire.response.submitted" : "questionnaire.response.edited",
@@ -1781,6 +2528,14 @@ export async function updateQuestionnaireResponseAction(formData: FormData) {
   if (projectId) revalidatePath(`/projects/${projectId}`);
 
   const saved = intent === "submit" ? "submitted" : "response";
+  // D1/M3: flag ON routes this caller through the proposal path too — redirect
+  // to the response-detail page where the "Suggested changes" card renders,
+  // instead of a dead-end back to /edit (I2's admin-path equivalent of the
+  // agent/MCP silent-dead-end problem). Flag OFF keeps today's exact redirect
+  // (I1) — the card doesn't exist, so /edit is still the right landing spot.
+  if (questionnaireAutofillReviewEnabled()) {
+    redirect(`/questionnaires/${questionnaireId}/responses/${responseId}?saved=${saved}`);
+  }
   redirect(`/questionnaires/${questionnaireId}/responses/${responseId}/edit?saved=${saved}`);
 }
 
