@@ -476,17 +476,26 @@ export async function getProject(projectId: string) {
   // no existing consumer's shape changes. `scheduler_bookings` has no dedicated "title" column
   // (unlike proposals/project_events) — the vision_call milestone match is against the
   // meeting-type name only.
-  const bookings = await db
-    .select({
-      id: schedulerBookings.id,
-      startAt: schedulerBookings.startAt,
-      status: schedulerBookings.status,
-      meetingName: schedulerMeetingTypes.name,
-    })
-    .from(schedulerBookings)
-    .innerJoin(schedulerMeetingTypes, eq(schedulerBookings.meetingTypeId, schedulerMeetingTypes.id))
-    .where(eq(schedulerBookings.projectId, projectId))
-    .orderBy(desc(schedulerBookings.startAt));
+  //
+  // Gated on the flag (Fable diff review F2): the spec requires ZERO added queries on the
+  // unflagged path, and getProject also feeds the always-on agent reader
+  // (`studio_get_project_context` → `projectContextResult`), which runs its OWN bookings query —
+  // so an unconditional query here would both violate the spec and double the agent-path work.
+  // Flag off ⇒ `bookings = []`, the milestone compute never runs, and the vision_call arm is
+  // simply absent (as it is for any project with no matching booking).
+  const bookings = process.env.PROJECT_PROGRESS_TIMELINE === "1"
+    ? await db
+        .select({
+          id: schedulerBookings.id,
+          startAt: schedulerBookings.startAt,
+          status: schedulerBookings.status,
+          meetingName: schedulerMeetingTypes.name,
+        })
+        .from(schedulerBookings)
+        .innerJoin(schedulerMeetingTypes, eq(schedulerBookings.meetingTypeId, schedulerMeetingTypes.id))
+        .where(eq(schedulerBookings.projectId, projectId))
+        .orderBy(desc(schedulerBookings.startAt))
+    : [];
 
   return {
     project,

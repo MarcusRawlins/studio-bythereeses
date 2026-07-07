@@ -278,7 +278,7 @@ export default async function ProjectDetailPage({
             signedAt: proposal.signedAt,
             contractStatus: proposal.contractStatus,
           })),
-          invoices: data.invoices.map((invoice) => ({ status: invoice.status, dueDate: invoice.dueDate })),
+          invoices: data.invoices.map((invoice) => ({ id: invoice.id, status: invoice.status, dueDate: invoice.dueDate })),
           payments: data.payments.map((payment) => ({
             invoiceId: payment.invoiceId,
             status: payment.status,

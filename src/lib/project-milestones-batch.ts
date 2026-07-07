@@ -36,7 +36,14 @@ export async function loadProjectMilestoneSummaries(
 
   const [events, invoiceRows, galleries, bookings] = await Promise.all([
     chunkedInArrayFetch(projectIds, (chunk) =>
-      db.query.projectEvents.findMany({ where: (row, { inArray: inArrayOp }) => inArrayOp(row.projectId, chunk) })),
+      // orderBy desc(eventDate) matches getProject's ordering (Fable diff review F3) so the
+      // engagement-event pick (`.find(dated) ?? [0]`) is deterministic AND identical between the
+      // list bar and the detail strip — otherwise a reschedule (two dated engagement events) could
+      // show a different esession date on each surface.
+      db.query.projectEvents.findMany({
+        where: (row, { inArray: inArrayOp }) => inArrayOp(row.projectId, chunk),
+        orderBy: (row, { desc: descOp }) => descOp(row.eventDate),
+      })),
     chunkedInArrayFetch(projectIds, (chunk) =>
       db.query.invoices.findMany({ where: (row, { inArray: inArrayOp }) => inArrayOp(row.projectId, chunk) })),
     chunkedInArrayFetch(projectIds, (chunk) =>
@@ -89,7 +96,7 @@ export async function loadProjectMilestoneSummaries(
         title: null,
       })),
       proposals: [],
-      invoices: (invoicesByProject.get(project.id) ?? []).map((invoice) => ({ status: invoice.status, dueDate: invoice.dueDate })),
+      invoices: (invoicesByProject.get(project.id) ?? []).map((invoice) => ({ id: invoice.id, status: invoice.status, dueDate: invoice.dueDate })),
       payments: (paymentsByProject.get(project.id) ?? []).map((payment) => ({
         invoiceId: payment.invoiceId,
         status: payment.status,

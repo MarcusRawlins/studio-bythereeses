@@ -57,7 +57,7 @@ function test1GoldenPath() {
       events: [{ type: "engagement", title: "Engagement session", eventDate: engagementEventDate }],
       bookings: [{ startAt: visionCallStartAt, status: "confirmed", meetingName: "Vision & Timeline Call", title: null }],
       proposals: [],
-      invoices: [{ status: "sent" }],
+      invoices: [{ id: "inv-1", status: "sent" }],
       payments: [
         { invoiceId: "inv-1", status: "pending", dueDate: "2026-01-15", label: "Retainer deposit" },
         { invoiceId: "inv-1", status: "pending", dueDate: "2026-06-01", label: "Final balance" },
@@ -124,7 +124,7 @@ function test1GoldenPath() {
     { invoiceId: "inv-1", status: "paid", dueDate: "2026-06-01", label: "Final balance" },
   ];
   list = computeProjectMilestones(
-    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ status: "paid" }], galleries: galleriesWithEsession }),
+    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ id: "inv-1", status: "paid" }], galleries: galleriesWithEsession }),
     new Date("2026-06-05T12:00:00.000Z"),
   );
   assert.equal(statusByKey(list, "final_payment"), "done", "G: final_payment done once all invoices paid");
@@ -132,7 +132,7 @@ function test1GoldenPath() {
 
   // Checkpoint H — inside the week-of window.
   list = computeProjectMilestones(
-    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ status: "paid" }], galleries: galleriesWithEsession }),
+    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ id: "inv-1", status: "paid" }], galleries: galleriesWithEsession }),
     new Date("2026-06-07T12:00:00.000Z"),
   );
   assert.equal(statusByKey(list, "week_of"), "done", "H: week_of done inside the 7-day window");
@@ -140,7 +140,7 @@ function test1GoldenPath() {
 
   // Checkpoint I — wedding day itself.
   list = computeProjectMilestones(
-    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ status: "paid" }], galleries: galleriesWithEsession }),
+    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ id: "inv-1", status: "paid" }], galleries: galleriesWithEsession }),
     new Date("2026-06-13T12:00:00.000Z"),
   );
   assert.equal(statusByKey(list, "wedding_day"), "done", "I: wedding_day done on the day");
@@ -152,7 +152,7 @@ function test1GoldenPath() {
     { status: "delivered", title: "Sneak Peek Gallery", deliveredAt: "2026-06-15T12:00:00.000Z", createdAt: "2026-06-15T12:00:00.000Z" },
   ];
   list = computeProjectMilestones(
-    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ status: "paid" }], galleries: galleriesWithSneak }),
+    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ id: "inv-1", status: "paid" }], galleries: galleriesWithSneak }),
     new Date("2026-06-16T12:00:00.000Z"),
   );
   assert.equal(statusByKey(list, "sneak_peek"), "done", "J: sneak_peek done once a qualifying gallery is delivered");
@@ -164,7 +164,7 @@ function test1GoldenPath() {
     { status: "delivered", title: "Full Gallery Delivery", deliveredAt: "2026-06-24T12:00:00.000Z", createdAt: "2026-06-24T12:00:00.000Z" },
   ];
   list = computeProjectMilestones(
-    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ status: "paid" }], galleries: galleriesWithFull }),
+    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ id: "inv-1", status: "paid" }], galleries: galleriesWithFull }),
     new Date("2026-06-25T12:00:00.000Z"),
   );
   assert.equal(statusByKey(list, "full_gallery"), "done", "K: full_gallery done with 2 qualifying galleries");
@@ -172,7 +172,7 @@ function test1GoldenPath() {
 
   // Checkpoint L — anniversary has passed; fully finished project has ZERO current.
   list = computeProjectMilestones(
-    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ status: "paid" }], galleries: galleriesWithFull }),
+    goldenInput({ proposals: proposalsSent, payments: paymentsAllPaid, invoices: [{ id: "inv-1", status: "paid" }], galleries: galleriesWithFull }),
     new Date("2027-07-01T12:00:00.000Z"),
   );
   assert.equal(statusByKey(list, "anniversary"), "done", "L: anniversary done a year+ later");
@@ -235,7 +235,7 @@ function test4NaAndCurrent() {
     events: [{ type: "engagement", title: "Engagement session", eventDate: "2026-03-01" }],
     proposals: [{ status: "accepted", acceptedAt: "2026-01-05T00:00:00.000Z" }],
     payments: [{ invoiceId: "inv-1", status: "paid", dueDate: "2026-01-15", label: "Retainer deposit" }],
-    invoices: [{ status: "paid" }],
+    invoices: [{ id: "inv-1", status: "paid" }],
     bookings: [{ startAt: "2026-04-15T18:00:00.000Z", status: "confirmed", meetingName: "Vision & Timeline Call", title: null }],
     galleries: [
       { status: "delivered", title: "Engagement Session Highlights", deliveredAt: "2026-03-10T12:00:00.000Z", createdAt: "2026-03-10T12:00:00.000Z" },
@@ -279,24 +279,48 @@ function test6FinalPayment() {
   assert.notEqual(statusByKey(list, "final_payment"), "done", "zero invoices must not be vacuously done");
 
   // Draft-only ⇒ upcoming.
-  list = computeProjectMilestones(fpInput([{ status: "draft" }]), new Date("2026-02-01T12:00:00.000Z"));
+  list = computeProjectMilestones(fpInput([{ id: "inv-1", status: "draft" }]), new Date("2026-02-01T12:00:00.000Z"));
   assert.notEqual(statusByKey(list, "final_payment"), "done", "draft-only invoice must not count");
 
   // One void + one paid ⇒ done (void ignored).
-  list = computeProjectMilestones(fpInput([{ status: "void" }, { status: "paid" }]), new Date("2026-02-01T12:00:00.000Z"));
+  list = computeProjectMilestones(fpInput([{ id: "inv-void", status: "void" }, { id: "inv-2", status: "paid" }]), new Date("2026-02-01T12:00:00.000Z"));
   assert.equal(statusByKey(list, "final_payment"), "done", "void invoice must be excluded, paid invoice satisfies final_payment");
 
   // Void-only ⇒ upcoming.
-  list = computeProjectMilestones(fpInput([{ status: "void" }]), new Date("2026-02-01T12:00:00.000Z"));
+  list = computeProjectMilestones(fpInput([{ id: "inv-void", status: "void" }]), new Date("2026-02-01T12:00:00.000Z"));
   assert.notEqual(statusByKey(list, "final_payment"), "done", "void-only invoices must not count as done");
 
   // Unpaid non-draft ⇒ not done.
-  list = computeProjectMilestones(fpInput([{ status: "sent" }]), new Date("2026-02-01T12:00:00.000Z"));
+  list = computeProjectMilestones(fpInput([{ id: "inv-1", status: "sent" }]), new Date("2026-02-01T12:00:00.000Z"));
   assert.notEqual(statusByKey(list, "final_payment"), "done", "unpaid non-draft invoice is not done");
+
+  // Fable F1 (the void-and-reissue scenario the loaders now filter): a VOIDED invoice's stale
+  // past-due schedule row must NOT paint final_payment overdue, and its paid retainer row must NOT
+  // mark booked done. The live reissued invoice is not yet due ⇒ final_payment is NOT overdue.
+  list = computeProjectMilestones(
+    fpInput(
+      [{ id: "inv-void", status: "void" }, { id: "inv-live", status: "sent" }],
+      [
+        { invoiceId: "inv-void", status: "paid", dueDate: "2026-01-01", label: "Retainer deposit" },
+        { invoiceId: "inv-void", status: "pending", dueDate: "2026-01-05", label: "Final balance" },
+        { invoiceId: "inv-live", status: "pending", dueDate: "2026-09-01", label: "Final balance" },
+      ],
+    ),
+    new Date("2026-02-01T12:00:00.000Z"),
+  );
+  assert.notEqual(statusByKey(list, "final_payment"), "overdue", "voided invoice's stale past-due row must NOT make final_payment overdue");
+  assert.notEqual(statusByKey(list, "booked"), "done", "a retainer paid on a since-voided invoice must NOT mark booked done (stage inquiry here)");
+
+  // A payment schedule row due EXACTLY today is NOT yet overdue (Fable M3 — overdue only after it passes).
+  list = computeProjectMilestones(
+    fpInput([{ id: "inv-1", status: "sent" }], [{ invoiceId: "inv-1", status: "pending", dueDate: "2026-02-01", label: "Final balance" }]),
+    new Date("2026-02-01T12:00:00.000Z"),
+  );
+  assert.notEqual(statusByKey(list, "final_payment"), "overdue", "a schedule row due TODAY is not yet overdue");
 
   // Schedule row dueDate passed, unpaid ⇒ overdue.
   list = computeProjectMilestones(
-    fpInput([{ status: "sent" }], [{ invoiceId: "inv-1", status: "pending", dueDate: "2026-01-01", label: "Final balance" }]),
+    fpInput([{ id: "inv-1", status: "sent" }], [{ invoiceId: "inv-1", status: "pending", dueDate: "2026-01-01", label: "Final balance" }]),
     new Date("2026-02-01T12:00:00.000Z"),
   );
   assert.equal(statusByKey(list, "final_payment"), "overdue", "unpaid schedule row past its dueDate is overdue");

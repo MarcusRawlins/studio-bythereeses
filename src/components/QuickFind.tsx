@@ -38,8 +38,14 @@ export function QuickFind({ mobile = false }: { mobile?: boolean }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    // AppShell mounts QuickFind TWICE — once in the mobile header (`mobile`) and once in the
+    // desktop sidebar — both always in the DOM, only CSS-hidden by viewport. A global ⌘K listener
+    // on BOTH opened two overlays at once (now two body portals) + fired two /api/search per
+    // keystroke (Fable CR-3 review F6). ⌘K is a keyboard affordance → bind it to the desktop
+    // instance ONLY. The mobile instance opens via its tap button; Escape stays bound on both so
+    // whichever overlay is open closes.
     function onKeyDown(event: KeyboardEvent) {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (!mobile && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setOpen(true);
       }
@@ -50,7 +56,7 @@ export function QuickFind({ mobile = false }: { mobile?: boolean }) {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [mobile]);
 
   useEffect(() => {
     if (!open) return;

@@ -69,6 +69,7 @@ export type MilestoneInputProposal = {
 };
 
 export type MilestoneInputInvoice = {
+  id: string;
   status: string;
   dueDate?: string | null;
 };
@@ -190,9 +191,27 @@ function addYearToDateKey(date: string): string {
 // generic track's `completed` milestone. Rev 2 (B1): requires >= 1 non-draft, non-void invoice;
 // void is excluded and never blocks forever; zero/draft-only/void-only invoices are `upcoming`,
 // never vacuously done (HoneyBook imports create retainer_paid projects with zero invoice rows).
+// Rev 2 (Fable diff review M1): the set of invoice ids that are LIVE — status ∉ {draft, void}.
+// A voided (or still-draft) invoice's schedule rows survive in `invoicePayments`, so both the
+// final_payment overdue scan and the `booked` "retainer paid" arm MUST ignore payment rows whose
+// parent invoice is voided/draft — otherwise a voided-and-reissued invoice paints a healthy
+// project permanently OVERDUE (amber), the exact false signal this feature exists to prevent.
+function liveInvoiceIds(input: MilestoneInput): Set<string> {
+  return new Set(
+    input.invoices.filter((invoice) => invoice.status !== "draft" && invoice.status !== "void").map((invoice) => invoice.id),
+  );
+}
+
+// A payment row counts only when its parent invoice is live (or, defensively, when no invoiceId is
+// carried — the loaders always set it, so this only guards hand-built fixtures).
+function paymentOnLiveInvoice(payment: MilestoneInputPayment, liveIds: Set<string>): boolean {
+  return payment.invoiceId == null || liveIds.has(payment.invoiceId);
+}
+
 function finalPaymentStatus(input: MilestoneInput, todayKey: string): { status: MilestoneStatus; date: string | null } {
   const relevantInvoices = input.invoices.filter((invoice) => invoice.status !== "draft" && invoice.status !== "void");
   if (!relevantInvoices.length) return { status: "upcoming", date: null };
+  const liveIds = liveInvoiceIds(input);
 
   const allPaid = relevantInvoices.every((invoice) => invoice.status === "paid");
   if (allPaid) return { status: "done", date: null };
@@ -200,7 +219,14 @@ function finalPaymentStatus(input: MilestoneInput, todayKey: string): { status: 
   // Rev 2 (M3): overdue uses the payment SCHEDULE ROW dueDate (`invoicePayments.dueDate`), not
   // `invoices.dueDate`.
   const overdueRows = input.payments
-    .filter((payment) => payment.status !== "paid" && payment.dueDate && payment.dueDate <= todayKey)
+    .filter(
+      (payment) =>
+        payment.status !== "paid"
+        && payment.status !== "refunded" // a refunded row is settled, not an outstanding due (Fable F5)
+        && payment.dueDate
+        && payment.dueDate < todayKey // Rev 2 (M3): overdue only AFTER the due date passes, not ON it
+        && paymentOnLiveInvoice(payment, liveIds),
+    )
     .sort((a, b) => (a.dueDate! < b.dueDate! ? -1 : 1));
   if (overdueRows.length) return { status: "overdue", date: overdueRows[0].dueDate };
 
@@ -228,9 +254,15 @@ function weddingTrackMilestones(input: MilestoneInput, todayKey: string): Projec
     date: null,
   });
 
-  // 3. booked (retainer paid)
+  // 3. booked (retainer paid) — a retainer payment on a since-voided invoice does NOT count (M1).
+  const bookedLiveIds = liveInvoiceIds(input);
   const bookedDone = stageAtLeast(input.stage, "retainer_paid")
-    || input.payments.some((payment) => isRetainerPaymentLabel(payment.label) && payment.status === "paid");
+    || input.payments.some(
+      (payment) =>
+        isRetainerPaymentLabel(payment.label)
+        && payment.status === "paid"
+        && paymentOnLiveInvoice(payment, bookedLiveIds),
+    );
   milestones.push({
     key: "booked",
     label: "Booked (retainer paid)",
