@@ -112,7 +112,7 @@ see `docs/handoff-build-state.md` for the full list):
   component test + full gate; Fable diff review runs with the next batch.
 
 ### CR-4 — Scheduler: meeting links (Zoom vs Google Meet decision + wiring)
-- Status: SPEC (investigating current wiring)
+- Status: BUILDING (investigation done 2026-07-07; decision: Google Meet auto-create, Zoom retained as fallback)
 - Screen: /scheduler — meeting types; /book/:slug — public booking + confirmation; reminder emails
 - Host: both
 - Priority: P1 (needed to start using the scheduler for real consults)
@@ -121,11 +121,21 @@ see `docs/handoff-build-state.md` for the full list):
   great either way — the client should always get a working video link in confirmation + reminders.
 - Why: Consult calls are the top of the booking funnel; a broken/missing link is a lost consult.
 - Money/risk: no money; touches client-facing email content (existing send paths).
-- Notes: Recommendation pending investigation (Google Calendar OAuth already exists in-house, which
-  likely favors auto-generated per-booking Meet links over a static Zoom room).
+- Notes (investigation findings + agreed design, 2026-07-07): Today = a STATIC Zoom URL per meeting
+  type (or one global fallback), reaching clients only via email text + the Google Calendar invite;
+  the join link is NEVER rendered on the confirmed/manage pages. **Decision: auto-generated Google
+  Meet per booking** — the Google Calendar OAuth (full calendar scope) is already wired, so Meet
+  needs NO new vendor/secret/re-consent (in-house principle); unique per-booking links beat a static
+  room (no back-to-back collisions, no stale links that let old contacts rejoin, no free-Zoom 40-min
+  cap); the client already gets the calendar invite (attendees + sendUpdates=all) with a native Join
+  button. Zoom plumbing RETAINED as a locationType fallback. Build: new locationType "google_meet" +
+  per-booking meeting_join_url column + conferenceDataVersion=1 on the existing events.insert +
+  emails/pages read the booking-level link + join link rendered on confirmed/manage pages. Booking
+  NEVER blocks on link-generation failure (same as calendar sync today). Dark behind
+  SCHEDULER_MEET_LINKS.
 
 ### CR-5 — Questionnaires: responses auto-fill project details + timeline details
-- Status: SPEC (investigating current flow)
+- Status: SPEC (investigation done 2026-07-07 — found a live guardrail violation + a missing apply step)
 - Screen: /questionnaires/:id/responses; /projects/:id (details + timeline)
 - Host: admin (responses arrive from clients via portal/public link)
 - Priority: P1
@@ -136,3 +146,17 @@ see `docs/handoff-build-state.md` for the full list):
 - Money/risk: no money, BUT responses are CLIENT-SUBMITTED (untrusted) — the standing guardrail
   applies: no canonical mutation from untrusted input. Autofill must be DRAFT-then-APPROVE (the
   system proposes field updates + timeline items; Tyler approves with one click).
+- Notes (investigation findings, 2026-07-07): Autofill PARTIALLY EXISTS — and part of it violates
+  the repo's own invariant: `updateQuestionnaireResponseAnswers` (called from the UNAUTHENTICATED
+  public submission route) directly mutates projects (overwrites venueName/venueAddress/city/state
+  whenever the answer differs), project_locations, project_events, and clients — untrusted input
+  writing canonical rows with no review (contrast: inbound-inquiry's draft-then-approve). Separately
+  the timeline-DRAFT flow exists and is properly draft-shaped (buildTimelineDraftFromProjectContext
+  → agent task card) but the promised "apply" step is MISSING — drafts dead-end read-only; the
+  existing createProjectTimelineItemsFromAgent (idempotent replace-by-source) is exactly shaped to
+  consume them and is never called. Mapping is brittle title-keyword matching (no semantic key).
+  Design: (a) flag-gated review-and-apply — submission computes the SAME suggestions but stores
+  them as a proposal; a one-click admin "Apply to project" performs the writes (actorType admin);
+  (b) wire the missing "Apply timeline draft" button/endpoint; (c) optional semanticKey column on
+  questions for robust mapping. Dark behind QUESTIONNAIRE_AUTOFILL_REVIEW (off = today's behavior
+  unchanged). Spec: docs/specs/phase-23-questionnaire-autofill-review.md.
