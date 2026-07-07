@@ -1,5 +1,5 @@
 import { db } from "@/db/client";
-import { clients, invoicePayments, projectParticipants, projects, schedulerBookings, schedulerMeetingTypes, schedulerSettings } from "@/db/schema";
+import { clients, invoicePayments, projectCommunications, projectParticipants, projects, schedulerBookings, schedulerMeetingTypes, schedulerSettings } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { sendBookingCancellationEmail, sendBookingEmails, sendBookingReminderEmail } from "@/lib/email";
 import { createGoogleCalendarEvent, deleteGoogleCalendarEvent, getConnectedGoogleAccounts, getGoogleBusyTimes, getGoogleCalendarList, getGoogleCalendarStatus } from "@/lib/google-calendar";
@@ -1042,7 +1042,20 @@ export async function getSchedulerBookingDetail(id: string) {
     db.query.projects.findMany({ orderBy: desc(projects.createdAt) }),
   ]);
 
-  return { booking, meetingType, client, project, allProjects };
+  // Phase 20 (meeting/consult notes, dark behind MEETING_NOTES_ENABLED): this booking's linked
+  // notes, newest first. Additive query, flag-gated so the flag-off path issues zero extra queries
+  // (mirrors getProject's `bookings` field, D6). Scoped to the booking's CURRENT project
+  // (diff-review MINOR-1): a booking can be relinked to a different project, and its old notes keep
+  // the old projectId — without this scope they'd surface under the new project's context here.
+  const notes = process.env.MEETING_NOTES_ENABLED === "1" && booking.projectId
+    ? await db.query.projectCommunications.findMany({
+        where: (row, { and, eq }) =>
+          and(eq(row.channel, "note"), eq(row.bookingId, id), eq(row.projectId, booking.projectId!)),
+        orderBy: [desc(projectCommunications.createdAt)],
+      })
+    : [];
+
+  return { booking, meetingType, client, project, allProjects, notes };
 }
 
 export async function recordSchedulerBookingPaymentFromAgent(bookingId: string, input: SchedulerBookingPaymentInput) {

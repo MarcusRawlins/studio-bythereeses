@@ -402,6 +402,12 @@ export const projectCommunications = sqliteTable("project_communications", {
   // project's thread. Scoped-to-thread unique index (project_id, inbound_message_id)
   // — INSERT ON CONFLICT DO NOTHING, never UPDATE from inbound (see migration 0092).
   inboundMessageId: text("inbound_message_id"),
+  // Phase 20: links a "note" row to the scheduler_bookings row it was taken during (a consult
+  // call). NULL for every pre-existing row and for any note not tied to a specific meeting. Plain
+  // column, no `.references()` — no migration in this repo adds a DB-level FK via `ALTER TABLE ...
+  // ADD COLUMN` (spec D2); integrity is enforced in app code by requireBookingBelongsToProject
+  // (project-communications.ts).
+  bookingId: text("booking_id"),
   createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
 });

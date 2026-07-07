@@ -282,6 +282,29 @@ async function main() {
     ],
   );
 
+  // ---------------------------------------------------------------------------------------------
+  // Phase 20 (meeting/consult notes) — Test 6: MCP schema drift guard. `bookingId` must never
+  // appear in studio_create_communication's or studio_update_communication's inputSchema.properties
+  // — kept undiscoverable in the tool contract (D3). Catches an accidental future addition without
+  // an explicit decision to revisit D3; the runtime clamp in createProjectCommunication/
+  // updateProjectCommunication is the real enforcement boundary, not this schema (D3/D4).
+  // ---------------------------------------------------------------------------------------------
+  const createCommunicationTool = tools.result.tools.find((tool: { name: string }) => tool.name === "studio_create_communication");
+  const updateCommunicationTool = tools.result.tools.find((tool: { name: string }) => tool.name === "studio_update_communication");
+  assert.ok(createCommunicationTool, "studio_create_communication tool definition exists");
+  assert.ok(updateCommunicationTool, "studio_update_communication tool definition exists");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(createCommunicationTool.inputSchema.properties, "bookingId"),
+    false,
+    "studio_create_communication must never expose bookingId (D3)",
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(updateCommunicationTool.inputSchema.properties, "bookingId"),
+    false,
+    "studio_update_communication must never expose bookingId (D3/D4)",
+  );
+  console.log("test 6 (MCP schema drift guard) passed");
+
   const settingsCall = await handleStudioMcpMessage({
     jsonrpc: "2.0",
     id: 19,

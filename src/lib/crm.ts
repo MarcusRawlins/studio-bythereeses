@@ -560,7 +560,11 @@ export async function getProject(projectId: string) {
   // so an unconditional query here would both violate the spec and double the agent-path work.
   // Flag off ⇒ `bookings = []`, the milestone compute never runs, and the vision_call arm is
   // simply absent (as it is for any project with no matching booking).
-  const bookings = process.env.PROJECT_PROGRESS_TIMELINE === "1"
+  // Phase 20 (meeting/consult notes, D6): widens this gate rather than adding a second, near-
+  // duplicate query — the "which meeting is this note about" picker needs exactly this shape.
+  // Both flags off ⇒ the ternary is still false ⇒ zero added queries. Either flag alone on ⇒ the
+  // query runs once, independent of the other.
+  const bookings = process.env.PROJECT_PROGRESS_TIMELINE === "1" || process.env.MEETING_NOTES_ENABLED === "1"
     ? await db
         .select({
           id: schedulerBookings.id,

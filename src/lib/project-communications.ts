@@ -1,5 +1,5 @@
 import { db } from "@/db/client";
-import { clients, projectCommunications, projectParticipants, projects } from "@/db/schema";
+import { clients, projectCommunications, projectParticipants, projects, schedulerBookings } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
 import { requireProjectSourceForTask } from "@/lib/agent-sources";
 import { isEmailSuppressed, sendProjectEmail } from "@/lib/email";
@@ -68,6 +68,7 @@ type CreateProjectCommunicationInput = {
   sentAt?: string | null;
   sourceType?: string | null;
   sourceId?: string | null;
+  bookingId?: string | null;
 };
 
 type UpdateProjectCommunicationInput = {
@@ -169,6 +170,25 @@ async function resolveRecipient(projectId: string, clientId?: string | null) {
   return row[0]?.client ?? null;
 }
 
+// Phase 20 (meeting/consult notes, D5): the "structured template" is UI scaffolding text that
+// pre-fills a meeting note's body textarea — free-edited like any other note body, never parsed or
+// stored separately. Shared by both meeting-note composers (project page + booking page) so the
+// scaffold text can't drift between them.
+export const MEETING_NOTE_TEMPLATE = "Discussed:\n\n\nDecisions:\n\n\nFollow-ups:\n\n";
+
+// Phase 20 (D2): mirrors requireProjectSourceForTask (agent-sources.ts) — same shape: look up,
+// throw if missing or projectId mismatch, else return the row. booking_id is a plain column with
+// no DB-level FK (this repo's convention: no ALTER TABLE ... ADD COLUMN ... REFERENCES), so this
+// helper is the referential-integrity check for a meeting note's booking link.
+export async function requireBookingBelongsToProject(projectId: string | null, bookingId: string | null) {
+  if (!projectId || !bookingId) throw new Error("Meeting note booking links require projectId and bookingId.");
+
+  const booking = await db.query.schedulerBookings.findFirst({ where: eq(schedulerBookings.id, bookingId) });
+  if (!booking || booking.projectId !== projectId) throw new Error("Booking not found.");
+
+  return booking;
+}
+
 async function createProjectCommunication(projectId: string, input: CreateProjectCommunicationInput, actor: CommunicationActor) {
   const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
   if (!project) throw new Error("Project not found.");
@@ -206,6 +226,18 @@ async function createProjectCommunication(projectId: string, input: CreateProjec
   const status = actor.actorType === "agent" && (channel === "sms" || channel === "email") ? "draft" : requestedStatus;
   assertSmsBodyLength(channel, body);
   assertEmailBodyLength(channel, body);
+  // Phase 20 (D3, allowlist clamp per B-5): the linkage capability (bookingId) is never
+  // agent-writable — only the admin actor (Tyler, via the Studio form) may set it. Written as an
+  // allowlist (`actorType === "admin" ? ... : null`), NOT a denylist (`actorType === "agent" ? null
+  // : ...`), so it can't silently widen for the system actor or any future actor type. A non-admin
+  // actor's note still saves normally, just unlinked — exactly like every note it writes today.
+  // Scoped to `channel === "note"` (diff-review MINOR-2): a meeting-note link only makes sense on a
+  // note row, so a booking-linked email/sms row (which the project feed would badge "Meeting: …")
+  // can never be minted even via a hand-crafted admin POST.
+  const bookingId = actor.actorType === "admin" && channel === "note" ? cleanText(input.bookingId) : null;
+  if (bookingId) {
+    await requireBookingBelongsToProject(projectId, bookingId);
+  }
   const communication = {
     id: crypto.randomUUID(),
     projectId,
@@ -221,6 +253,7 @@ async function createProjectCommunication(projectId: string, input: CreateProjec
     sentAt: cleanText(input.sentAt) ?? (status === "sent" ? now : null),
     sourceType,
     sourceId,
+    bookingId,
     createdBy: actor.createdBy,
     createdAt: now,
     updatedAt: now,
@@ -240,6 +273,7 @@ async function createProjectCommunication(projectId: string, input: CreateProjec
       subject: communication.subject,
       sourceType: communication.sourceType,
       sourceId: communication.sourceId,
+      bookingId: communication.bookingId,
     },
   });
 
@@ -256,6 +290,16 @@ async function updateProjectCommunication(
     where: (row, { and, eq }) => and(eq(row.id, communicationId), eq(row.projectId, projectId)),
   });
   if (!communication) throw new Error("Communication not found.");
+  // Phase 20 (D4/B-1): the false-authority threat D3 guards against on create doesn't stop there —
+  // an already-linked row IS "a structured meeting note Tyler took on this call". An agent must
+  // never rewrite it, not even body/status, or a prompt-injected agent could forge what Tyler
+  // decided on a real call while the authority marker (booking_id) persists untouched. This blocks
+  // the WHOLE write for an agent actor on any booking-linked row — checked immediately after the
+  // existence check, before any field is resolved. Non-agent actors (admin form, sequence runner)
+  // and agent updates to unlinked (bookingId: null) notes are unaffected.
+  if (actor.actorType === "agent" && communication.bookingId) {
+    throw new Error("Agents cannot modify a booking-linked meeting note.");
+  }
 
   const nextBody = hasOwn(input, "body") ? cleanText(input.body) : communication.body;
   if (!nextBody) throw new Error("Communication body is required.");
@@ -354,6 +398,7 @@ export async function createProjectCommunicationFromForm(projectId: string, form
     sentAt: formString(formData, "sentAt"),
     sourceType: sourceId ? "project_source" : null,
     sourceId,
+    bookingId: cleanText(formString(formData, "bookingId")),
   }, studioActor);
 }
 

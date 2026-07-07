@@ -1,6 +1,7 @@
 import { AppShell } from "@/components/AppShell";
+import { MEETING_NOTE_TEMPLATE } from "@/lib/project-communications";
 import { createProjectFromBookingAction, getBookingManageUrls, getSchedulerBookingDetail, linkBookingToProjectAction, recordSchedulerBookingPaymentAction } from "@/lib/scheduler";
-import { ArrowLeft, CalendarDays, CreditCard, ExternalLink, LinkIcon, Mail, Phone, User } from "lucide-react";
+import { ArrowLeft, CalendarDays, CreditCard, ExternalLink, LinkIcon, Mail, NotebookPen, Phone, User } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -41,6 +42,7 @@ export default async function SchedulerBookingDetailPage({ params }: { params: P
   if (!data || !data.meetingType) notFound();
   const answers = parseAnswers(data.booking.inviteeAnswersJson);
   const manageUrls = getBookingManageUrls(data.meetingType.slug, data.booking);
+  const meetingNotesEnabled = process.env.MEETING_NOTES_ENABLED === "1";
 
   return (
     <AppShell>
@@ -201,6 +203,47 @@ export default async function SchedulerBookingDetailPage({ params }: { params: P
                 </form>
               )}
             </div>
+
+            {meetingNotesEnabled && (
+              <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+                <div className="flex items-center gap-2">
+                  <NotebookPen className="h-5 w-5 text-[var(--ink-muted)]" />
+                  <h2 className="text-lg font-semibold">Meeting notes</h2>
+                </div>
+                {data.project ? (
+                  <>
+                    <form action={`/api/projects/${data.project.id}/communications`} method="post" className="mt-4 grid gap-3">
+                      <input type="hidden" name="projectId" value={data.project.id} />
+                      <input type="hidden" name="bookingId" value={data.booking.id} />
+                      <input type="hidden" name="channel" value="note" />
+                      <input type="hidden" name="direction" value="internal" />
+                      <label className="space-y-1.5 text-sm font-medium">
+                        Notes
+                        <textarea
+                          name="body"
+                          required
+                          rows={8}
+                          defaultValue={MEETING_NOTE_TEMPLATE}
+                          className="w-full rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none"
+                        />
+                      </label>
+                      <button className="brand-primary-button rounded-sm px-4 py-2.5 transition">Save meeting note</button>
+                    </form>
+                    <div className="mt-5 divide-y divide-[var(--line)]">
+                      {data.notes.map((note) => (
+                        <div key={note.id} className="py-3">
+                          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">{formatDateTime(note.createdAt)}</div>
+                          <p className="mt-1 whitespace-pre-line text-sm leading-6">{note.body}</p>
+                        </div>
+                      ))}
+                      {!data.notes.length && <p className="py-3 text-sm text-[var(--ink-muted)]">No meeting notes yet.</p>}
+                    </div>
+                  </>
+                ) : (
+                  <p className="mt-4 text-sm text-[var(--ink-muted)]">Link this booking to a project to add meeting notes.</p>
+                )}
+              </div>
+            )}
 
             {!data.project && data.client && (
               <form action={createProjectFromBookingAction} className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">

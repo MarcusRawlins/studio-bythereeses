@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
+import { formatDate } from "@/lib/format";
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "reese-project-page-"));
 process.env.DATABASE_PATH = path.join(tempDir, "local.db");
@@ -199,6 +200,137 @@ async function main() {
       return true;
     },
   );
+
+  // =============================================================================================
+  // Phase 20 (meeting/consult notes) — Tests 9-12, 18. MEETING_NOTES_ENABLED stays unset by
+  // default in this process, so everything up to this point already proves flag-off purity: no
+  // fixture above ever produced "Meeting note"/"Meeting:" markup. This section makes that explicit,
+  // then exercises the flag-on composer and badge behavior.
+  // =============================================================================================
+  assert.equal(process.env.MEETING_NOTES_ENABLED, undefined, "meeting notes flag must be unset for the flag-off assertions below");
+
+  database.prepare(`
+    INSERT INTO scheduler_meeting_types (id, slug, name, duration_minutes, buffer_minutes, created_at, updated_at)
+    VALUES ('meeting-type-notes-1', 'notes-consult', 'Discovery Call', 30, 15, ?, ?)
+  `).run(now, now);
+  database.prepare(`
+    INSERT INTO scheduler_bookings (
+      id, meeting_type_id, project_id, status, attendee_name, attendee_email, start_at, end_at, created_at, updated_at
+    ) VALUES
+      ('booking-notes-confirmed', 'meeting-type-notes-1', 'project-1', 'confirmed', 'Alex Taylor', 'alex@example.com',
+       '2026-06-20T15:00:00.000Z', '2026-06-20T15:30:00.000Z', ?, ?),
+      ('booking-notes-cancelled', 'meeting-type-notes-1', 'project-1', 'cancelled', 'Alex Taylor', 'alex@example.com',
+       '2026-06-25T15:00:00.000Z', '2026-06-25T15:30:00.000Z', ?, ?)
+  `).run(now, now, now, now);
+  database.prepare(`
+    INSERT INTO project_communications (
+      id, project_id, direction, channel, status, body, booking_id, created_by, created_at, updated_at
+    ) VALUES (
+      'communication-notes-linked', 'project-1', 'internal', 'note', 'draft',
+      'Discussed venue logistics.', 'booking-notes-confirmed', 'admin', ?, ?
+    )
+  `).run(now, now);
+
+  // Test 9 — flag-off purity: with scheduler_bookings rows AND a booking-linked communication row
+  // both present in the DB, the flag OFF still renders no "Meeting note" composer and no per-row
+  // "Meeting:" badge (D6: both flags off ⇒ `bookings: []` ⇒ the composer/badge have nothing to key
+  // off of, regardless of DB content) — the linked row's body still renders as a PLAIN communication
+  // (unrelated to the badge), proving the flag gates only the Phase-20-specific additions.
+  const flagOffMarkup = renderToStaticMarkup(await ProjectDetailPage({
+    params: Promise.resolve({ id: "project-1" }),
+    searchParams: Promise.resolve({}),
+  }));
+  assert.doesNotMatch(flagOffMarkup, /Meeting note/);
+  assert.doesNotMatch(flagOffMarkup, /Meeting:/);
+  assert.match(flagOffMarkup, /Discussed venue logistics\./, "the linked note's body still renders as a plain communication when the flag is off");
+  console.log("test 9 (flag-off purity) passed");
+
+  // ---------------------------------------------------------------------------------------------
+  // Flip the flag on for the remaining tests.
+  // ---------------------------------------------------------------------------------------------
+  process.env.MEETING_NOTES_ENABLED = "1";
+
+  // Test 10 — composer fields (channel=note, direction=internal, bookingId=<selected>, D5 template),
+  // and the booking <select> excludes the cancelled booking (B-4) while data.bookings itself (not
+  // directly inspectable from markup, but proven via crm.test.ts) stays unfiltered.
+  const flagOnMarkup = renderToStaticMarkup(await ProjectDetailPage({
+    params: Promise.resolve({ id: "project-1" }),
+    searchParams: Promise.resolve({}),
+  }));
+  assert.match(flagOnMarkup, /Meeting note/);
+  assert.match(flagOnMarkup, /<input[^>]*name="channel"[^>]*value="note"/);
+  assert.match(flagOnMarkup, /<input[^>]*name="direction"[^>]*value="internal"/);
+  assert.match(flagOnMarkup, /<select[^>]*name="bookingId"/);
+  assert.match(flagOnMarkup, new RegExp(`Discovery Call · ${formatDate("2026-06-20T15:00:00.000Z")}`));
+  assert.doesNotMatch(flagOnMarkup, new RegExp(`Discovery Call · ${formatDate("2026-06-25T15:00:00.000Z")}`), "the cancelled booking is excluded from the picker options (B-4)");
+  assert.match(flagOnMarkup, /Discussed:/);
+  assert.match(flagOnMarkup, /Decisions:/);
+  assert.match(flagOnMarkup, /Follow-ups:/);
+  console.log("test 10 (composer fields, cancelled excluded from picker) passed");
+
+  // Test 12 — the booking-linked communication row (inserted above, for test 9) renders
+  // "Meeting: {meetingName} · {date}" linking to the booking page, sourced from the already-loaded
+  // data.bookings map (no extra query — proven separately in crm.test.ts's spy assertion).
+  assert.match(
+    flagOnMarkup,
+    new RegExp(`Meeting:\\s*<a[^>]*href="/scheduler/bookings/booking-notes-confirmed"[^>]*>Discovery Call · ${formatDate("2026-06-20T15:00:00.000Z")}</a>`),
+  );
+  console.log("test 12 (booking-linked badge rendering) passed");
+
+  // Test 18 — the badge survives the linked booking being cancelled LATER: data.bookings (and the
+  // badge-labeling map built from it) stays unfiltered by status (only the composer's picker is
+  // filtered, per B-4), so the badge keeps rendering.
+  database.prepare(`UPDATE scheduler_bookings SET status = 'cancelled' WHERE id = 'booking-notes-confirmed'`).run();
+  const badgeAfterCancellationMarkup = renderToStaticMarkup(await ProjectDetailPage({
+    params: Promise.resolve({ id: "project-1" }),
+    searchParams: Promise.resolve({}),
+  }));
+  assert.match(
+    badgeAfterCancellationMarkup,
+    new RegExp(`Meeting:\\s*<a[^>]*href="/scheduler/bookings/booking-notes-confirmed"[^>]*>Discovery Call · ${formatDate("2026-06-20T15:00:00.000Z")}</a>`),
+    "a note linked to a since-cancelled booking still renders its badge (B-4/test 18)",
+  );
+  console.log("test 18 (badge survives later cancellation) passed");
+
+  // Test 11 — composer hidden with zero linkable bookings: a project with NO bookings at all, and
+  // a project with bookings that are ALL cancelled, both render no "Meeting note" composer.
+  database.prepare(`
+    INSERT INTO clients (id, first_name, last_name, email, created_at, updated_at)
+    VALUES ('client-notes-empty', 'Sam', 'Reese', 'sam@example.com', ?, ?), ('client-notes-allcancelled', 'Riley', 'Reese', 'riley@example.com', ?, ?)
+  `).run(now, now, now, now);
+  database.prepare(`
+    INSERT INTO projects (id, name, type, stage, status, created_at, updated_at)
+    VALUES ('project-notes-empty', 'No Bookings Wedding', 'wedding', 'inquiry', 'active', ?, ?),
+      ('project-notes-allcancelled', 'All Cancelled Wedding', 'wedding', 'inquiry', 'active', ?, ?)
+  `).run(now, now, now, now);
+  database.prepare(`
+    INSERT INTO project_participants (id, project_id, client_id, role, is_primary_contact, created_at)
+    VALUES ('participant-notes-empty', 'project-notes-empty', 'client-notes-empty', 'primary', 1, ?),
+      ('participant-notes-allcancelled', 'project-notes-allcancelled', 'client-notes-allcancelled', 'primary', 1, ?)
+  `).run(now, now);
+  database.prepare(`
+    INSERT INTO scheduler_bookings (
+      id, meeting_type_id, project_id, status, attendee_name, attendee_email, start_at, end_at, created_at, updated_at
+    ) VALUES (
+      'booking-notes-only-cancelled', 'meeting-type-notes-1', 'project-notes-allcancelled', 'cancelled',
+      'Riley Reese', 'riley@example.com', '2026-06-27T15:00:00.000Z', '2026-06-27T15:30:00.000Z', ?, ?
+    )
+  `).run(now, now);
+
+  const emptyBookingsMarkup = renderToStaticMarkup(await ProjectDetailPage({
+    params: Promise.resolve({ id: "project-notes-empty" }),
+    searchParams: Promise.resolve({}),
+  }));
+  assert.doesNotMatch(emptyBookingsMarkup, /Meeting note/);
+
+  const allCancelledBookingsMarkup = renderToStaticMarkup(await ProjectDetailPage({
+    params: Promise.resolve({ id: "project-notes-allcancelled" }),
+    searchParams: Promise.resolve({}),
+  }));
+  assert.doesNotMatch(allCancelledBookingsMarkup, /Meeting note/);
+  console.log("test 11 (composer hidden with zero linkable bookings) passed");
+
+  delete process.env.MEETING_NOTES_ENABLED;
 
   console.log("project detail page tests passed");
 }

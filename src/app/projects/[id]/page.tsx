@@ -13,6 +13,7 @@ import { projectWorkingNotes } from "@/lib/project-notes";
 import {
   emailApprovalHash,
   emailSendingEnabled,
+  MEETING_NOTE_TEMPLATE,
   resolveEmailRecipientForCommunication,
   sha256Hex,
 } from "@/lib/project-communications";
@@ -311,6 +312,15 @@ export default async function ProjectDetailPage({
         new Date(),
       )
     : [];
+
+  // Phase 20 (meeting/consult notes, dark behind MEETING_NOTES_ENABLED, D6/D9). `data.bookings` is
+  // reused, unchanged, both to build the "which meeting" picker options (cancelled excluded, B-4)
+  // and to label a booking-linked communication row in the feed below (cancelled INCLUDED, so a
+  // note linked to a since-cancelled booking still renders its badge, B-4/test 18) — no extra query
+  // for either.
+  const meetingNotesEnabled = process.env.MEETING_NOTES_ENABLED === "1";
+  const bookingsById = new Map(data.bookings.map((booking) => [booking.id, booking]));
+  const linkableBookings = data.bookings.filter((booking) => booking.status !== "cancelled");
 
   const sectionNavItems = [
     { id: "overview", label: "Overview", icon: UsersRound },
@@ -1236,6 +1246,45 @@ export default async function ProjectDetailPage({
               </form>
             </details>
 
+            {meetingNotesEnabled && linkableBookings.length > 0 && (
+              <details className="group mt-3 rounded-md border border-[var(--line)] bg-[var(--paper-2)]">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-semibold transition hover:bg-white">
+                  <span className="inline-flex items-center gap-2">
+                    <NotebookPen className="h-4 w-4" />
+                    Meeting note
+                  </span>
+                  <span className="text-xs uppercase tracking-[0.12em] text-[var(--ink-3)] group-open:hidden">Open</span>
+                  <span className="hidden text-xs uppercase tracking-[0.12em] text-[var(--ink-3)] group-open:inline">Close</span>
+                </summary>
+                <form action={`/api/projects/${data.project.id}/communications`} method="post" className="grid gap-3 border-t border-[var(--line)] bg-white p-4">
+                  <input type="hidden" name="channel" value="note" />
+                  <input type="hidden" name="direction" value="internal" />
+                  <label className="space-y-1.5 text-sm font-medium">
+                    Meeting
+                    <select name="bookingId" required defaultValue="" className={inputClass}>
+                      <option value="" disabled>Select a meeting</option>
+                      {linkableBookings.map((booking) => (
+                        <option key={booking.id} value={booking.id}>
+                          {booking.meetingName} · {formatDate(booking.startAt)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-1.5 text-sm font-medium">
+                    Notes
+                    <textarea name="body" required rows={8} defaultValue={MEETING_NOTE_TEMPLATE} className={inputClass} />
+                  </label>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-xs text-[var(--ink-3)]">Saved as an internal record of this meeting — not sent to the client.</p>
+                    <button className="brand-primary-button inline-flex items-center justify-center gap-2 rounded-sm px-4 py-2.5 text-sm transition">
+                      <NotebookPen className="h-4 w-4" />
+                      Save meeting note
+                    </button>
+                  </div>
+                </form>
+              </details>
+            )}
+
             <div className="mt-5 divide-y divide-[var(--line-soft)] rounded-md border border-[var(--line)]">
               {data.communications.map((communication) => (
                 <div key={communication.id} className="p-4">
@@ -1281,6 +1330,14 @@ export default async function ProjectDetailPage({
                         )}
                         {taskSourceLabel(communication.sourceType, communication.sourceId, data.sources) && (
                           <span>Source: {taskSourceLabel(communication.sourceType, communication.sourceId, data.sources)}</span>
+                        )}
+                        {meetingNotesEnabled && communication.bookingId && bookingsById.get(communication.bookingId) && (
+                          <span>
+                            Meeting:{" "}
+                            <Link href={`/scheduler/bookings/${communication.bookingId}`} className="underline">
+                              {bookingsById.get(communication.bookingId)!.meetingName} · {formatDate(bookingsById.get(communication.bookingId)!.startAt)}
+                            </Link>
+                          </span>
                         )}
                       </div>
                     </div>

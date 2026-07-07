@@ -1307,6 +1307,16 @@ function migrate(database: LocalDatabase) {
   // lead-form config path reads it). NON-CANONICAL: a display/config artifact — losing it reverts
   // to code defaults, no business state. Dark behind LEAD_FORM_ENABLED; safe to migrate ahead.
   addColumnIfMissing(database, "app_settings", "lead_form_config_json", "TEXT");
+
+  // Phase 20 (migration 0098): structured meeting/consult notes. Additive + idempotent nullable
+  // column + index on project_communications, linking a "note" row to the scheduler_bookings row
+  // it was taken during. Plain column, no DB-level FK (D2) — integrity enforced in app code by
+  // requireBookingBelongsToProject. NULL for every pre-existing row, safe to lose (reverts to an
+  // unlinked note). Dark behind MEETING_NOTES_ENABLED; safe to migrate ahead of the flag flip.
+  addColumnIfMissing(database, "project_communications", "booking_id", "TEXT");
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_project_communications_booking_id ON project_communications(booking_id);
+  `);
 }
 
 function getD1Binding() {
