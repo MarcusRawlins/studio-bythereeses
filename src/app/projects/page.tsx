@@ -3,6 +3,7 @@ import { ProjectBulkSelection } from "@/components/ProjectBulkSelection";
 import { ProjectSearchFilters } from "@/components/ProjectSearchFilters";
 import { listProjectIndex, projectStageOptions, type ProjectIndexSort } from "@/lib/crm";
 import { formatDate, formatMoney } from "@/lib/format";
+import { loadProjectMilestoneSummaries } from "@/lib/project-milestones-batch";
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import Link from "next/link";
 
@@ -117,6 +118,15 @@ export default async function ProjectsPage({ searchParams }: ProjectsPageProps) 
     pageSize,
   });
   const { rows: pageRows, totalCount, filteredCount, totalPages, currentPage, rangeStart, rangeEnd } = projectIndex;
+
+  // Phase 22 (dark behind PROJECT_PROGRESS_TIMELINE). Zero added queries when the flag is off —
+  // `loadProjectMilestoneSummaries` (5 batched, chunked fetches; rev 2 B2) is only ever invoked
+  // inside this branch.
+  const projectProgressTimelineEnabled = process.env.PROJECT_PROGRESS_TIMELINE === "1";
+  const milestoneSummaryByProjectId = projectProgressTimelineEnabled
+    ? await loadProjectMilestoneSummaries(pageRows.map(({ project }) => project), new Date())
+    : new Map();
+
   const countLabel = filteredCount === totalCount
     ? pageRows.length === filteredCount
       ? `${totalCount} canonical projects loaded`
@@ -181,6 +191,7 @@ export default async function ProjectsPage({ searchParams }: ProjectsPageProps) 
               stage: project.stage,
               dateLabel: formatDate(project.eventDate),
               budgetLabel: formatMoney(project.budgetCents),
+              milestoneSummary: milestoneSummaryByProjectId.get(project.id) ?? null,
             },
             client: client ? {
               id: client.id,

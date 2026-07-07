@@ -9,6 +9,15 @@ type ProjectStageOption = {
   label: string;
 };
 
+// Phase 22 (dark behind PROJECT_PROGRESS_TIMELINE). Optional — undefined when the flag is off, so
+// the row renders byte-identically to before this phase.
+type ProjectMilestoneBarSummary = {
+  currentLabel: string | null;
+  doneCount: number;
+  hasOverdue: boolean;
+  totalCount: number;
+};
+
 type ProjectBulkSelectionRow = {
   client: {
     email: string | null;
@@ -20,6 +29,7 @@ type ProjectBulkSelectionRow = {
     budgetLabel: string;
     dateLabel: string;
     id: string;
+    milestoneSummary?: ProjectMilestoneBarSummary | null;
     name: string;
     stage: string;
   };
@@ -278,6 +288,15 @@ export function ProjectBulkSelection({ rows, stages, totalCount }: ProjectBulkSe
                   <span className={`studio-chip studio-stage-${project.stage}`}>{project.stage.replaceAll("_", " ")}</span>
                   <span className="text-xs text-[var(--ink-3)]">{project.dateLabel}</span>
                 </div>
+                {project.milestoneSummary && (
+                  <div className={`mt-1.5 flex items-center gap-1.5 text-xs ${project.milestoneSummary.hasOverdue ? "text-[var(--warning)]" : "text-[var(--ink-3)]"}`}>
+                    <span className="font-semibold tabular-nums">
+                      {project.milestoneSummary.doneCount}/{project.milestoneSummary.totalCount}
+                    </span>
+                    {project.milestoneSummary.currentLabel && <span className="truncate">{project.milestoneSummary.currentLabel}</span>}
+                    {project.milestoneSummary.hasOverdue && <span className="studio-caps text-[0.55rem] font-semibold">Overdue</span>}
+                  </div>
+                )}
               </div>
               {client ? (
                 <div className="min-w-0 text-sm text-[var(--ink-3)]">

@@ -1,11 +1,13 @@
 import { AppShell } from "@/components/AppShell";
 import { LinkActions } from "@/components/LinkActions";
 import { ProjectGalleryDeleteForm, ProjectGalleryForm } from "@/components/ProjectGalleryForm";
+import { ProjectMilestoneStrip } from "@/components/ProjectMilestoneStrip";
 import { ProjectSectionNav } from "@/components/ProjectSectionNav";
 import { listAgentTasks } from "@/lib/agent-tasks";
 import { getProject } from "@/lib/crm";
 import { formatActivityAction, formatDate, formatMoney } from "@/lib/format";
 import { isGalleryUrlSafe } from "@/lib/gallery";
+import { computeProjectMilestones, type MilestoneInput } from "@/lib/project-milestones";
 import { projectWorkingNotes } from "@/lib/project-notes";
 import {
   emailApprovalHash,
@@ -249,6 +251,51 @@ export default async function ProjectDetailPage({
   const selectedWorkflowStepKeys = new Set(sixFigureRun?.steps.map(({ step }) => step.stepKey) ?? []);
   const sequenceEnrollments = await listProjectSequenceEnrollments(data.project.id);
 
+  // Phase 22 (project progress / milestone timeline). Strict `=== "1"` read, dark by default —
+  // mirrors the PORTAL_MAGIC_LINK_ENABLED pattern in src/app/portal/page.tsx. `getProject`'s two
+  // additive fields (`payments`, `bookings`) are always loaded (purely additive, cheap, indexed
+  // queries), but the compute + render only run when the flag is on, so the flag-off page is
+  // byte-identical to today.
+  const projectProgressTimelineEnabled = process.env.PROJECT_PROGRESS_TIMELINE === "1";
+  const projectMilestones = projectProgressTimelineEnabled
+    ? computeProjectMilestones(
+        {
+          stage: data.project.stage,
+          type: data.project.type,
+          createdAt: data.project.createdAt,
+          eventDate: data.project.eventDate,
+          events: data.events.map((event) => ({ type: event.type, title: event.title, eventDate: event.eventDate })),
+          bookings: data.bookings.map((booking) => ({
+            startAt: booking.startAt,
+            status: booking.status,
+            meetingName: booking.meetingName,
+            title: null,
+          })),
+          proposals: data.proposals.map((proposal) => ({
+            status: proposal.status,
+            sentAt: proposal.sentAt,
+            acceptedAt: proposal.acceptedAt,
+            signedAt: proposal.signedAt,
+            contractStatus: proposal.contractStatus,
+          })),
+          invoices: data.invoices.map((invoice) => ({ status: invoice.status, dueDate: invoice.dueDate })),
+          payments: data.payments.map((payment) => ({
+            invoiceId: payment.invoiceId,
+            status: payment.status,
+            dueDate: payment.dueDate,
+            label: payment.label,
+          })),
+          galleries: data.galleries.map((gallery) => ({
+            status: gallery.status,
+            title: gallery.title,
+            deliveredAt: gallery.deliveredAt,
+            createdAt: gallery.createdAt,
+          })),
+        } satisfies MilestoneInput,
+        new Date(),
+      )
+    : [];
+
   const sectionNavItems = [
     { id: "overview", label: "Overview", icon: UsersRound },
     ...(financialSummary ? [{ id: "finances", label: "Finances", icon: Landmark }] : []),
@@ -290,6 +337,8 @@ export default async function ProjectDetailPage({
         </header>
 
         <ProjectSectionNav items={sectionNavItems} />
+
+        {projectProgressTimelineEnabled && <ProjectMilestoneStrip milestones={projectMilestones} />}
 
         {portalLink && (
           <div className="rounded-md border border-[var(--accent)] bg-[#edf6f1] p-4">

@@ -470,6 +470,24 @@ export async function getProject(projectId: string) {
     galleries = [];
   }
 
+  // Phase 22 (project progress / milestone timeline, dark behind PROJECT_PROGRESS_TIMELINE):
+  // ONE added query for this project's scheduler bookings, joined to schedulerMeetingTypes for
+  // the meeting-type name (same join shape as `getClientWithProjects` ~518-537). Additive only —
+  // no existing consumer's shape changes. `scheduler_bookings` has no dedicated "title" column
+  // (unlike proposals/project_events) — the vision_call milestone match is against the
+  // meeting-type name only.
+  const bookings = await db
+    .select({
+      id: schedulerBookings.id,
+      startAt: schedulerBookings.startAt,
+      status: schedulerBookings.status,
+      meetingName: schedulerMeetingTypes.name,
+    })
+    .from(schedulerBookings)
+    .innerJoin(schedulerMeetingTypes, eq(schedulerBookings.meetingTypeId, schedulerMeetingTypes.id))
+    .where(eq(schedulerBookings.projectId, projectId))
+    .orderBy(desc(schedulerBookings.startAt));
+
   return {
     project,
     clients: rows.map((row) => row.client),
@@ -488,6 +506,11 @@ export async function getProject(projectId: string) {
       ...invoice,
       clientPayableBalanceCents: invoiceClientPayableBalanceCents(invoice, paymentsByInvoice.get(invoice.id) ?? []),
     })),
+    // Phase 22: the invoice payment schedule rows this function already loaded internally
+    // (`paymentsByInvoice`, previously folded into `clientPayableBalanceCents` and discarded) —
+    // exposed additively as `payments` for the milestone timeline's final_payment overdue check.
+    payments: projectInvoicePayments,
+    bookings,
     galleries,
     tokens,
     activity,
