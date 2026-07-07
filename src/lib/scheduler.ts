@@ -1356,7 +1356,10 @@ export async function createMeetingTypeAction(formData: FormData) {
     bufferMinutes: Number(textValue(formData, "bufferMinutes")) || 15,
     locationType: textValue(formData, "locationType") || "zoom",
     locationLabel: textValue(formData, "locationLabel") || "Zoom",
-    zoomJoinUrl: textValue(formData, "zoomJoinUrl") || null,
+    // CR-4 review fix: converting a type to google_meet INTENTIONALLY clears any stale static
+    // Zoom URL — the per-booking Meet link replaces it, and a leftover value would double-link
+    // emails (and rejoin-able stale rooms) if the type ever flips back.
+    zoomJoinUrl: (textValue(formData, "locationType") || "zoom") === "google_meet" ? null : textValue(formData, "zoomJoinUrl") || null,
     inviteeQuestionsJson: JSON.stringify(questionsFromForm(formData)),
     collectPayment: formData.get("collectPayment") === "on",
     priceCents: formData.get("collectPayment") === "on" ? numberValue(formData, "priceDollars", 0) * 100 : null,
@@ -1395,7 +1398,10 @@ export async function updateMeetingTypeAction(formData: FormData) {
     bufferMinutes: Number(textValue(formData, "bufferMinutes")) || 15,
     locationType: textValue(formData, "locationType") || "zoom",
     locationLabel: textValue(formData, "locationLabel") || "Zoom",
-    zoomJoinUrl: textValue(formData, "zoomJoinUrl") || null,
+    // CR-4 review fix: converting a type to google_meet INTENTIONALLY clears any stale static
+    // Zoom URL — the per-booking Meet link replaces it, and a leftover value would double-link
+    // emails (and rejoin-able stale rooms) if the type ever flips back.
+    zoomJoinUrl: (textValue(formData, "locationType") || "zoom") === "google_meet" ? null : textValue(formData, "zoomJoinUrl") || null,
     inviteeQuestionsJson: JSON.stringify(questionsFromForm(formData)),
     collectPayment: formData.get("collectPayment") === "on",
     priceCents: formData.get("collectPayment") === "on" ? numberValue(formData, "priceDollars", 0) * 100 : null,

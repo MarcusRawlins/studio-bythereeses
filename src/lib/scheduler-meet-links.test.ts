@@ -112,6 +112,17 @@ async function main() {
       NULL, 1, ?, ?
     )
   `).run(now, now);
+  // CR-4 review fix regression fixture: a type CONVERTED from Zoom to google_meet that still
+  // carries its old static zoom_join_url (the pre-fix update action persisted it).
+  database.prepare(`
+    INSERT INTO scheduler_meeting_types (
+      id, slug, name, duration_minutes, buffer_minutes, location_type, location_label,
+      zoom_join_url, is_active, created_at, updated_at
+    ) VALUES (
+      'meeting-meet-stale', 'meet-consult-stale', 'Converted Meet Consult', 30, 10, 'google_meet', 'Google Meet',
+      'https://zoom.us/j/999-stale', 1, ?, ?
+    )
+  `).run(now, now);
 
   async function nextSlot(slug: string) {
     const [date] = await getAvailableBookingDates(slug);
@@ -206,6 +217,33 @@ async function main() {
       assert.ok(clientEmail, "expected a confirmation email to the attendee");
       const text = String(clientEmail!.body?.text ?? "");
       assert.match(text, /Google Meet: https:\/\/meet\.google\.com\/abc-defg-hij/);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  }
+
+  // --- CR-4 review fix: a google_meet type with a LEFTOVER static zoom URL must email ONLY the
+  // Meet link — never both (a client sent two links may join the stale Zoom room alone).
+  {
+    const mock = makeGoogleFetchMock("meet");
+    const originalFetch = global.fetch;
+    global.fetch = mock.fetchImpl as typeof fetch;
+    try {
+      const slot = await nextSlot("meet-consult-stale");
+      const form = bookingForm({
+        meetingTypeId: "meeting-meet-stale",
+        attendeeName: "Sam Converted",
+        attendeeEmail: "sam.converted@example.com",
+        startAt: slot.startAt,
+        endAt: slot.endAt,
+      });
+      await assert.rejects(() => createSchedulerBookingFromForm(form), /static generation store missing/);
+
+      const clientEmail = mock.resendCalls.find((call) => (call.body?.to as string) === "sam.converted@example.com");
+      assert.ok(clientEmail, "expected a confirmation email to the attendee");
+      const text = String(clientEmail!.body?.text ?? "");
+      assert.match(text, /Google Meet: https:\/\/meet\.google\.com\/abc-defg-hij/, "converted type still gets the Meet join line");
+      assert.doesNotMatch(text, /Zoom: https:\/\/zoom\.us\/j\/999-stale/, "stale static Zoom link must be suppressed for a google_meet type");
     } finally {
       global.fetch = originalFetch;
     }

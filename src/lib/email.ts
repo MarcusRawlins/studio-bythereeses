@@ -227,7 +227,10 @@ export async function sendBookingEmails({ booking, meetingType, manageUrl, resch
     `Event: ${meetingType.name}`,
     `When: ${when}`,
     `Location: ${location}`,
-    meetingType.zoomJoinUrl ? `Zoom: ${meetingType.zoomJoinUrl}` : null,
+    // CR-4 review fix: NEVER emit the static Zoom line for a google_meet type — a type converted
+    // from Zoom can retain a stale zoomJoinUrl, and a client sent both links may join the old
+    // Zoom room alone.
+    meetingType.zoomJoinUrl && meetingType.locationType !== "google_meet" ? `Zoom: ${meetingType.zoomJoinUrl}` : null,
     booking.meetingJoinUrl ? `${joinLabel}: ${booking.meetingJoinUrl}` : null,
     rescheduleUrl ? `Reschedule: ${rescheduleUrl}` : null,
     manageUrl ? `Cancel or manage: ${manageUrl}` : null,

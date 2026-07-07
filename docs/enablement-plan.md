@@ -23,7 +23,7 @@ var" unless stated otherwise, and is instant (no redeploy, no data loss) for eve
 | 1 | Harden + start watching | `CSP_MODE` (report→enforce), `ADMIN_PROOF_ENFORCE` (log→1), `MONITOR_ENABLED`+`ALERT_EMAIL`+`DEADMAN_PING_URL` + monitor Worker | low | 3–5 days | unset each var |
 | 2 | Zero-risk admin-only UI | `PROJECT_PROGRESS_TIMELINE`, `SETTINGS_NAV_GROUP` | none (admin-only, no data change) | 2–3 days | unset each var |
 | 3 | Let clients in | `PORTAL_MAGIC_LINK_ENABLED`, `PORTAL_GALLERY_ENABLED`, `INQUIRY_INTAKE_ENABLED` (+ intake Worker + Email Routing) | low–med (client-facing, no send) | 3–7 days | unset var(s); Worker `INTAKE_ENABLED=false` |
-| 4 | Booking UX | `SCHEDULER_MEET_LINKS` (blocked — build in progress), `UNIFIED_SIGN_PAY` | low (no new money authority) | one live cycle + a few days | unset each var |
+| 4 | Booking UX | `SCHEDULER_MEET_LINKS` (built dark b902fda; Fable-reviewed APPROVE), `UNIFIED_SIGN_PAY` | low (no new money authority) | one live cycle + a few days | unset each var |
 | 5 | Two-way client messaging (log→watch→enforce) | `SMS_ENABLED` → `SEQUENCES_ENABLED`+one per-type flag (draft) → one `*_AUTOSEND` → `EMAIL_SENDING_ENABLED` → `INBOUND_PROJECT_EMAIL_ENABLED` | med (real client-facing sends) | staged, days per stage | unset each var independently |
 | 6 | Not yet buildable — no action | `QUESTIONNAIRE_AUTOFILL_REVIEW` (spec only), Phase 13 autopay (not built) | n/a | n/a | n/a |
 | — | **DO NOT ENABLE YET** | `FINANCE_REFUND_RECORDING=enforce`, `REFUND_INITIATION_ENABLED` | **money movement** | Tyler's explicit go only | kill-switch: unset `REFUND_INITIATION_ENABLED` (does not undo issued refunds) |
@@ -213,7 +213,11 @@ the `inbound-inquiry` webhook signal green (no repeated failures).
 - **Verify (once merged):** book a real test consult, confirm the Meet link appears in the
   confirmation page, the manage page, and the reminder email, and that the calendar invite carries a
   working "Join" button.
-- **Rollback:** unset `SCHEDULER_MEET_LINKS` — reverts to the static-Zoom-link behavior.
+- **Rollback:** unset `SCHEDULER_MEET_LINKS` — reverts to the static-Zoom-link behavior. ALSO
+  re-edit any meeting type you had set to "Google Meet (auto-generated)" and pick its location
+  again (with the flag off the select has no google_meet option, so a re-save silently rewrites it
+  to zoom; its old static Zoom URL was intentionally cleared on conversion, so set one or use the
+  global fallback).
 
 ### 4b. `UNIFIED_SIGN_PAY` (Phase 12)
 - **What turns on:** fuses proposal signature + retainer payment into one client flow (sign → pay in
