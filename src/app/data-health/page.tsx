@@ -1,4 +1,5 @@
 import { AppShell } from "@/components/AppShell";
+import { SettingsTabs } from "@/components/SettingsTabs";
 import { listStudioDataHealth } from "@/lib/data-health";
 import Link from "next/link";
 
@@ -14,10 +15,14 @@ function issueHref(issue: Awaited<ReturnType<typeof listStudioDataHealth>>["issu
 
 export default async function DataHealthPage() {
   const health = await listStudioDataHealth();
+  // CR-2 (left-nav reorganization). Strict `=== "1"`, dark by default. Flag off ⇒ no tab strip,
+  // page renders exactly as today.
+  const settingsNavGroupEnabled = process.env.SETTINGS_NAV_GROUP === "1";
 
   return (
     <AppShell>
       <div className="space-y-6">
+        {settingsNavGroupEnabled ? <SettingsTabs active="data-health" /> : null}
         <header className="border-b border-[var(--line)] pb-5">
           <div className="studio-caps text-[0.58rem] text-[var(--ink-3)]">The Reeses Studio</div>
           <h1 className="brand-page-title mt-2 text-5xl md:text-6xl">Data health</h1>

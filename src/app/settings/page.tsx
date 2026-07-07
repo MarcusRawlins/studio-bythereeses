@@ -1,4 +1,5 @@
 import { AppShell } from "@/components/AppShell";
+import { SettingsTabs } from "@/components/SettingsTabs";
 import { enabledPaymentMethods, getAppSettings, type PaymentMethodKey } from "@/lib/settings";
 import { CreditCard, Landmark, Mail, Settings, ShieldCheck, WalletCards } from "lucide-react";
 import Link from "next/link";
@@ -33,10 +34,14 @@ const paymentOrder: PaymentMethodKey[] = ["stripe", "zelle", "venmo", "cashCheck
 export default async function SettingsPage() {
   const settings = await getAppSettings();
   const enabledMethods = enabledPaymentMethods(settings.paymentMethods);
+  // CR-2 (left-nav reorganization). Strict `=== "1"`, dark by default. Flag off ⇒ no tab strip,
+  // page renders exactly as today.
+  const settingsNavGroupEnabled = process.env.SETTINGS_NAV_GROUP === "1";
 
   return (
     <AppShell>
       <div className="space-y-6">
+        {settingsNavGroupEnabled ? <SettingsTabs active="settings" /> : null}
         <header className="flex flex-col justify-between gap-4 border-b border-[var(--line)] pb-5 lg:flex-row lg:items-end">
           <div>
             <h1 className="brand-page-title text-4xl">Settings</h1>

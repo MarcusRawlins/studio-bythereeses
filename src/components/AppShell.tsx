@@ -37,7 +37,29 @@ const mobileItems = [
   operationsItems[5],
 ];
 
+// CR-2 (left-nav reorganization), flag SETTINGS_NAV_GROUP. Strict `=== "1"`, dark by default —
+// mirrors PROJECT_PROGRESS_TIMELINE (src/app/projects/[id]/page.tsx) / PORTAL_MAGIC_LINK_ENABLED
+// (src/app/portal/page.tsx). Flag off returns `studioItems` itself (same reference, same order,
+// same 8 items with Settings last) so the sidebar is byte-identical to today. Flag on drops the
+// three rarely-used system/ops pages from the top level (they move into a Settings tab strip —
+// see SettingsTabs.tsx — and keep their existing URLs) and moves Settings up next to Invoices so
+// it is no longer dead last.
+export function getStudioNavItems(settingsNavGroupEnabled: boolean) {
+  if (!settingsNavGroupEnabled) return studioItems;
+
+  const hiddenAtTopLevel = new Set(["/activity", "/data-health", "/system-status", "/settings"]);
+  const settingsItem = studioItems.find((item) => item.href === "/settings")!;
+  const remaining = studioItems.filter((item) => !hiddenAtTopLevel.has(item.href));
+  const invoicesIndex = remaining.findIndex((item) => item.href === "/invoices");
+  const reordered = [...remaining];
+  reordered.splice(invoicesIndex + 1, 0, settingsItem);
+  return reordered;
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const settingsNavGroupEnabled = process.env.SETTINGS_NAV_GROUP === "1";
+  const resolvedStudioItems = getStudioNavItems(settingsNavGroupEnabled);
+
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--ink)]">
       <header className="sticky top-0 z-30 border-b border-[var(--line)] bg-[color-mix(in_srgb,var(--paper)_94%,transparent)] px-4 py-3 backdrop-blur-xl lg:hidden">
@@ -87,7 +109,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="studio-caps mt-7 px-3 text-[0.58rem] text-[var(--brand-brown)]">STUDIO</div>
         <nav className="mt-2 space-y-1">
-          {studioItems.map((item) => (
+          {resolvedStudioItems.map((item) => (
             <AppNavLink key={item.href} href={item.href} label={item.label} icon={item.icon} />
           ))}
         </nav>

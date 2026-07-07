@@ -1,4 +1,5 @@
 import { AppShell } from "@/components/AppShell";
+import { SettingsTabs } from "@/components/SettingsTabs";
 import { getStudioSystemStatus, type StudioSystemStatusItem } from "@/lib/system-status";
 import { Activity, DatabaseBackup, HeartPulse, KeyRound, ShieldCheck } from "lucide-react";
 
@@ -31,10 +32,14 @@ function StatusGrid({ items }: { items: StudioSystemStatusItem[] }) {
 
 export default async function SystemStatusPage() {
   const status = await getStudioSystemStatus();
+  // CR-2 (left-nav reorganization). Strict `=== "1"`, dark by default. Flag off ⇒ no tab strip,
+  // page renders exactly as today.
+  const settingsNavGroupEnabled = process.env.SETTINGS_NAV_GROUP === "1";
 
   return (
     <AppShell>
       <div className="space-y-6">
+        {settingsNavGroupEnabled ? <SettingsTabs active="system-status" /> : null}
         <header className="flex flex-col justify-between gap-4 border-b border-[var(--line)] pb-5 lg:flex-row lg:items-end">
           <div>
             <div className="studio-caps text-[0.58rem] text-[var(--ink-3)]">The Reeses Studio</div>

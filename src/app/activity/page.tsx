@@ -1,4 +1,5 @@
 import { AppShell } from "@/components/AppShell";
+import { SettingsTabs } from "@/components/SettingsTabs";
 import { listStudioActivityLog } from "@/lib/activity";
 import { ArrowRight, History, ShieldCheck } from "lucide-react";
 import Link from "next/link";
@@ -56,10 +57,14 @@ export default async function ActivityPage({ searchParams }: ActivityPageProps) 
     actorType: selectedActor,
     limit: 150,
   });
+  // CR-2 (left-nav reorganization). Strict `=== "1"`, dark by default. Flag off ⇒ no tab strip,
+  // page renders exactly as today.
+  const settingsNavGroupEnabled = process.env.SETTINGS_NAV_GROUP === "1";
 
   return (
     <AppShell>
       <div className="space-y-6">
+        {settingsNavGroupEnabled ? <SettingsTabs active="activity" /> : null}
         <header className="border-b border-[var(--line)] pb-5">
           <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
             <div>
