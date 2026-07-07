@@ -160,3 +160,22 @@ see `docs/handoff-build-state.md` for the full list):
   (b) wire the missing "Apply timeline draft" button/endpoint; (c) optional semanticKey column on
   questions for robust mapping. Dark behind QUESTIONNAIRE_AUTOFILL_REVIEW (off = today's behavior
   unchanged). Spec: docs/specs/phase-23-questionnaire-autofill-review.md.
+
+### CR-6 — Resend bounce/complaint webhook → suppression list (deliverability)
+- Status: SPEC
+- Screen: none (backend webhook + /settings suppression visibility)
+- Host: admin (new inbound webhook endpoint, signature-verified)
+- Priority: P1 before real send volume
+- Now: email_suppressions is only ever written by the unsubscribe link; the schema documents a
+  "bounce" source that nothing sets. Hard bounces and spam complaints never stop future sends —
+  sequences would keep emailing dead/complaining addresses indefinitely (sender-reputation risk,
+  the deliverability audit's #1 finding). Also: the inquiry-reply path bypasses the canonical
+  Resend transport AND the suppression check (docs/email-deliverability.md risk #2).
+- Want: Resend webhook (email.bounced / email.complained) verified by signature, appending to
+  email_suppressions with source "bounce"/"complaint"; every sender (including inquiry replies,
+  refactored onto the canonical transport) checks suppression before sending.
+- Why: One spam-trap hit or a season of bouncing addresses can tank inbox placement for ALL email.
+- Money/risk: no money; adds ONE new public endpoint (signature-verified webhook — same trust
+  pattern as the Stripe/Twilio webhooks); suppression writes are non-canonical operational rows.
+- Notes: Spec in progress (docs/specs/phase-24-resend-bounce-webhook.md). Enablement needs the
+  webhook subscribed in the Resend dashboard (runbook step).
