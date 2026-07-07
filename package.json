@@ -31,7 +31,8 @@
     "backup:daily": "node scripts/backup.mjs",
     "backup:data": "scripts/backup-data.sh",
     "backup:reconcile": "node scripts/reconcile-backups.mjs",
-    "backup:install-launchd": "node scripts/install-backup-launchd.mjs"
+    "backup:install-launchd": "node scripts/install-backup-launchd.mjs",
+    "docs:local-sync": "node scripts/sync-docs-local.mjs"
   },
   "dependencies": {
     "@opennextjs/cloudflare": "^1.19.5",

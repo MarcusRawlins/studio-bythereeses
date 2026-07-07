@@ -22,6 +22,17 @@ git pull origin claude/reese-crm-production-qa-4caxz0
 npm install
 ```
 
+## 0.5 Mirror the docs to your local folder
+
+```bash
+npm run docs:local-sync
+```
+
+One-way mirror of `docs/` + `AGENTS.md`/`CLAUDE.md` to **`~/Documents/CLAUDE/Reeses-Studio`**
+(override with `DOCS_SYNC_TARGET=/path`). Stamps `_SYNC-INFO.md` with the commit it came from.
+Your own notes in that folder are untouched; only the mirrored `docs/` tree is kept exact. Run it
+after every pull so the local copy never goes stale.
+
 ## 1. Preflight (backup freshness + drift gate)
 
 ```bash
