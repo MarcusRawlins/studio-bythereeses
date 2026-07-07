@@ -68,6 +68,30 @@ deploy **dark** → Tyler enables.
 - **Phase 20 — Structured meeting/consult notes.** Per-booking/consult notes surface distinct from
   questionnaires (today: single `project.notes` + note-channel rows).
 
+## Confidence foundation (cross-cutting, not a parity feature)
+- **Phase 21 — Observability + failure alerting.** ✅ **BUILT + Fable-reviewed + pushed dark 2026-07-07**
+  (branch `claude/reese-crm-production-qa-4caxz0`, commits `462c4b2` + `e46f129`). The motivating
+  incident: the reminders cron silently sent nothing for ~2 months because it read a login-wall `200`
+  as success. This adds an in-DB heartbeat (`job_runs`), a `computeSystemHealth` catalog, a daily
+  digest + immediate-critical email, an hourly `reese-systems-monitor` Worker, `/api/agent/health`,
+  and a `/system-status` health section — so a silent job failure surfaces within a day, not two
+  months. Adds no attack surface, moves no money, mutates no canonical row, emails only the owner's
+  own address. Adversarial Fable review: **APPROVE WITH FIXES** — no BLOCKER/invariant violation; 2
+  MAJOR + 4 MEDIUM fixed (all in the "the alerting layer must not fail silently itself" class: a
+  failed critical email no longer gets permanently deduped away; a dead Resend key now trips the
+  fail-loud path + dead-man switch instead of reading green). Build gate green (lint/build/216 tests
+  exit 0). Off by default: `MONITOR_ENABLED` gates every autonomous email; the monitor Worker ships
+  un-wired. Migration `0093_observability_heartbeat.sql` (renumbered — the spec's `0092` was taken by
+  Phase 14).
+  **Dark-deploy runbook (run where the Cloudflare token lives — not this remote env):** (1) apply
+  migration `0093` to D1 (idempotent `CREATE TABLE IF NOT EXISTS`); (2) `npm run deploy` (app Worker —
+  ships `recordJobRun` heartbeats, `system-health`, `/api/agent/health`, `/system-status` section, all
+  inert while `MONITOR_ENABLED` is off). The monitor Worker + digest stay **un-wired** until the Tyler
+  enablement runbook (spec §6): set `ALERT_EMAIL` + `MONITOR_ENABLED=1`, deploy
+  `wrangler.systems-monitor.jsonc`, and (recommended) create a healthchecks.io dead-man check + set
+  `DEADMAN_PING_URL`. Note: once required-job crons are enabled, `/system-status` will show them red
+  until their first successful run — that is the intended "never ran" surfacing, not a bug.
+
 ## Sequencing
 12 (convert) → 15 (PWA, quick win) → 14 (email) → 13 (autopay, money-gated) → 16 (mini-sessions) →
 17 (kanban) → 18 (daily brief) → 19 (lead form) → 20 (notes). Each independently shippable + dark.
