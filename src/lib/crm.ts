@@ -372,6 +372,18 @@ export async function listProjectBoardIndex(input: {
     eq(projectParticipants.isPrimaryContact, true),
   );
 
+  // Rev 2 MEDIUM-2 (Fable diff review): the true distinct-project total via a bounded
+  // count(distinct) query (mirrors listProjectIndex ~306-312), so filteredCount/truncated are
+  // accurate WITHOUT fetching every matching row into memory.
+  const filteredCountQuery = db
+    .select({ count: sql<number>`count(distinct ${projects.id})` })
+    .from(projects)
+    .leftJoin(projectParticipants, primaryParticipantJoin)
+    .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
+    .$dynamic();
+  const [filteredRow] = await (where ? filteredCountQuery.where(where) : filteredCountQuery);
+  const filteredCount = Number(filteredRow?.count ?? 0);
+
   const rowsQuery = db
     .select({
       project: projects,
@@ -382,15 +394,17 @@ export async function listProjectBoardIndex(input: {
     .leftJoin(clients, eq(projectParticipants.clientId, clients.id))
     .$dynamic();
   const filteredRowsQuery = where ? rowsQuery.where(where) : rowsQuery;
-  const rawRows = await filteredRowsQuery.orderBy(...projectIndexOrderBy(sort)) as Array<{
-    project: typeof projects.$inferSelect;
-    client: typeof clients.$inferSelect | null;
-  }>;
+  // Rev 2 MEDIUM-2: a real SQL LIMIT bounds the D1 read (was slicing in JS after fetching all
+  // matching rows). Migration 0034's unique-primary-participant index means ≤1 row per project,
+  // so LIMIT 300 + the JS dedupe (belt-and-suspenders) yields ≤300 distinct cards.
+  const rawRows = await filteredRowsQuery
+    .orderBy(...projectIndexOrderBy(sort))
+    .limit(BOARD_MAX_ROWS) as Array<{
+      project: typeof projects.$inferSelect;
+      client: typeof clients.$inferSelect | null;
+    }>;
 
-  const dedupedRows = dedupeRowsByProjectId(rawRows);
-
-  const filteredCount = dedupedRows.length;
-  const rows = dedupedRows.slice(0, BOARD_MAX_ROWS);
+  const rows = dedupeRowsByProjectId(rawRows).slice(0, BOARD_MAX_ROWS);
 
   return {
     rows,

@@ -83,7 +83,12 @@ export function ProjectBoard({ activeStages, projects: initialProjects, stages }
       setProjects((rows) => moveProjectLocalStage(rows, projectId, previousStage));
       setCardErrors((errors) => {
         const next = new Map(errors);
-        next.set(projectId, result.timedOut ? "Couldn't confirm — refresh" : "Move failed — refresh");
+        // Fable MINOR-4: EVERY failure that reaches here is ambiguous — the stage POST may have
+        // committed server-side before the response was lost/timed out (a timeout, a dropped
+        // connection after the 303, or a followed-redirect that then errored). "Move failed"
+        // would wrongly imply the stage is unchanged; "couldn't confirm — refresh" is the honest
+        // copy for all of them (the optimistic move is reverted regardless).
+        next.set(projectId, "Couldn't confirm — refresh");
         return next;
       });
     } finally {

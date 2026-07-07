@@ -5,7 +5,7 @@ import { ProjectSearchFilters } from "@/components/ProjectSearchFilters";
 import { listProjectBoardIndex, listProjectIndex, projectStageOptions, type ProjectIndexSort } from "@/lib/crm";
 import { formatDate, formatMoney } from "@/lib/format";
 import { loadProjectMilestoneSummaries } from "@/lib/project-milestones-batch";
-import { BOARD_MAX_ROWS } from "@/lib/project-board";
+import { BOARD_MAX_ROWS, toProjectBoardCard } from "@/lib/project-board";
 import { ChevronLeft, ChevronRight, LayoutGrid, List, Plus } from "lucide-react";
 import Link from "next/link";
 
@@ -173,18 +173,11 @@ export default async function ProjectsPage({ searchParams }: ProjectsPageProps) 
     // Rev 2, MEDIUM 3: slim card shape — the same mapping shape the list branch already uses for
     // `<ProjectBulkSelection>` below, so no extra project/client column crosses the RSC boundary
     // into the client bundle a second time.
-    const boardCards = boardIndex.rows.map(({ project, client }) => ({
-      id: project.id,
-      name: project.name,
-      stage: project.stage,
+    const boardCards = boardIndex.rows.map(({ project, client }) => toProjectBoardCard({
+      project,
+      client,
       dateLabel: formatDate(project.eventDate),
       budgetLabel: formatMoney(project.budgetCents),
-      client: client ? {
-        id: client.id,
-        firstName: client.firstName,
-        lastName: client.lastName,
-        email: client.email,
-      } : null,
       milestoneSummary: milestoneSummaryByProjectId.get(project.id) ?? null,
     }));
 
@@ -227,7 +220,16 @@ export default async function ProjectsPage({ searchParams }: ProjectsPageProps) 
             </div>
           )}
 
-          <ProjectBoard activeStages={boardIndex.stages} projects={boardCards} stages={projectStageOptions} />
+          {/* Fable MAJOR-1: key the client island by its query inputs so a SOFT navigation
+              (the "Clear filters" Link) remounts it with the fresh card set. Without the key,
+              React preserves the mounted board's useState(initialProjects) while the RSC feeds
+              new props — the board would render the OLD filtered cards against fresh counts. */}
+          <ProjectBoard
+            key={`${rawSearch}|${[...selectedStages].sort().join(",")}|${sort}`}
+            activeStages={boardIndex.stages}
+            projects={boardCards}
+            stages={projectStageOptions}
+          />
         </div>
       </AppShell>
     );

@@ -13,6 +13,7 @@ import {
   loginBounceRedirectUrl,
   moveProjectLocalStage,
   performBoardMove,
+  toProjectBoardCard,
   type BoardFetchImpl,
   type ProjectBoardCard,
   type ProjectStageOption,
@@ -314,6 +315,44 @@ function test13DedupeByProjectId() {
   console.log("test 13 (dedupe by project id) passed");
 }
 
+// ---------------------------------------------------------------------------
+// Test 19 — slim-card leak guard (Fable MEDIUM-3): toProjectBoardCard must pick ONLY the allowed
+// fields, dropping any extra project/client column (notes, venue, phone) that would otherwise
+// cross the RSC boundary into the client bundle. Asserts the KEY SHAPE, not rendered markup.
+// ---------------------------------------------------------------------------
+function test19SlimCardLeakGuard() {
+  const card = toProjectBoardCard({
+    project: { id: "p1", name: "Wedding", stage: "inquiry", notes: "SECRET NOTE", venueName: "SECRET VENUE" } as never,
+    client: { id: "c1", firstName: "A", lastName: "B", email: "a@b.example", phone: "SECRET PHONE", instagram: "SECRET" } as never,
+    dateLabel: "—",
+    budgetLabel: "$0",
+    milestoneSummary: null,
+  });
+  assert.deepEqual(Object.keys(card).sort(), ["budgetLabel", "client", "dateLabel", "id", "milestoneSummary", "name", "stage"]);
+  assert.deepEqual(Object.keys(card.client!).sort(), ["email", "firstName", "id", "lastName"]);
+  const serialized = JSON.stringify(card);
+  for (const secret of ["SECRET NOTE", "SECRET VENUE", "SECRET PHONE"]) {
+    assert.ok(!serialized.includes(secret), `no leaked field: ${secret}`);
+  }
+  console.log("test 19 (slim-card leak guard) passed");
+}
+
+// ---------------------------------------------------------------------------
+// Test 20 — login-bounce component wiring (Fable MINOR-6): source-scan (the pattern tests 6/15
+// use) that ProjectBoard reverts the optimistic move BEFORE navigating on a login-bounce, and
+// keys the branch on the "login-bounce" outcome — a regression that navigated without reverting,
+// or read success first, would be caught.
+// ---------------------------------------------------------------------------
+function test20LoginBounceComponentWiring() {
+  const source = fs.readFileSync(path.join(here, "..", "components", "ProjectBoard.tsx"), "utf8");
+  assert.ok(/outcome === "login-bounce"/.test(source), "board branches on the login-bounce outcome");
+  const bounceIdx = source.indexOf('outcome === "login-bounce"');
+  const revertIdx = source.indexOf("moveProjectLocalStage(rows, projectId, previousStage)", bounceIdx);
+  const assignIdx = source.indexOf("window.location.assign", bounceIdx);
+  assert.ok(revertIdx > bounceIdx && assignIdx > revertIdx, "revert happens BEFORE the login navigation");
+  console.log("test 20 (login-bounce component wiring) passed");
+}
+
 async function main() {
   test1Grouping();
   test2MoveRevertSymmetry();
@@ -327,6 +366,8 @@ async function main() {
   await test16PendingLifecycleAbortTimeout();
   test18BoardMembershipVsFilter();
   test13DedupeByProjectId();
+  test19SlimCardLeakGuard();
+  test20LoginBounceComponentWiring();
 
   console.log("project-board tests passed");
 }

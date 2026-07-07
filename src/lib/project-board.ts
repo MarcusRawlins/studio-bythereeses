@@ -50,6 +50,30 @@ export type ProjectBoardCard = {
   milestoneSummary?: ProjectMilestoneSummaryValue | null;
 };
 
+// Fable MEDIUM-3: the slim-card mapper, EXPLICIT field-picking so no extra project/client column
+// (notes, venueName, phone, …) crosses the RSC boundary into the client bundle. Pure and
+// import-free (labels are pre-formatted by the caller) so the leak guard can assert the exact key
+// shape directly — the old test only greppedrendered markup, which a whole-row leak would pass.
+export function toProjectBoardCard(input: {
+  project: { id: string; name: string; stage: string };
+  client: { id: string; firstName: string | null; lastName: string | null; email: string | null } | null;
+  dateLabel: string;
+  budgetLabel: string;
+  milestoneSummary?: ProjectMilestoneSummaryValue | null;
+}): ProjectBoardCard {
+  return {
+    id: input.project.id,
+    name: input.project.name,
+    stage: input.project.stage,
+    dateLabel: input.dateLabel,
+    budgetLabel: input.budgetLabel,
+    client: input.client
+      ? { id: input.client.id, firstName: input.client.firstName, lastName: input.client.lastName, email: input.client.email }
+      : null,
+    milestoneSummary: input.milestoneSummary ?? null,
+  };
+}
+
 /**
  * Buckets `rows` into one array per stage in `stageOrder`. A stage present in `stageOrder` with
  * zero matching rows still produces an empty (not missing) bucket. A row whose stage is NOT in

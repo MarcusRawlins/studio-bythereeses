@@ -104,10 +104,25 @@ async function main() {
   console.log("test 13 (dedupe integration wiring) passed");
 
   // ---------------------------------------------------------------------------
-  // BOARD_MAX_ROWS truncation sanity: filteredCount can exceed rows.length once truncated.
+  // Truncation WITH data (Fable MINOR-5): more than BOARD_MAX_ROWS matching projects ⇒ rows capped
+  // at the limit, truncated === true, and filteredCount reflects the true distinct total (proving
+  // the count(distinct) query, not the capped slice, drives the flag).
   // ---------------------------------------------------------------------------
   assert.equal(typeof BOARD_MAX_ROWS, "number");
   assert.ok(BOARD_MAX_ROWS > 0);
+
+  const overCap = BOARD_MAX_ROWS + 5;
+  for (let index = 0; index < overCap; index += 1) {
+    const suffix = `trunc-${String(index).padStart(4, "0")}`;
+    insertClient.run(`client-${suffix}`, `Trunc ${suffix}`, "Reese", `${suffix}@example.com`, now, now);
+    insertProject.run(`project-${suffix}`, `Trunc Project ${suffix}`, "inquiry", "2026-11-01", now, now);
+    insertParticipant.run(`participant-${suffix}`, `project-${suffix}`, `client-${suffix}`, now);
+  }
+  const truncated = await listProjectBoardIndex({ q: "Trunc Project" });
+  assert.equal(truncated.rows.length, BOARD_MAX_ROWS, "rows capped at BOARD_MAX_ROWS");
+  assert.equal(truncated.truncated, true, "truncated flag set when the distinct total exceeds the cap");
+  assert.equal(truncated.filteredCount, overCap, "filteredCount is the true distinct total, not the capped slice");
+  console.log("truncation-with-data (MINOR-5) passed");
 
   console.log("project-board-index tests passed");
 }
