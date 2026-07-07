@@ -76,3 +76,21 @@ see `docs/handoff-build-state.md` for the full list):
   what's-late signal. Wedding track ≈ Tyler's list (with "wedding planning" as the span between
   booking and week-of rather than a point); non-wedding projects get a shorter generic track.
   Ships dark behind a flag. Spec: `docs/specs/phase-22-project-progress-timeline.md`.
+
+### CR-2 — Left nav: raise Settings; fold Activity / Data Health / System Status into it
+- Status: BUILDING
+- Screen: all admin pages — left sidebar navigation (`src/components/AppShell.tsx`)
+- Host: admin
+- Priority: P2
+- Now: Flat 16-item nav; Settings is the last item; Activity, Data Health, and System Status sit
+  as separate top-level items mid-list.
+- Want: Settings higher up, with Data Health / System Status / Activity accessible from within the
+  Settings area instead of cluttering the top-level nav.
+- Why: Nav is long; the three system/ops pages are rarely-visited and belong under Settings.
+- Money/risk: no (navigation re-organization only; zero data/behavior change).
+- Notes (agreed design, 2026-07-07): Remove the three from the top-level nav and move Settings up.
+  `/settings` and the three pages get a shared "Settings" tab strip
+  (Settings | Activity | Data Health | System Status) so everything remains one click away and
+  **all URLs stay unchanged** (bookmarks/agent surface map intact). Dark behind
+  `SETTINGS_NAV_GROUP === "1"`; off ⇒ nav renders exactly as today. Small enough that the spec is
+  this entry; the Fable gate runs on the diff.
