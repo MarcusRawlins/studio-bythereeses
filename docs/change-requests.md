@@ -78,7 +78,7 @@ see `docs/handoff-build-state.md` for the full list):
   Ships dark behind a flag. Spec: `docs/specs/phase-22-project-progress-timeline.md`.
 
 ### CR-2 — Left nav: raise Settings; fold Activity / Data Health / System Status into it
-- Status: BUILDING
+- Status: DARK (built, flag off) — commit 389aa08
 - Screen: all admin pages — left sidebar navigation (`src/components/AppShell.tsx`)
 - Host: admin
 - Priority: P2
