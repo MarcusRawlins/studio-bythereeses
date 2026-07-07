@@ -108,7 +108,7 @@ flag is ON** (rev 2 corrects the rev-1 inventory, which listed only the public r
 To satisfy callers 3 and 4 without breaking callers 1 and 2, `updateQuestionnaireResponseAnswers`
 (which today returns `responseId: string`, `:1659`) returns, flag-ON,
 `{ responseId, proposal }` (flag-OFF keeps returning the bare `responseId` — or a `{ responseId,
-proposal: null }` shape the callers already tolerate; pick one and pin it in test 4). The agent-API
+proposal: null }` shape the callers already tolerate; pick one and pin in the caller tests). The agent-API
 `questionnaireResponseResult` and the MCP `questionnaireResponseResult` serializers surface
 `suggested_changes_json` so the agent/MCP round-trip sees the proposed changes instead of assuming a
 silent canonical write happened. The admin action (caller 2) redirect changes from
@@ -288,10 +288,14 @@ helpers `textAnswerForProject`/`textAnswerForClient`/`questionnaireLocationInput
 New/changed modules:
 
 - **`src/lib/questionnaire-autofill.ts`** (new): `computeQuestionnaireAutofillProposal({ response,
-  answers })` orchestrates the four compute halves into a `QuestionnaireAutofillProposal`, and
-  `applyQuestionnaireAutofillProposal({ responseId, acceptedFields, admin })` orchestrates the apply
-  halves with the D5 stale guard, wrapped as a single admin action that logs
-  `questionnaire.autofill.applied`.
+  answers })` orchestrates the four compute halves into a `QuestionnaireAutofillProposal` (including
+  the `contentHash` version token, D8, the location `current` snapshots, M1, and the size cap),
+  and `applyQuestionnaireAutofillProposal({ responseId, acceptedFields, expectedVersion, admin })`
+  orchestrates the apply halves with: the D8 proposal-version guard first, the M9 check ordering
+  (`already_applied` before `changed`), the D5 stale guard (scalar + per-field location, M1), the
+  D9 apply-time re-checks (email collision M2, event re-resolution + ordering M6, calendarSync
+  recompute M7), and the `field` allowlist — wrapped as a single admin action that logs
+  `questionnaire.autofill.applied` with the applied/skipped breakdown in metadata.
 - **`src/lib/questionnaires.ts`**: `updateQuestionnaireResponseAnswers` gains a flag branch
   (`process.env.QUESTIONNAIRE_AUTOFILL_REVIEW === "1"`, strict): flag OFF → today's four sync calls
   (`:1607-1650`) unchanged; flag ON → compute proposal, write `suggested_changes_json` +
@@ -357,8 +361,10 @@ UI:
 
 - **Response detail** (`src/app/questionnaires/[id]/responses/[responseId]/page.tsx`): flag-ON, a
   "Suggested changes" card above/beside Answers rendering per-field `current → proposed` rows with
-  checkboxes (default checked, D3), a "changed since computed" badge per stale field, and an "Apply
-  to project" submit posting to the apply route. Flag-OFF ⇒ card absent (page identical to today).
+  checkboxes (default checked, D3), a "changed since computed" badge per stale field, a **hidden
+  proposal-version field** (the D8 token, so the apply can detect a re-submission that landed between
+  render and click), and an "Apply to project" submit posting to the apply route. Flag-OFF ⇒ card
+  absent (page identical to today).
 - **Project detail draft card** (`src/app/projects/[id]/page.tsx:1712-1742`): flag-ON, add an
   "Apply timeline draft" button on the existing draft card posting to the timeline-draft apply
   route; the banner already promises review-then-apply. Flag-OFF ⇒ card renders exactly as today
@@ -393,6 +399,21 @@ key from the questionnaire edit page (`/questionnaires/:id` question editor) via
 migration does NOT auto-populate keys (that would be a canonical guess — leave existing questions
 keyless → keyword fallback until Tyler assigns).
 
+Two correctness rules the resolver MUST hold (rev 2, **M8**):
+- **Keyed questions are EXCLUDED from every keyword scan.** Once a question carries a `semantic_key`,
+  it is consumed by its key and must not also be visible to the keyword matchers. Otherwise a
+  question tagged `ceremony_location` still double-matches `venueName` through the `"location"`
+  keyword in the profile matcher (`questionnaires.ts:1061`, `title.includes("location")`), writing
+  the same answer into two different canonical fields. Concretely: the keyword extractors iterate
+  over answers whose question has **no** key; the keyed answers are resolved separately by
+  `resolveSemanticValue`.
+- **`resolveSemanticValue` preserves participant-role scoping for client fields.** The keyword path
+  for client fields filters by `answerAppliesToParticipant` (`questionnaires.ts:628-634`) so a
+  bride's phone doesn't populate the groom's client record. The semantic resolver must apply the
+  same role gate for the client-scoped keys (`client_phone`, `client_email`, `client_instagram`,
+  etc.) — a `semantic_key` selects *which field*, not *which participant*; role scoping still
+  decides *whose*.
+
 Effort/payoff: the column + vocabulary + a `resolveSemanticValue(answers, key)` helper is small, and
 it directly de-risks the exact brittleness Tyler flagged. **Ship it this phase.** (If the reviewer
 judges the editor-UI wiring too heavy, the fallback is to ship the column + resolver + keyword
@@ -415,6 +436,13 @@ fallback and defer the edit-page dropdown to a follow-up — the resolver reads 
   "agent"` today (`project-timeline.ts:100-114`) — v1 keeps that actor for the timeline items (the
   draft is agent-generated; the admin action is the *trigger*, logged separately as
   `questionnaire.timeline_draft.applied` with `actorType: "admin"`).
+- **Apply-time integrity (rev 2, I7):** closing the public→canonical channel at submission is not
+  enough on its own — the apply action is itself a canonical write triggered from Tyler's click over
+  a proposal derived from untrusted input. The D8 proposal-version guard ensures Tyler can only ever
+  commit the exact proposal he reviewed (a re-submission cannot inject unseen values into his Apply),
+  and the D9 apply-time re-checks (email uniqueness M2, event re-resolution M6, calendarSync M7)
+  re-validate the state that a concurrent write can move between compute and apply. Together with the
+  D5 stale guard these make the compute→apply gap safe rather than merely narrow.
 - Flag OFF is unchanged, so the existing violation persists until Tyler flips — this is a deliberate
   no-silent-change tradeoff (I1). The flag flip is the remediation.
 
@@ -422,11 +450,12 @@ fallback and defer the edit-page dropdown to a follow-up — the resolver reads 
 
 ## 7. Migration — numbering + 3-place mirror
 
-Highest migration present on this branch: **`0093_observability_heartbeat.sql`**. CR-4 (scheduler
-Meet links, status BUILDING) will add a `meeting_join_url` migration that most likely lands as
-**0094**. This phase therefore plans **`0095_questionnaire_autofill_review.sql`**.
-**At build time, CHECK `migrations/` for the actual highest number** — if CR-4's 0094 has not yet
-merged, renumber this to the next free number (mirror the 0093 header note precedent).
+Migration number is **CONFIRMED 0095** (rev 2). CR-4's scheduler Meet-link migration has merged as
+**`0094_scheduler_meet_link.sql`**, so **`0093_observability_heartbeat.sql`** → **`0094`** →
+this phase's **`0095_questionnaire_autofill_review.sql`** is the settled sequence. The rev-1
+"verify the number at build time" note is closed — 0095 is the next free number. (If a later CR
+races another 0095 in before this merges, renumber to the next free slot; but as of rev 2, 0095 is
+correct.)
 
 Single additive migration, three columns, two tables (D1: no transaction; per-column idempotent):
 
@@ -456,27 +485,39 @@ No new tables, no indexes needed (proposal is read by response id, already the P
 
 ## 8. Task breakdown (ordered; effort / risk)
 
-1. **Migration + 3-place mirror** (§7). Effort S / Risk L. Purely additive; verify number vs CR-4.
+1. **Migration + 3-place mirror** (§7). Effort S / Risk L. Purely additive; number CONFIRMED 0095.
 2. **`semantic_key` vocabulary + resolver** (`src/lib/questionnaire-semantic-keys.ts`) (§5).
-   Effort S / Risk L. Pure module; keyword fallback preserved.
+   Effort S / Risk L. Pure module; keyword fallback preserved. **Include M8: keyed questions
+   excluded from keyword scans + role-scoping in `resolveSemanticValue`.**
 3. **Extract compute halves** from the four sync fns in `questionnaires.ts` (§4). Effort M / Risk M
-   — must preserve today's exact extraction/diff semantics (the flag-OFF regression pin, test 4,
-   proves this). Wire `semantic_key`-first into each extractor.
-4. **`src/lib/questionnaire-autofill.ts`** — `computeQuestionnaireAutofillProposal` +
-   `applyQuestionnaireAutofillProposal` (D5 stale guard, per-field, admin actor, activity log).
-   Effort M / Risk M.
+   — must preserve today's exact extraction/diff semantics (the flag-OFF regression pin, test 5,
+   proves this). Wire `semantic_key`-first into each extractor. **Include the `LocationChange`
+   `current` snapshots (M1) and the `contentHash` version token (D8).**
+4. **`src/lib/questionnaire-autofill.ts`** — `computeQuestionnaireAutofillProposal` (size cap) +
+   `applyQuestionnaireAutofillProposal` with: **D8 proposal-version guard (B1)**, **M9 check
+   ordering (`already_applied` before `changed`)**, D5 stale guard (scalar + per-field location M1),
+   **D9 apply-time re-checks (email M2, event re-resolution + ordering M6, calendarSync M7)**, the
+   `field` allowlist, per-field admin actor + activity log. Effort M / Risk **H** (the invariant
+   core — I7/B1 lives here).
 5. **Flag branch in `updateQuestionnaireResponseAnswers`** (D1/D2/I2). Effort S / Risk M — the
-   invariant hinge; the transcript sync must stay in both branches.
-6. **`getQuestionnaireResponseDetail`** returns + re-diffs the proposal (D5 badge). Effort S / Risk L.
-7. **Apply route** `POST /api/questionnaires/[id]/responses/[responseId]/apply` + guards (I4).
-   Effort S / Risk M.
-8. **Response-detail "Suggested changes" card** with per-field checkboxes + Apply button (D3).
-   Effort M / Risk L (flag-gated; off = today).
+   invariant hinge; the transcript sync must stay in both branches. **Flag-ON return shape becomes
+   `{ responseId, proposal }` (M3) and all FOUR callers updated:** admin action redirect target
+   (card-visible), agent-API + MCP result serializers surface the proposal.
+6. **`getQuestionnaireResponseDetail`** returns + re-diffs the proposal (D5 badge) + exposes the D8
+   version token for the card's hidden field. Effort S / Risk L.
+7. **Apply route** `POST /api/questionnaires/[id]/responses/[responseId]/apply` + guards (I4) +
+   **echoed version token + B1 rejection path**. Effort S / Risk M.
+8. **Response-detail "Suggested changes" card** with per-field checkboxes + Apply button (D3) +
+   **hidden proposal-version field (D8)**. Effort M / Risk L (flag-gated; off = today).
 9. **Timeline-draft apply route** `POST /api/projects/[id]/timeline-draft/apply` calling
-   `createProjectTimelineItemsFromAgent` with replace-by-source (D6). Effort S / Risk M.
-10. **Timeline draft card "Apply" button** on the project page (D6). Effort S / Risk L.
-11. **Tests** (§9). Effort M / Risk L.
-12. **Docs**: changelog stub (§11), CR-5 status → DARK, note the flag in
+   `createProjectTimelineItemsFromAgent` with replace-by-source (D6) + **M4 hand-edit
+   skip/confirm**, **M5 ISO `startAt` composition**, **route validation (projectId match, missing
+   projectSourceId, empty items)**. Effort M / Risk M.
+10. **Timeline draft card "Apply" button** on the project page (D6) + **confirm copy: "re-apply
+    replaces the draft-sourced items" (M4)**. Effort S / Risk L.
+11. **Tests** (§9) — now including B1, M1, M2, M4, M5, M9, and the M10 full-four-sync flag-off pin.
+    Effort M / Risk L.
+12. **Docs**: changelog (§12), CR-5 status → DARK, note the flag in
     `docs/handoff-build-state.md`. Effort S / Risk L.
 
 ---
@@ -489,27 +530,55 @@ sets `DATABASE_PATH` to a temp db and imports the real fns)
    submit answers (venue rename, new phone, new instagram) via `updateQuestionnaireResponseAnswers`
    with `QUESTIONNAIRE_AUTOFILL_REVIEW=1` → assert `projects`/`clients`/`project_locations`/
    `project_events` rows UNCHANGED; `suggested_changes_json` present with correct field-level diffs
-   (`current → proposed`); `project_sources` transcript row STILL written.
+   (`current → proposed`); `project_sources` transcript row STILL written; return shape is
+   `{ responseId, proposal }` (M3).
 2. **Apply writes + logs + idempotent.** Apply the proposal (admin) → canonical rows now updated;
    activity log has `actorType:"admin"`; a second apply is a no-op (`applied: []`, rows unchanged).
 3. **Per-field select (D3).** Accept only `eventDate`, reject `venueName` → eventDate written, venue
    untouched.
-4. **Stale-proposal rule (D5).** Compute proposal; admin edits `venueName` directly on the project;
-   apply the (now stale) proposal that also touched `venueName` → venue field SKIPPED
+4. **Stale-proposal rule (D5, scalar).** Compute proposal; admin edits `venueName` directly on the
+   project; apply the (now stale) proposal that also touched `venueName` → venue field SKIPPED
    (`skipped:[{field:"venueName",reason:"changed"}]`), other accepted fields still applied.
-5. **Flag-OFF unchanged (regression pin, I1).** Same submission with the flag unset → today's
-   direct-write behavior: `projects`/`clients` mutated in-place, NO `suggested_changes_json`. This
-   pins that the flag flip is the ONLY behavior change.
+5. **Flag-OFF unchanged — ALL FOUR syncs (regression pin, I1 + M10).** Same submission with the flag
+   unset → today's direct-write behavior across **all four canonical syncs**: `projects` AND
+   `clients` mutated in-place, `project_locations` inserted, `project_events` "Wedding day" row
+   written, each activity logged with `actorType:"system"`; and the `project_sources` transcript
+   row present. NO `suggested_changes_json`. This pins that the flag flip is the ONLY behavior change
+   — for every sync, not just projects/clients.
 6. **Timeline-draft apply.** Seed a completed Timeline Agent task with an `outputJson.timelineDraft`
    + `projectSourceId`; POST the apply → `project_timeline_items` rows created with
    `sourceType:"project_source"`/`sourceId:<projectSourceId>`; re-apply → replace-by-source leaves
    the SAME count (idempotent, no duplicates).
 7. **Re-submission convergence (D4).** Submit answers A → proposal_A; submit answers B (edited) →
    proposal_B reflects B only (no A residue); resubmit B identically → byte-identical proposal.
-8. **`semantic_key` precedence (§5).** A question titled ambiguously but tagged
+8. **`semantic_key` precedence + isolation (§5, M8).** A question titled ambiguously but tagged
    `semantic_key:"venue_name"` maps to venueName even when the title keyword would miss; a keyless
-   question still matches by keyword.
+   question still matches by keyword; a question tagged `semantic_key:"ceremony_location"` does NOT
+   also land in `venueName` via the `"location"` keyword (keyed-excluded-from-keyword-scan); a
+   bride-tagged `client_phone` does not populate the groom's client row (role scoping preserved).
 9. **No-secrets guard (I5).** Assert `suggested_changes_json` contains no `context`/token substring.
+10. **Proposal-version mismatch rejected (B1 / I7 / D8).** Compute proposal → capture its version
+    token; simulate a client re-submission (recompute overwrites `suggested_changes_json`, reusing
+    the SAME response row per `:1436-1445`); apply with the STALE echoed token → apply is REJECTED
+    whole (no canonical write, friendly "proposal changed — re-review" error). Then apply with the
+    fresh token → succeeds. Proves an unseen re-submission cannot be written under `actorType:"admin"`.
+11. **Location apply skip reasons (M1).** (a) Compute a `LocationChange action:"update"`; admin
+    hand-edits the matched `project_locations` row's `name`; apply → that field skipped
+    (`reason:"changed"`), other location fields applied. (b) Compute an update whose `existingId`
+    row is then deleted; apply → whole entry skipped (`reason:"existing_missing"`), no re-insert,
+    no throw.
+12. **Timeline ISO `startAt` composition (M5).** Draft item with `startAt:"02:00 PM"` + a project
+    `eventDate` → applied row's `startAt` is a valid ISO datetime (renders, not "Date TBD"); a draft
+    item with an unparsable time → `startAt` null and the raw text carried in `description`.
+13. **Email collision re-run at apply (M2).** Compute a proposal that would set a new client email;
+    before apply, a DIFFERENT client claims that email; apply → email field skipped
+    (`reason:"email_collision"`), other accepted fields still applied.
+14. **Timeline hand-edit protection (M4).** Apply a draft; hand-edit one resulting item (bumps
+    `updatedAt > createdAt`); re-apply WITHOUT confirm → not replaced (skip/confirm state returned);
+    re-apply WITH confirm → replaced. Proves hand edits aren't silently wiped by replace-by-source.
+15. **Apply check ordering (M9).** Apply a proposal fully; re-apply the same accepted fields → every
+    field reports `already_applied` (no-op), NOT `skipped:"changed"` — proving the
+    live-===-proposed no-op is checked BEFORE the D5 stale check.
 
 Gate: `npm run lint` exit 0; `npm run build` EXIT=0 (type errors print after "Compiled
 successfully"); `npm test` all pass.
@@ -537,13 +606,42 @@ successfully"); `npm test` all pass.
   `origin-guard.ts` public-bypass list) (I4).
 - **No canonical writes from the public path when the flag is ON.** Public route touches only the
   response row, the `project_sources` transcript, and the proposal artifact — all non-canonical (I2).
-- **Flag OFF = today, byte-for-byte** — the flag flip is the only behavior change (I1, pinned by
-  test 5).
+- **Flag OFF = today, byte-for-byte** — the flag flip is the only behavior change, across ALL FOUR
+  syncs (I1, pinned by test 5 / M10).
 - **No transactions in migration or apply** — per-object idempotent convergence only (I6, D1 rule).
+- **Apply commits only the reviewed proposal (anti-TOCTOU)** — a client re-submission between review
+  and Apply can never write unseen values under `actorType:"admin"`; the apply rejects on
+  proposal-version mismatch (I7 / D8, pinned by test 10).
 
 ---
 
 ## 12. Changelog
+
+### Rev 2 — 2026-07-07 — adversarial Fable review folded in (verdict: APPROVE WITH CHANGES)
+The reviewer approved the architecture (proposal artifact, per-field apply, uniform D1 routing,
+single additive migration) and verified every finding below against live code. Each is now folded in;
+mapping:
+
+| Finding | Severity | Root cause (verified) | Fix in this spec |
+|---|---|---|---|
+| **B1** — Apply TOCTOU | **BLOCKER** | `createProjectQuestionnaireResponseDraft` reuses the same response row regardless of `submittedAt` (`questionnaires.ts:1436-1445`); D4 recompute overwrites `suggested_changes_json` in place → a re-submission between review and Apply writes unseen values as `actorType:"admin"` | **I7 + D8**: proposal-version token (`computedAt` + `contentHash`) echoed by the apply form; apply rejects whole on mismatch. Hard scope guarantee. Test 10. |
+| **M1** — LocationChange has no `current` snapshot | MAJOR | `update` does a bare `db.update` (`:904-914`), clobbering Tyler's manual edits; dangling `existingId` unhandled | §3 `LocationChange` gains per-field `current`; apply skips per-field on drift (`changed`) and skips deleted rows (`existing_missing`). D5 extended. Test 11. |
+| **M2** — email uniqueness only checked at compute | MAJOR | collision check is a DB read at write time (`:732-739`); compute-time-only lets a duplicate land | **D9**: apply re-runs the collision lookup; skip `email_collision`. Test 13. |
+| **M3** — caller inventory wrong | MAJOR | four callers (public route, admin action `~1771`, agent API route `~133`, MCP `studio_upsert_questionnaire_response` `~2744`), not one | **D1** enumerates all four; flag-ON returns `{responseId, proposal}` so agent/MCP don't dead-end; admin redirect lands on the card. Uniform routing kept (endorsed). |
+| **M4** — timeline re-apply wipes hand edits | MAJOR | `replaceExistingForSource` deletes all rows with that `sourceId` (`project-timeline.ts:160-164`), incl. admin-edited (edits keep the link, `:206-207`) | §4 timeline apply skips-or-confirms when any source-linked item has `updatedAt > createdAt`; button copy says re-apply replaces draft-sourced items. Test 14. |
+| **M5** — draft `startAt` is 12-hour string | MAJOR | `maybeTime` yields `"02:00 PM"` (`timeline-draft.ts:107-113`), not ISO → breaks `formatDate`, `datetime-local`, portal (`portal.ts:503`) | §4 apply composes `project.eventDate` + parsed time → ISO; unparsable → text in `description`, `startAt` null. Test 12. |
+| **M6** — projectEvent apply under-specified | MEDIUM | event-row resolution + backfill unstated; ordering unstated | **D9**: apply re-resolves the event row via the compute fallback chain (`:992-995`), preserves venue/date backfill, and orders **project-profile before event**. |
+| **M7** — coupled `calendarSyncStatus` | MEDIUM | `eventDate`'s calendarSync write (`:1078-1082`) computed at compute time | **D9**: recomputed at apply from live `googleCalendarEventId`; companion of `eventDate`, not a checkboxed field. |
+| **M8** — semantic_key isolation | MEDIUM | `ceremony_location` double-matches `venueName` via `"location"` keyword (`:1061`); role scope (`:628-634`) must survive | §5: keyed questions excluded from all keyword scans; `resolveSemanticValue` preserves participant-role scoping for client fields. Test 8. |
+| **M9** — apply check ordering | MEDIUM | stale check before already-applied → double-apply reports every field `changed` | §4: `live === proposed` → `already_applied` no-op checked BEFORE the D5 stale check. Test 15. |
+| **M10** — flag-off pin too narrow | MEDIUM | rev-1 test 5 only covered projects/clients | §9 test 5 now pins all four syncs (locations, events, transcript, `actorType:"system"` activity). |
+| MINOR — proposal size cap | MINOR | unbounded serialized proposal | §3: bound with existing `maxSerializedAnswersLength` (`:109`), fail soft. |
+| MINOR — field allowlist | MINOR | apply could write arbitrary keys from stored JSON | §3: `FieldChange.field` allowlisted against the compute vocabulary. |
+| MINOR — timeline route validation | MINOR | no `projectId` cross-check / friendly errors | §4: validate `outputJson.projectId === route projectId`; friendly errors for missing `projectSourceId` / empty items. |
+| MINOR — migration number | MINOR | rev-1 left "verify at build" open | §7: CONFIRMED 0095 (0094 = scheduler meet link, exists); verify note closed. |
+
+Net new invariant: **I7** (apply commits only the reviewed proposal). Net new design decisions:
+**D8** (proposal-version guard), **D9** (apply-time re-checks). Test plan grew from 9 to 15 cases.
 
 ### Rev 1 — 2026-07-07
 Initial build-ready spec. Converts questionnaire autofill from unconditional untrusted-input
