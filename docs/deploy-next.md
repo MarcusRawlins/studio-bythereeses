@@ -6,7 +6,9 @@ deploy is a zero-behavior-change no-op until you flip flags later. Run from the 
 copy (`/Volumes/reeseai-memory/04_Code/reese-photography-crm`), where the Cloudflare token lives.
 
 **What this deploys:** Phase 14 (two-way project email, dark) + Phase 21 (observability, dark) +
-the golden-path E2E test + docs. Phases 12/15 are already live-dark from the previous deploy.
+Phase 22 / CR-1 (project progress timeline, dark) + CR-2 (settings nav group, dark) + the CR-3
+quick-find fix (unflagged bug repair — live on deploy) + the golden-path E2E test, config preflight,
+and docs. Phases 12/15 are already live-dark from the previous deploy.
 
 ---
 
@@ -101,7 +103,9 @@ heartbeats (this checks config-at-rest; Phase 21 checks whether jobs actually ra
   Deploying it is step 2 of the Phase 21 enablement runbook (`docs/specs/phase-21-observability-alerting.md`
   §6), after you set `ALERT_EMAIL` + `MONITOR_ENABLED=1`.
 - Any flag flips. Everything stays dark: `EMAIL_SENDING_ENABLED`, `INBOUND_PROJECT_EMAIL_ENABLED`,
-  `MONITOR_ENABLED`, `UNIFIED_SIGN_PAY`, refund/9b flags — all off.
+  `MONITOR_ENABLED`, `UNIFIED_SIGN_PAY`, `PROJECT_PROGRESS_TIMELINE`, `SETTINGS_NAV_GROUP`,
+  refund/9b flags — all off. (The CR-3 quick-find fix is the one unflagged change: a bug repair
+  that goes live with the deploy.)
 
 ## Rollback
 

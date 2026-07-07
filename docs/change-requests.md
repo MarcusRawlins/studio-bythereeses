@@ -60,7 +60,7 @@ see `docs/handoff-build-state.md` for the full list):
 ## Requests
 
 ### CR-1 — Project progress bar / milestone timeline (auto-advancing)
-- Status: SPEC
+- Status: DARK (built, flag off) — commits 726c129 + 74e7d93, flag PROJECT_PROGRESS_TIMELINE
 - Screen: /projects — Projects list (compact bar per project) AND /projects/:id — Project detail (full milestone strip)
 - Host: admin
 - Priority: P2
@@ -96,7 +96,7 @@ see `docs/handoff-build-state.md` for the full list):
   this entry; the Fable gate runs on the diff.
 
 ### CR-3 — Quick-find dialog renders UNDER the app navigation (bug)
-- Status: DARK (fixed, pending gate + review + deploy)
+- Status: DARK (fixed + reviewed, commits f2edf7d + 74e7d93) — live on next deploy, no flag
 - Screen: all admin pages — Quick find (⌘K) overlay
 - Host: admin
 - Priority: P1 (bug — search is unusable when the nav covers it)

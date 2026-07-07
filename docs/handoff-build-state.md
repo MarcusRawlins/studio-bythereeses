@@ -88,13 +88,19 @@ The authoritative, always-current list is `docs/roadmap-competitive-parity.md`. 
 - **Phase 21** — observability + failure alerting (heartbeat, digest, critical email, monitor Worker,
   `/api/agent/health`, `/system-status` health section). Dark (`MONITOR_ENABLED`), monitor Worker
   un-wired.
+- **Phase 22 / CR-1** — project progress / milestone timeline (detail strip + list bar). Dark
+  (`PROJECT_PROGRESS_TIMELINE`); spec + diff Fable-reviewed, fixes applied.
+- **CR-2** — settings nav group (Settings raised; Activity/Data Health/System Status folded into a
+  Settings tab strip, URLs unchanged). Dark (`SETTINGS_NAV_GROUP`).
+- **CR-3** — quick-find under-nav bug FIXED (unflagged repair; live on next deploy).
 
 **Not yet built (parity backlog):** 13 autopay (money-gated), 16 mini-sessions (business-dependent),
 17 kanban board, 18 AI daily brief, 19 embeddable lead form, 20 structured meeting notes.
 
-**Confidence backlog:** golden-path end-to-end test (in progress), config-verification preflight
-(**built** — `scripts/config-preflight.mjs` / `npm run config:preflight`, see `docs/deploy-next.md`
-§7), staged log→enforce enablement, email deliverability hardening.
+**Confidence backlog:** golden-path end-to-end test (**built** — `src/lib/golden-path.e2e.test.ts`,
+full chain wired, no gaps found), config-verification preflight (**built** —
+`scripts/config-preflight.mjs` / `npm run config:preflight`, see `docs/deploy-next.md` §7), staged
+log→enforce enablement, email deliverability hardening.
 
 ---
 
