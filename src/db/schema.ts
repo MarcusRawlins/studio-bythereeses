@@ -653,6 +653,16 @@ export const healthAlerts = sqliteTable("health_alerts", {
   resolvedAt: text("resolved_at"),
 });
 
+// Phase 18 (migration 0096) — AI daily brief narration cache, dark behind DAILY_BRIEF_ENABLED.
+// NON-CANONICAL, current-state (one upserted row per day_key), safe to lose: written ONLY by
+// POST /api/agent/daily-brief-narrative, read ONLY by computeDailyBrief's single
+// `WHERE day_key = ?` lookup. Styled identically to jobRuns above.
+export const dailyBriefNarrations = sqliteTable("daily_brief_narrations", {
+  dayKey: text("day_key").primaryKey(), // YYYY-MM-DD in America/New_York
+  narrative: text("narrative").notNull(), // agent-composed prose; secret-redacted + capped at write time
+  generatedAt: text("generated_at").notNull(),
+});
+
 // Phase 9a — mileage log (tax deduction input). No money moved; admin CRUD only.
 export const mileageLogs = sqliteTable("mileage_logs", {
   id: text("id").primaryKey(),

@@ -122,6 +122,78 @@ async function main() {
   // /api/agent/health exists but is NOT registered as an MCP tool name.
   assert.ok(!/studio_[a-z_]*health/i.test(mcpSource) || !mcpSource.includes("agent/health"), "health endpoint is not an MCP tool");
 
+  // ---- Phase 18 §9 test 11: the narration WRITE surface is not an MCP tool -------------------
+  // (the MCP tool list may — and does — reference `computeDailyBrief`/`studio_get_daily_brief`,
+  // the read-only counterpart; what must stay absent is the WRITE table/route itself.)
+  for (const forbidden of ["daily_brief_narrations", "daily-brief-narrative"]) {
+    assert.ok(!mcpSource.includes(forbidden), `MCP tool surface must not reference the narration write surface '${forbidden}'`);
+  }
+
+  // ---- Phase 18 §9 test 11: studio_get_daily_brief is READ-ONLY (never writes) ---------------
+  const { handleStudioMcpMessage } = await import("@/lib/studio-mcp");
+  const narrationCountBefore = (database.prepare("SELECT COUNT(*) AS c FROM daily_brief_narrations").get() as { c: number }).c;
+  const dailyBriefToolCall = await handleStudioMcpMessage({
+    jsonrpc: "2.0",
+    id: 100,
+    method: "tools/call",
+    params: { name: "studio_get_daily_brief", arguments: {} },
+  });
+  assert.equal(dailyBriefToolCall?.result?.isError, false, "studio_get_daily_brief succeeds");
+  for (const table of CANONICAL_TABLES) {
+    assert.equal(countRows(database, table), 1, `studio_get_daily_brief must not mutate canonical table ${table}`);
+    assert.deepEqual(database.prepare(`SELECT * FROM ${table} ORDER BY id`).all(), snapshot[table], `studio_get_daily_brief must not mutate canonical table ${table} (no UPDATE)`);
+  }
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS c FROM daily_brief_narrations").get() as { c: number }).c,
+    narrationCountBefore,
+    "studio_get_daily_brief (read-only) does not write to daily_brief_narrations either",
+  );
+
+  // ---- Phase 18 §9 test 10: computeDailyBrief + the narration endpoint + a full digest send ---
+  // (flag on) write rows ONLY to daily_brief_narrations (+ the existing job_runs/health_alerts) —
+  // extends the zero-canonical-write guard above to these new code paths.
+  const { computeDailyBrief } = await import("@/lib/daily-brief");
+  await computeDailyBrief(new Date());
+
+  process.env.STUDIO_AGENT_API_TOKEN = "obs-guard-agent-token";
+  const { POST: narrationPOST } = await import("@/app/api/agent/daily-brief-narrative/route");
+  const narrationRes = await narrationPOST(
+    new Request("https://studio.bythereeses.com/api/agent/daily-brief-narrative", {
+      method: "POST",
+      headers: { authorization: "Bearer obs-guard-agent-token" },
+      body: JSON.stringify({ narrative: "Guard-test narration." }),
+    }),
+  );
+  assert.equal(narrationRes.status, 200, "the narration endpoint accepts the write");
+
+  process.env.MONITOR_ENABLED = "1";
+  process.env.DAILY_BRIEF_ENABLED = "1";
+  process.env.ALERT_EMAIL = "";
+  // route.ts computes `now = new Date()` internally and only builds the digest when the real ET
+  // hour matches MONITOR_DIGEST_HOUR — set it to "whatever hour it is right now" so this run
+  // deterministically exercises the digest-building branch (mirrors the same technique used in
+  // daily-brief-digest.test.ts).
+  const easternHourParts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false }).formatToParts(new Date());
+  process.env.MONITOR_DIGEST_HOUR = String(Number(easternHourParts.find((p) => p.type === "hour")?.value ?? "0") % 24);
+  const digestRes = await monitorPOST(
+    new Request("https://x.workers.dev/api/cron/systems-monitor", {
+      method: "POST",
+      headers: { authorization: "Bearer obs-guard-secret" },
+    }) as unknown as Parameters<typeof monitorPOST>[0],
+  );
+  assert.equal(digestRes.status, 200, "a full digest run (DAILY_BRIEF_ENABLED=1) still succeeds");
+  delete process.env.DAILY_BRIEF_ENABLED;
+
+  for (const table of CANONICAL_TABLES) {
+    assert.equal(countRows(database, table), 1, `daily-brief code paths must not INSERT/DELETE canonical table ${table}`);
+    assert.deepEqual(database.prepare(`SELECT * FROM ${table} ORDER BY id`).all(), snapshot[table], `daily-brief code paths must not mutate canonical table ${table} (no UPDATE)`);
+  }
+  assert.equal(
+    (database.prepare("SELECT COUNT(*) AS c FROM daily_brief_narrations").get() as { c: number }).c,
+    1,
+    "the narration endpoint upserts exactly one non-canonical row (one call this run)",
+  );
+
   console.log("observability guard tests passed");
 }
 

@@ -1289,6 +1289,18 @@ function migrate(database: LocalDatabase) {
   addColumnIfMissing(database, "questionnaire_responses", "suggested_changes_json", "TEXT");
   addColumnIfMissing(database, "questionnaire_responses", "suggested_changes_computed_at", "TEXT");
   addColumnIfMissing(database, "questionnaire_questions", "semantic_key", "TEXT");
+
+  // Phase 18 (migration 0096): AI daily brief narration cache. Additive + idempotent.
+  // NON-CANONICAL: one non-canonical row/day (upserted by day_key), safe to lose — losing it
+  // just means the digest's "Today: what needs you" section ships without the AI paragraph.
+  // Dark behind DAILY_BRIEF_ENABLED; safe to migrate ahead of the flag flip.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS daily_brief_narrations (
+      day_key       TEXT PRIMARY KEY NOT NULL,
+      narrative     TEXT NOT NULL,
+      generated_at  TEXT NOT NULL
+    );
+  `);
 }
 
 function getD1Binding() {

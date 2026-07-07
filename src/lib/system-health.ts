@@ -523,7 +523,10 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
 // counts, ISO timestamps, cleaned error messages). It MUST NEVER interpolate process.env
 // (secret-redaction test §8/6). last_error is already re-sanitized inside recordJobRun.
 // ---------------------------------------------------------------------------
-export function buildHealthDigest(report: SystemHealthReport, options?: { deadmanArmed?: boolean }): { subject: string; text: string } {
+export function buildHealthDigest(
+  report: SystemHealthReport,
+  options?: { deadmanArmed?: boolean; extraSection?: string },
+): { subject: string; text: string } {
   const criticalCount = report.signals.filter((s) => s.severity === "critical").length;
   const warnCount = report.signals.filter((s) => s.severity === "warn").length;
   const subject =
@@ -546,6 +549,15 @@ export function buildHealthDigest(report: SystemHealthReport, options?: { deadma
     for (const signal of group) {
       lines.push(`  - ${signal.label}: ${signal.detail}`);
     }
+    lines.push("");
+  }
+  // Phase 18 (§2.1) — the optional daily-brief section is inserted BEFORE the footer lines are
+  // pushed (a fixed insertion point, not a string search over already-rendered text), so it lands
+  // "after the health signals, before the footer" by construction and cannot silently regress if
+  // the footer's wording changes later. buildHealthDigest stays agnostic to what the section
+  // contains — daily-brief.ts owns formatting it.
+  if (options?.extraSection) {
+    lines.push(options.extraSection);
     lines.push("");
   }
   lines.push("—");

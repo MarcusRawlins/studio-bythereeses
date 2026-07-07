@@ -1,8 +1,10 @@
 // Phase 21 — the tiny shared heartbeat helper. Every autonomous background job writes one
 // upserted row to job_runs on each run (success OR failure); the digest + /api/agent/health
 // + /system-status read it. NON-CANONICAL: recordJobRun writes ONLY job_runs — never a
-// business record, never money. It is imported ONLY by the job entry points (the 6 wired
-// routes + the monitor route). NO agent/MCP export.
+// business record, never money. recordJobRun is imported ONLY by the job entry points (the 6
+// wired routes + the monitor route). NO agent/MCP export of the WRITE. (The pure, side-effect-free
+// helper redactSecretEnvValues is also imported by the Phase 18 narration route to reuse the exact
+// SECRET_ENV_NAMES redaction — a read-only sanitizer, not a job-runs write.)
 //
 // Invariants (spec §2.2):
 //   - NEVER throws into the monitored job. The write is wrapped in try/catch that swallows
@@ -40,17 +42,26 @@ const SECRET_ENV_NAMES = [
   "RESEND_WEBHOOK_SECRET",
 ] as const;
 
-// Defense-in-depth: strip any configured secret value out of the message, then cap. A future
-// careless caller that interpolates a secret into an error string cannot persist it here.
-export function sanitizeJobRunError(value: string | null | undefined): string | null {
-  let text = typeof value === "string" ? value : "";
-  if (!text.trim()) return null;
+// Phase 18 (§3.3, finding A-3): the secret-VALUE redaction loop, extracted so a second caller
+// (the daily-brief narration handler) can reuse it verbatim instead of re-implementing it — a
+// hand-duplicated copy would silently drift from SECRET_ENV_NAMES the next time a secret is added.
+export function redactSecretEnvValues(value: string): string {
+  let text = value;
   for (const name of SECRET_ENV_NAMES) {
     const secret = process.env[name]?.trim();
     if (secret && secret.length >= 4) {
       text = text.split(secret).join("[redacted]");
     }
   }
+  return text;
+}
+
+// Defense-in-depth: strip any configured secret value out of the message, then cap. A future
+// careless caller that interpolates a secret into an error string cannot persist it here.
+export function sanitizeJobRunError(value: string | null | undefined): string | null {
+  let text = typeof value === "string" ? value : "";
+  if (!text.trim()) return null;
+  text = redactSecretEnvValues(text);
   const trimmed = text.trim();
   return trimmed ? trimmed.slice(0, MAX_ERROR_LEN) : null;
 }

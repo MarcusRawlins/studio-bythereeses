@@ -1,3 +1,4 @@
+import { safeDailyBriefExtraSection } from "@/lib/daily-brief";
 import { sendAdminAlertEmail } from "@/lib/email";
 import { processImmediateCriticalAlerts } from "@/lib/health-alerts";
 import { recordJobRun } from "@/lib/job-runs";
@@ -73,7 +74,13 @@ export async function POST(request: NextRequest) {
     // 2. Daily digest — once per day when the ET hour matches the configured digest hour. The
     //    green digest is itself the liveness signal (§4.3 dead-man's-switch, layer 1).
     if (easternHour(now) === parseDigestHour(process.env.MONITOR_DIGEST_HOUR)) {
-      const digest = buildHealthDigest(report, { deadmanArmed: Boolean(deadmanPingUrl()) });
+      // Phase 18 (§2.1) — DAILY_BRIEF_ENABLED sub-toggle. safeDailyBriefExtraSection is its own
+      // try/catch-wrapped unit: a throw anywhere in computeDailyBrief/formatDailyBriefSection (or
+      // the AI narration it may render) falls back to `undefined`, so buildHealthDigest renders
+      // byte-identical to today when the flag is off OR when the brief compute fails — it can
+      // never delay or block sendAdminAlertEmail below.
+      const extraSection = await safeDailyBriefExtraSection(now);
+      const digest = buildHealthDigest(report, { deadmanArmed: Boolean(deadmanPingUrl()), extraSection });
       sentDigest = await sendAdminAlertEmail(digest);
       if (alertConfigured && !sentDigest) deliveryFailed = true;
     }

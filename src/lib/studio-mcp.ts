@@ -7,6 +7,7 @@ import { claimNextAgentTask, createAgentTask, hydrateAgentTaskLinkedSource, hydr
 import { getAgentFinanceReport } from "./agent-finance";
 import { getBusinessReview } from "./intelligence";
 import { getAgenda, type AgendaCategory } from "./agenda";
+import { computeDailyBrief } from "./daily-brief";
 import { listStudioActivityLog } from "./activity";
 import { createExpenseFromAgent, updateExpenseFromAgent, type AgentExpenseInput, type AgentExpenseUpdateInput } from "./bookkeeping";
 import { createProjectEventFromAgent, createProjectFromAgent, createProjectLocationFromAgent, getClientWithProjects, getProject, linkClientToProject, listProjectIndex, mergeClients, updateClientFromAgent, updateProjectEventFromAgent, updateProjectFromAgent, updateProjectLocationFromAgent, type AgentClientUpdateInput, type AgentProjectCreateInput, type AgentProjectEventInput, type AgentProjectLocationInput, type AgentProjectUpdateInput, type ProjectIndexSort } from "./crm";
@@ -169,6 +170,18 @@ const studioTools = [
         fromDate: { type: "string", description: "Optional YYYY-MM-DD start of the review window. Defaults to the trailing 30 days." },
         toDate: { type: "string", description: "Optional YYYY-MM-DD end of the review window. Defaults to today." },
         asOfDate: { type: "string", description: "Optional YYYY-MM-DD as-of date for forecasting and aging. Defaults to today." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "studio_get_daily_brief",
+    title: "Get Daily Brief",
+    description: "Read the rule-based daily brief (priority leads/stuck items/overdue payments, upcoming shoots/calls, and — when PROJECT_PROGRESS_TIMELINE=1 — overdue project milestones) for a requested date. READ-ONLY — the agent composes the prose narrative from this JSON; the tool never sends or writes anything.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        now: { type: "string", description: "Optional ISO timestamp to compute the brief as-of. Defaults to the current time." },
       },
       additionalProperties: false,
     },
@@ -2488,6 +2501,16 @@ async function callTool(params: unknown) {
       asOfDate: optionalStringArg(args, "asOfDate"),
     });
     return textToolResult({ review });
+  }
+
+  if (name === "studio_get_daily_brief") {
+    // READ-ONLY (§3.2) — the agent composes the prose narrative from this JSON; the tool never
+    // sends or writes anything. Returns computeDailyBrief(now) verbatim so the agent's narration
+    // always describes the literal same signals Tyler will see below it in the digest email.
+    const nowArg = optionalStringArg(args, "now");
+    const now = nowArg ? new Date(nowArg) : new Date();
+    const brief = await computeDailyBrief(Number.isNaN(now.getTime()) ? new Date() : now);
+    return textToolResult({ brief });
   }
 
   if (name === "studio_get_settings") {
