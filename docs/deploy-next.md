@@ -43,15 +43,20 @@ npm run deploy:capture-versions # snapshot current Worker versions for rollback
 If preflight fails on backup freshness, run your backup first (see
 `docs/ops-stabilization-checklist.md`), then re-run.
 
-## 2. Apply the two new migrations to production D1 (additive, safe while dark)
+## 2. Apply the new migrations to production D1 (additive, safe while dark)
 
 ```bash
 npx wrangler d1 execute studio-bythereeses --remote --file migrations/0092_inbound_project_email.sql
 npx wrangler d1 execute studio-bythereeses --remote --file migrations/0093_observability_heartbeat.sql
+npx wrangler d1 execute studio-bythereeses --remote --file migrations/0094_scheduler_meet_link.sql
+npx wrangler d1 execute studio-bythereeses --remote --file migrations/0095_questionnaire_autofill_review.sql
 ```
 
-Both are additive + idempotent (`IF NOT EXISTS` / new column + index). Order: migrations BEFORE the
-Worker deploy so the new code never sees a missing column.
+All four are additive + idempotent (`IF NOT EXISTS` / new columns + indexes): 0092 inbound-email
+column, 0093 observability tables, 0094 `scheduler_bookings.meeting_join_url` (CR-4), 0095
+`questionnaire_questions.semantic_key` + `questionnaire_responses.suggested_changes_json`/
+`computed_at`/`content_hash` (Phase 23). Order: migrations BEFORE the Worker deploy so the new code
+never sees a missing column.
 
 ## 3. Deploy the app Worker (OpenNext)
 
@@ -115,6 +120,7 @@ heartbeats (this checks config-at-rest; Phase 21 checks whether jobs actually ra
   §6), after you set `ALERT_EMAIL` + `MONITOR_ENABLED=1`.
 - Any flag flips. Everything stays dark: `EMAIL_SENDING_ENABLED`, `INBOUND_PROJECT_EMAIL_ENABLED`,
   `MONITOR_ENABLED`, `UNIFIED_SIGN_PAY`, `PROJECT_PROGRESS_TIMELINE`, `SETTINGS_NAV_GROUP`,
+  `SCHEDULER_MEET_LINKS`, `QUESTIONNAIRE_AUTOFILL_REVIEW`, `PROJECTS_BOARD_VIEW`,
   refund/9b flags — all off. (The CR-3 quick-find fix is the one unflagged change: a bug repair
   that goes live with the deploy.)
 
