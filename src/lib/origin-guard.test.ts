@@ -132,6 +132,15 @@ assert.equal(
   "the out-of-Worker heartbeat endpoint must bypass the origin guard (bearer secret is the trust boundary)",
 );
 
+// Phase 13: the autopay-charge cron reaches the origin directly, bearer-authed on CRON_SECRET (the
+// engine no-ops entirely while AUTOPAY_ENABLED is dark). Pin the bypass so a future edit that drops it
+// (silently login-walling every autopay run — a money-relevant outage) fails loudly.
+assert.equal(
+  isPublicOriginBypassApiPath("/api/cron/autopay-charge"),
+  true,
+  "the autopay-charge cron endpoint must bypass the origin guard (bearer secret is the trust boundary)",
+);
+
 assert.equal(
   isPublicOriginBypassApiPath("/api/scheduler/meeting-types"),
   false,

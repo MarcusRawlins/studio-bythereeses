@@ -6,10 +6,13 @@
 // to INFO rather than throwing the whole report (monitoring is best-effort).
 
 import { db } from "@/db/client";
-import { emailSuppressions, projectCommunications, sequenceSends } from "@/db/schema";
+import { autopayConsents, emailSuppressions, projectCommunications, sequenceSends } from "@/db/schema";
+import { getAutopayChargeReconciliation } from "@/lib/autopay-charge";
+import { AUTOPAY_CONSENT_VERSION } from "@/lib/autopay-consent";
+import { autopayEnabled } from "@/lib/autopay-flags";
 import { readJobRuns } from "@/lib/job-runs";
 import { getAgentFinanceReport } from "@/lib/agent-finance";
-import { and, eq, inArray, lt } from "drizzle-orm";
+import { and, eq, inArray, lt, ne } from "drizzle-orm";
 
 export type HealthSeverity = "ok" | "info" | "warn" | "critical";
 
@@ -105,6 +108,19 @@ const REQUIRED_JOBS: Record<string, RequiredJobConfig> = {
   },
 };
 
+// Phase 13 — the autopay charge cron (hourly). A silently-dead autopay cron is a money-relevant
+// outage → staleness-alertable, CRITICAL. Only checked when AUTOPAY_ENABLED is on: a DARK deploy
+// changes nothing (I1), so the cron's absence never alarms while autopay is off. Once the flag is on
+// the cron MUST be heartbeating (a flag-off run still records ok, so it stays green until genuinely dead).
+const AUTOPAY_CHARGER_JOB: RequiredJobConfig = {
+  label: "Autopay charger cron",
+  warnMs: 3 * HOUR_MS,
+  criticalMs: 8 * HOUR_MS,
+  warnFailures: 1,
+  criticalFailures: 3,
+  alertKey: "critical:autopay_charger_stale",
+};
+
 // Event-driven webhook/inbound handlers: error-RATE is the signal, staleness is meaningless.
 // A missing row is genuinely not-configured (INFO), never a stale alarm.
 type WebhookJobConfig = {
@@ -194,7 +210,12 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
   const jobByName = new Map(jobRows.map((row) => [row.jobName, row]));
 
   // --- Required-cadence jobs (staleness + recorded failure) --------------------------------
-  for (const [name, cfg] of Object.entries(REQUIRED_JOBS)) {
+  // Phase 13: autopay-charger is a REQUIRED job ONLY when AUTOPAY_ENABLED is on (dark deploy alarms on
+  // nothing, I1). Merged in here so it shares the exact staleness/failure escalation logic.
+  const requiredJobs: Record<string, RequiredJobConfig> = autopayEnabled()
+    ? { ...REQUIRED_JOBS, "autopay-charger": AUTOPAY_CHARGER_JOB }
+    : REQUIRED_JOBS;
+  for (const [name, cfg] of Object.entries(requiredJobs)) {
     const row = jobByName.get(name);
     // Recorded FAILURE branch: latest run errored → evaluate on last_status/consecutive_failures.
     if (row && row.lastStatus === "error") {
@@ -470,6 +491,89 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
     }
   } catch {
     // sequence tables absent → skip (nothing to report).
+  }
+
+  // --- Autopay charge reconciliation (Phase 13, §6.4 — money-critical) ---------------------
+  // Only read when AUTOPAY_ENABLED is on (a dark deploy reads no autopay schema, I1). Best-effort like
+  // every other block. A stuck 'charging' row (money may have moved) and a 'charged' row never recorded
+  // page Tyler as CRITICAL, each with a per-row alertKey mirroring critical:refund_stuck:<id>.
+  if (autopayEnabled()) {
+    try {
+      const recon = await getAutopayChargeReconciliation({ now });
+      for (const stuck of recon.stuckCharging) {
+        signals.push({
+          key: `autopay-charge-stuck:${stuck.chargeId}`,
+          label: "Autopay charge stuck in-flight",
+          severity: "critical",
+          detail: `Autopay charge ${stuck.chargeId} has been 'charging' too long — money may have moved; reconcile against Stripe (never blind-retry).`,
+          value: stuck.amountCents,
+          alertKey: `critical:autopay_charge_stuck:${stuck.chargeId}`,
+        });
+      }
+      for (const nr of recon.notReconciled) {
+        signals.push({
+          key: `autopay-charge-not-reconciled:${nr.chargeId}`,
+          label: "Autopay charge not reconciled",
+          severity: "critical",
+          detail: `Autopay charge ${nr.chargeId} is 'charged' but the installment was never recorded paid (webhook never landed).`,
+          value: nr.amountCents,
+          alertKey: `critical:autopay_charge_not_reconciled:${nr.chargeId}`,
+        });
+      }
+      for (const pu of recon.paidUnrecorded) {
+        signals.push({
+          key: `autopay-paid-unrecorded:${pu.chargeId}`,
+          label: "Autopay paid at Stripe, unrecorded",
+          severity: "critical",
+          detail: `Autopay found the manual checkout session for charge ${pu.chargeId} already PAID, but the installment is still unsettled — the payment is unrecorded. Reconcile immediately.`,
+          value: pu.amountCents,
+          alertKey: `critical:autopay_paid_unrecorded:${pu.chargeId}`,
+        });
+      }
+      for (const dc of recon.doubleCharge) {
+        signals.push({
+          key: `autopay-double-charge:${dc.chargeId}`,
+          label: "Autopay double charge",
+          severity: "critical",
+          detail: `A DIFFERENT payment intent (${dc.refundCandidatePi}) was recorded on an already-paid installment for charge ${dc.chargeId} — money moved twice. Refund the second charge (Phase 9b).`,
+          value: dc.amountCents,
+          alertKey: `critical:autopay_double_charge:${dc.chargeId}`,
+        });
+      }
+      if (recon.consentStuckPending.length > 0) {
+        signals.push({
+          key: "autopay-consent-stuck-pending",
+          label: "Autopay consent stuck pending",
+          severity: "warn",
+          detail: `${recon.consentStuckPending.length} autopay consent(s) still 'pending' with a SetupIntent but no attach webhook — a card may be saved-but-unlinked or the client is stranded mid-flow.`,
+          value: recon.consentStuckPending.length,
+        });
+      }
+    } catch {
+      // Best-effort; a read failure here must not affect any other signal.
+    }
+
+    // --- Autopay consent-version drift (MINOR-7 / §7) ------------------------------------------
+    // Bumping AUTOPAY_CONSENT_VERSION silently disqualifies every active consent still on the old
+    // version from charging (I9 requires an exact match) — i.e. a bump HALTS autopay for them until
+    // re-consent. Surface a WARN so a bump can never quietly stop the money. Best-effort, dark ⇒ no
+    // signal (this whole block is autopayEnabled()-gated). Zero mismatches ⇒ no signal.
+    try {
+      const staleConsents = await db.query.autopayConsents.findMany({
+        where: and(eq(autopayConsents.status, "active"), ne(autopayConsents.consentVersion, AUTOPAY_CONSENT_VERSION)),
+      });
+      if (staleConsents.length > 0) {
+        signals.push({
+          key: "autopay-consent-version-mismatch",
+          label: "Autopay consent version outdated",
+          severity: "warn",
+          detail: `${staleConsents.length} active autopay consents are on an outdated consent version — charging for them is halted until re-consent.`,
+          value: staleConsents.length,
+        });
+      }
+    } catch {
+      // Best-effort; a read failure here must not affect any other signal.
+    }
   }
 
   // --- SMS delivery failures (trailing window) ---------------------------------------------

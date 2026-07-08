@@ -1317,6 +1317,16 @@ function migrate(database: LocalDatabase) {
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_project_communications_booking_id ON project_communications(booking_id);
   `);
+
+  // Phase 13 (migration 0099): autopay / card-on-file. Additive + idempotent (CREATE TABLE IF NOT
+  // EXISTS + partial UNIQUE indexes + status canon-guard triggers). INERT while AUTOPAY_ENABLED is
+  // off — nothing reads these tables until the flag is on (I1). Card data never touches the CRM (I4).
+  // File-read so local dev (better-sqlite3) and any partially-migrated prod D1 converge without a
+  // blanket `migrations apply`.
+  const autopayCardOnFileMigrationPath = path.join(process.cwd(), "migrations", "0099_autopay_card_on_file.sql");
+  if (fs.existsSync(autopayCardOnFileMigrationPath)) {
+    database.exec(fs.readFileSync(autopayCardOnFileMigrationPath, "utf8"));
+  }
 }
 
 function getD1Binding() {

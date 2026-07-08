@@ -1147,6 +1147,36 @@ recording).** All three carry the money-math + idempotency Fable gate.
 
 ## 13. Changelog
 
+### Rev 2.2 (Fable diff review of the build — REQUEST CHANGES applied) — 2026-07-08
+
+The money-grade diff review of the uncommitted build verified the core exactly-once machinery sound
+and returned REQUEST CHANGES on a bounded set of findings, all applied in the working tree:
+
+- **task-5 consent endpoints are portal server actions, not API routes.** The build delivered the
+  §4.1/§4.3 "turn autopay on/off" consent surface as Next.js **server actions** on the public,
+  portal-session-bound `/portal` page (`src/app/portal/page.tsx`, calling `setupAutopayConsent` /
+  `revokeAutopayConsent` directly), which is the single mutation path the portal UI actually uses. The
+  standalone `/api/portal/autopay/{setup,revoke}` routes were **dropped (MEDIUM-1)**: they were
+  login-walled dead surface (not in `isStudioPublicPath` / admin-proxy-auth exemptions, reachable by no
+  client), a duplicate second mutation path, and a drift-trap. Deleting them leaves one consent path and
+  less public surface. No unique logic was lost — the routes only wrapped the same two exported functions.
+- **MAJOR-1 — hard-cap bypass on the `aborted_ineligible` re-claim path** closed in all three layers:
+  `isClaimable`'s `aborted_ineligible` arm now requires the freshly-pinned payable `<= cap`; the existing
+  over-cap CAS to `skipped_capped` now also covers `aborted_ineligible` (alert-once semantics); and
+  §6.2a `recheckEligibility` gained a last-ditch `over_cap` abort. A fat-fingered large installment can
+  never be silently auto-drained even via re-qualification (§5.1 rule 7 upheld).
+- **MAJOR-2 — the `/api/cron/autopay-charge` route + split worker** were made reachable: the route is
+  added to the origin-guard `PUBLIC_API_PREFIXES` bypass (+ pinned in the drift test), and
+  `workers/autopay-charge.ts` + `wrangler.autopay-charge.jsonc` were added as a structural clone of the
+  sequence-runner cron pair (fail-loud `redirect:"manual"`, non-2xx throw, `CRON_SECRET` bearer, hourly
+  per §5.2), shipping UN-WIRED/dark like the systems-monitor worker.
+- Also applied: MEDIUM-2 (in-statement retry-pacing guards on the Layer-2 CAS), MEDIUM-3 (consent-version
+  drift WARN health signal, §7 MINOR-7), MEDIUM-4 (webhook-driven failures now run the §6.6 manual
+  fallback via a shared helper), and MINORs 1/2/4/5 (receipt dedupe rowcount gate; double-charge scan
+  extended to `needs_action`/`failed_terminal`; upcoming-notice skips installments already in a blocking
+  charge state; sync at-cap uses the row's pinned `max_attempts` and a sync success is counted under a
+  distinct `confirmedPendingWebhook` summary key, not `charged`).
+
 ### Rev 2 (Fable money-math review) — 2026-07-07
 
 **Verdict: REVISE → all findings applied.** The adversarial money-math review returned **REVISE** with

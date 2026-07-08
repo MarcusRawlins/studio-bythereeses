@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "reese-autopay-charge",
+  "main": "workers/autopay-charge.ts",
+  "account_id": "765e233f8635f207a8a3db4847efd3e9",
+  "compatibility_date": "2026-04-28",
+  // Hourly (§5.2): prompt due-date pickup + natural retry cadence via next_attempt_at; each
+  // installment is charged at most once (I3) regardless of how many ticks see it.
+  // SHIPS UN-WIRED/DARK: this worker is committed but NOT deployed/scheduled until Tyler's
+  // enablement runbook step (§7 dark-deploy step 3: register the trigger — with AUTOPAY_ENABLED off
+  // it records ok + skips, so wiring it early is safe and starts the heartbeat), and set CRON_SECRET.
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
+  "vars": {
+    // The workers.dev ORIGIN, NOT the studio.bythereeses.com proxy host. The proxy login-walls
+    // /api/cron/* (303 -> /admin/login 200); pointing here would silently drop every run. The origin
+    // accepts the bearer-authed POST directly (origin-guard PUBLIC_API_PREFIXES bypass).
+    "AUTOPAY_ENDPOINT": "https://reese-photography-crm.solitary-flower-c3ab.workers.dev/api/cron/autopay-charge"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

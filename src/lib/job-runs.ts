@@ -75,6 +75,9 @@ export type JobName =
   | "twilio-inbound"
   | "inbound-inquiry"
   | "backup-d1"
+  // Phase 13 — the autopay charge cron. Staleness-alertable, CRITICAL (a silently-dead autopay cron
+  // is a money-relevant outage). See REQUIRED_JOBS in system-health.ts.
+  | "autopay-charger"
   // A separate, NON-ALERTING key for pre-verification Stripe signature rejects — kept OUT of
   // the CRITICAL catalog so a scanner spamming bad signatures cannot grief the money-drift alert.
   | "stripe-webhook-rejected"

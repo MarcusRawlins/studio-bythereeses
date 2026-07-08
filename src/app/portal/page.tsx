@@ -1,3 +1,4 @@
+import { getActiveAutopayConsent, revokeAutopayConsent, setupAutopayConsent } from "@/lib/autopay-charge";
 import { clearPortalSession, getPortalProjectContext, requirePortalProject } from "@/lib/portal";
 import { formatDate, formatMoney } from "@/lib/format";
 import { CalendarDays, ClipboardList, ExternalLink, FileSignature, Images, Landmark, LockKeyhole, MapPin } from "lucide-react";
@@ -9,6 +10,68 @@ async function logoutAction() {
   "use server";
   await clearPortalSession();
   redirect("/portal");
+}
+
+// Phase 13 (§4.1/§4.3) — autopay consent controls. Server actions resolve the project ONLY from the
+// portal session (no IDOR). Rendered ONLY when AUTOPAY_ENABLED is on (I1) — dark by default.
+async function autopaySetupAction() {
+  "use server";
+  const ctx = await requirePortalProject();
+  if (!ctx) redirect("/portal");
+  const { url } = await setupAutopayConsent(ctx.project.id);
+  redirect(url); // Stripe-hosted card entry (mode=setup) — card data never touches the CRM (I4).
+}
+
+async function autopayRevokeAction() {
+  "use server";
+  const ctx = await requirePortalProject();
+  if (!ctx) redirect("/portal");
+  await revokeAutopayConsent(ctx.project.id);
+  redirect("/portal?autopay=off");
+}
+
+async function AutopaySection({ projectId, invoices }: { projectId: string; invoices: PortalProjectContext["invoices"] }) {
+  const consent = await getActiveAutopayConsent(projectId);
+  const hasFutureInstallment = invoices.some((invoice) =>
+    invoice.payments.some((payment) => payment.status !== "paid" && payment.status !== "waived" && (payment.openCents ?? 0) > 0),
+  );
+  if (!consent && !hasFutureInstallment) return null;
+
+  return (
+    <section className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">
+      <h2 className="text-lg font-semibold">Autopay</h2>
+      {consent ? (
+        <div className="mt-2 space-y-3">
+          <p className="text-sm leading-6 text-[var(--ink-muted)]">
+            Autopay is <strong>on</strong>. Your {consent.cardBrand ?? "card"} •••• {consent.cardLast4 ?? "••••"} will be charged for each
+            scheduled payment on its due date. You can turn it off anytime.
+          </p>
+          {!consent.isCurrentVersion && (
+            <p className="rounded-md border border-[var(--line)] bg-[#fff7ed] p-3 text-sm text-[var(--ink-muted)]">
+              Our autopay terms were updated. Please turn autopay off and back on to confirm the new terms.
+            </p>
+          )}
+          <form action={autopayRevokeAction}>
+            <button className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-4 py-2 text-sm font-semibold">
+              Turn off autopay
+            </button>
+          </form>
+        </div>
+      ) : (
+        <div className="mt-2 space-y-3">
+          <p className="text-sm leading-6 text-[var(--ink-muted)]">
+            Turn on autopay to have each scheduled payment charged automatically to a saved card on its due date. Your card is entered
+            securely on our payment processor and is never stored by the studio. You can turn autopay off anytime.
+          </p>
+          <form action={autopaySetupAction}>
+            <button className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white">
+              Turn on autopay
+            </button>
+          </form>
+        </div>
+      )}
+    </section>
+  );
 }
 
 export default async function PortalPage({
@@ -89,6 +152,8 @@ export function PortalProjectView({ data }: { data: PortalProjectContext }) {
             <div className="mt-2 text-xl font-semibold">{formatMoney(data.moneySummary.invoiceOpenCents)}</div>
           </div>
         </section>
+
+        {process.env.AUTOPAY_ENABLED === "1" && <AutopaySection projectId={data.project.id} invoices={data.invoices} />}
 
         <section className="grid gap-4 md:grid-cols-4">
           <div className="rounded-md border border-[var(--line)] bg-[var(--surface)] p-5">

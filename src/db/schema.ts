@@ -640,6 +640,66 @@ export const refundInitiations = sqliteTable("refund_initiations", {
   updatedAt: text("updated_at").notNull(),
 });
 
+// Phase 13 — autopay / card-on-file. Two additive, dark-until-flagged tables (migration 0099).
+// autopay_consents holds the card-on-file authorization (cus_/pm_ ids + display-only card fields —
+// card data NEVER touches the CRM, I4). autopay_charges is the exactly-once charge ledger + CAS state
+// machine (I3). Neither is read while AUTOPAY_ENABLED is off. Written only by the autopay engine /
+// consent routes / autopay webhook recorders — never from any agent surface.
+export const autopayConsents = sqliteTable("autopay_consents", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  clientId: text("client_id").references(() => clients.id, { onDelete: "set null" }),
+  stripeCustomerId: text("stripe_customer_id").notNull(), // cus_...
+  stripePaymentMethodId: text("stripe_payment_method_id"), // pm_... (NULL until SetupIntent succeeds)
+  cardBrand: text("card_brand"), // display-only (I4)
+  cardLast4: text("card_last4"), // display-only (I4) — NEVER a PAN/CVC
+  cardExpMonth: integer("card_exp_month"),
+  cardExpYear: integer("card_exp_year"),
+  consentVersion: text("consent_version").notNull(), // version the client agreed to (§4.2)
+  consentTextHash: text("consent_text_hash"), // hash of the exact rendered copy at grant time
+  status: text("status").notNull().default("pending"), // pending | active | revoked | failed
+  setupIntentId: text("setup_intent_id"), // seti_... (idempotency + reconcile join key)
+  consentedAt: text("consented_at"),
+  revokedAt: text("revoked_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+// The exactly-once charge ledger (I3 backbone). ONE real (dry_run=0) row per installment ever
+// (partial UNIQUE(invoice_payment_id) WHERE dry_run=0); dry-run audit rows sit outside it (a second
+// partial index bounds them to one upserted row per installment). Every money transition is a
+// single-statement CAS with a per-attempt claim token (D1 has no transactions).
+export const autopayCharges = sqliteTable("autopay_charges", {
+  id: text("id").primaryKey(), // our uuid; ALSO the base of the Stripe Idempotency-Key
+  invoicePaymentId: text("invoice_payment_id").notNull().references(() => invoicePayments.id, { onDelete: "cascade" }),
+  invoiceId: text("invoice_id").notNull(),
+  projectId: text("project_id").notNull(),
+  consentId: text("consent_id").notNull(), // which consent authorized it
+  stripeCustomerId: text("stripe_customer_id").notNull(),
+  stripePaymentMethodId: text("stripe_payment_method_id").notNull(), // pinned at claim (the card authorized)
+  amountCents: integer("amount_cents").notNull(), // pinned = invoicePaymentClientPayableOpenCents
+  serviceAmountCents: integer("service_amount_cents").notNull(), // pinned split (service)
+  clientFeeCents: integer("client_fee_cents").notNull(), // pinned split (fee)
+  currency: text("currency").notNull().default("usd"),
+  status: text("status").notNull().default("pending"),
+  dryRun: integer("dry_run").notNull().default(0), // 1 iff log_only would-charge audit row (no Stripe call ever)
+  attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull(),
+  idempotencyKey: text("idempotency_key"), // key for the CURRENT attempt (materialized in the claiming UPDATE)
+  claimToken: text("claim_token"), // per-attempt CAS ownership token
+  stripePaymentIntentId: text("stripe_payment_intent_id"), // pi_...
+  stripeStatus: text("stripe_status"),
+  declineCode: text("decline_code"),
+  lastError: text("last_error"), // sanitized ≤500
+  abortReason: text("abort_reason"), // why aborted_ineligible (session_complete | amount_drift | ...)
+  refundCandidatePi: text("refund_candidate_pi"), // a DIFFERENT pi on an already-paid installment (§6.5)
+  nextAttemptAt: text("next_attempt_at"), // earliest next tick may re-attempt (failed_retryable)
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  chargedAt: text("charged_at"),
+  reconciledAt: text("reconciled_at"),
+});
+
 // Phase 21 — observability heartbeat (job_runs) + immediate-alert dedupe (health_alerts).
 // NON-CANONICAL operational tables: nothing here moves money or mutates a business record.
 // job_runs is current-state (one upserted row per job); per-event history already lives in

@@ -72,6 +72,16 @@ export function invoicePaymentOpenCents(payment: InvoicePaymentOpenLike) {
   );
 }
 
+// The passed-through card fee estimate for a service subtotal. Extracted here (a leaf) so both the
+// manual checkout settle (stripe-checkout.ts) and the autopay recorder (autopay-webhook.ts) compute
+// the processing-fee estimate from ONE definition — never a forked copy (Phase 13 I7 / test 28).
+export function calculatedCardFeeAmountCents(subtotalCents: number, percentBps: number | null, fixedCents: number | null) {
+  const percent = percentBps ?? 290;
+  const fixed = fixedCents ?? 30;
+  if (subtotalCents <= 0 || percent <= 0) return 0;
+  return Math.round(subtotalCents * (percent / 10000)) + Math.max(fixed, 0);
+}
+
 export function invoicePaymentClientPayableOpenCents({
   payment,
   openServiceTotalCents,

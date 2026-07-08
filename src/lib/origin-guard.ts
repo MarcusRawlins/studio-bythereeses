@@ -28,6 +28,13 @@ const PUBLIC_API_PREFIXES = [
   // canonical mutation (identical trust shape to /api/cron/sequences).
   "/api/cron/systems-monitor",
   "/api/cron/heartbeat",
+  // Phase 13: the autopay-charge cron (§5.2) reaches the app Worker origin DIRECTLY over
+  // *.workers.dev, bearer-authed on CRON_SECRET (fallback SCHEDULER_LINK_SECRET) — fail-closed
+  // 503 unset / timing-safe 401 wrong — so the Pages proxy's /api/cron/* login-wall (303 ->
+  // /admin/login 200) can't silently drop every run. NOT an unauthenticated mutation endpoint:
+  // the bearer secret at the origin is the trust boundary, and the engine no-ops entirely while
+  // AUTOPAY_ENABLED is dark (identical trust shape to /api/cron/sequences).
+  "/api/cron/autopay-charge",
   "/api/proposal/",
   "/api/scheduler/bookings",
   "/api/stripe/webhook",

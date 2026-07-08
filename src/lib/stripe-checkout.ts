@@ -1,9 +1,10 @@
 import { db } from "@/db/client";
 import { clients, invoicePayments, invoices, projectParticipants, projects } from "@/db/schema";
 import { logActivity } from "@/lib/activity";
-import { invoicePaymentClientPayableOpenCents, invoicePaymentOpenCents } from "@/lib/invoice-balances";
+import { calculatedCardFeeAmountCents, invoicePaymentClientPayableOpenCents, invoicePaymentOpenCents } from "@/lib/invoice-balances";
 import { autoAdvanceProjectStageForRetainerPayment, reconciledInvoicePaymentStatus } from "@/lib/sales";
 import { dispatchStripeRefundOrDisputeEvent } from "@/lib/stripe-refunds";
+import { dispatchAutopayWebhookEvent } from "@/lib/autopay-webhook";
 import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -84,7 +85,11 @@ async function createStripeCheckoutSession(params: URLSearchParams) {
 // return URLs than the requested client override. A read (no money). Returns null on any failure —
 // callers treat "cannot confirm a match" conservatively (expire + re-mint) so the client is never
 // dropped on the /portal lock wall.
-async function fetchStripeCheckoutSessionReturnUrls(sessionId: string) {
+// Phase 13 (build caution c): exported so the autopay engine's §6.2b cross-channel resolution can
+// GET a live manual-checkout session's status without re-implementing the raw-fetch shape. Returns
+// null on ANY failure (network throw / non-OK) — the autopay caller treats a null with a non-null
+// session id as THE READ FAILED and FAILS CLOSED (does NOT charge, R-1).
+export async function fetchStripeCheckoutSessionReturnUrls(sessionId: string) {
   try {
     const response = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
       method: "GET",
@@ -105,11 +110,37 @@ async function fetchStripeCheckoutSessionReturnUrls(sessionId: string) {
   }
 }
 
+// Phase 13 (build caution c, R-7): a FULL Checkout Session GET whose complete object can DRIVE
+// settlement (the return-urls helper's {successUrl,cancelUrl,status} shape cannot — settle needs
+// id / metadata / amount_total / payment_status / status / payment_intent). Used by §6.2b's
+// synchronous settle when the manual link is found `complete`. Returns null on any failure — the
+// caller then leaves the delayed webhook as the recorder of record (a §6.4 tripwire covers the gap).
+export async function fetchStripeCheckoutSessionForSettle(sessionId: string): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${stripeSecretKey()}`,
+        "stripe-version": STRIPE_API_VERSION,
+      },
+    });
+    if (!response.ok) return null;
+    const body = stripeSessionResponseBody(await response.json().catch(() => ({})));
+    return stripeString(body.id) ? body : null;
+  } catch {
+    return null;
+  }
+}
+
 // Phase 12 (§4.3c): expire a stored session whose return URLs are WRONG for the client surface.
 // Stripe sessions are immutable, so expiring is the only way to make the old one uncompletable —
 // guaranteeing the subsequent re-mint cannot leave TWO payable sessions live. Expiring moves NO
 // money (it renders a session uncompletable — the opposite of a charge).
-async function expireStripeCheckoutSessionById(sessionId: string) {
+// Phase 13 (build caution c): exported for the autopay engine's §6.2b — a `status === "open"` manual
+// session is expired FIRST (so the hosted tab becomes uncompletable) before the off-session PI POST.
+// THROWS on non-OK — the autopay caller treats an expire rejection as a SIGNAL (re-GET; abort+settle
+// if now complete; else no POST this tick), never as benign noise (R-3).
+export async function expireStripeCheckoutSessionById(sessionId: string) {
   const response = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}/expire`, {
     method: "POST",
     headers: {
@@ -204,13 +235,6 @@ function checkoutSessionPaymentIntentId(session: Record<string, unknown>) {
   if (typeof paymentIntent === "string") return paymentIntent;
   if (paymentIntent && typeof paymentIntent === "object") return stripeString((paymentIntent as Record<string, unknown>).id) || null;
   return null;
-}
-
-function calculatedCardFeeAmountCents(subtotalCents: number, percentBps: number | null, fixedCents: number | null) {
-  const percent = percentBps ?? 290;
-  const fixed = fixedCents ?? 30;
-  if (subtotalCents <= 0 || percent <= 0) return 0;
-  return Math.round(subtotalCents * (percent / 10000)) + Math.max(fixed, 0);
 }
 
 export async function createInvoicePaymentCheckoutSession(
@@ -709,6 +733,14 @@ export async function handleStripeCheckoutWebhook(rawBody: string, signatureHead
     && eventType !== "checkout.session.async_payment_succeeded"
     && eventType !== "checkout.session.expired"
   ) {
+    // Phase 13: route the 4 autopay event types (setup_intent.*, payment_intent.succeeded/
+    // payment_failed) to the autopay recorders FIRST. dispatchAutopayWebhookEvent OWNS those types
+    // (returning an ignored result for a non-autopay PI, test 33) and returns null for every other
+    // type, so refund/dispute events still fall through to the Phase 9a dispatcher below. No new
+    // webhook endpoint, no widened bypass list (I5).
+    const autopayResult = await dispatchAutopayWebhookEvent(event, eventType);
+    if (autopayResult) return autopayResult;
+
     // Phase 9a: reuse the already-verified webhook path. After the existing checkout
     // branch, delegate refund/dispute/chargeback events to the sibling recording module
     // (which handles event-id dedupe + convergent per-object writes). The checkout

@@ -70,7 +70,8 @@ The following API groups support the app but are not directly user-facing screen
 | `/api/scheduler/*` | Public booking calendar endpoints (check availability, create/reschedule/cancel bookings) |
 | `/api/questionnaires/*` | Client questionnaire submission and response endpoints |
 | `/api/proposal/*` | Proposal token verification and client experience endpoints |
-| `/api/portal/*` | Portal magic-link requests and session management |
+| `/api/portal/*` | Portal magic-link requests and session management (autopay consent on/off is NOT here — it is a `/portal` server action, Phase 13) |
+| `/api/cron/*` | Bearer-authed cron endpoints reached directly over the `*.workers.dev` origin by split workers: `scheduler-reminders`, `sequences`, `systems-monitor`, `heartbeat`, and `autopay-charge` (Phase 13 — hourly off-session installment auto-charge; dark until enabled) |
 | `/api/assets/*` | Secure token-authenticated asset serving (photos, PDFs) |
 | `/api/google/*` | Google OAuth callbacks for admin login |
 | `/api/twilio/*` | Webhook endpoints for inbound SMS and delivery status |
