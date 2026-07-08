@@ -171,17 +171,18 @@ Columns (names illustrative; match repo snake_case + the canon-guard trigger sty
 
 ### 3.2 `autopay_charges` — the exactly-once charge ledger (I3 backbone)
 
-**One *real* (`dry_run = 0`) row per installment, ever** (dry-run audit rows are unbounded and sit
-outside the partial unique index — §3.2 `dry_run`). This table IS the idempotency/CAS state machine.
+**One *real* (`dry_run = 0`) row per installment, ever** (dry-run audit rows sit outside that
+partial unique index and are themselves bounded to **one upserted row per installment** by a second
+partial index — §3.2 `dry_run`, R-8). This table IS the idempotency/CAS state machine.
 
 - `id TEXT PRIMARY KEY` — also the base of the Stripe idempotency key (§6.3).
 - `invoice_payment_id TEXT NOT NULL` (FK → `invoice_payments.id`).
   **`UNIQUE(invoice_payment_id) WHERE dry_run = 0`** — a **PARTIAL** unique index (SQLite/D1
   support partial indexes). The hard guarantee that an installment gets **at most one** *real*
   (non-dry-run) charge ledger row (I3 layer 1). The partial predicate is load-bearing: it keeps
-  `dry_run = 1` rows entirely **outside** the exactly-once ledger so `log_only` audit rows can be
-  written freely (potentially many, one per observed tick) and can **never** collide with, block, or
-  be promoted into the single real row an eventual `live` charge inserts. Claim (live path) =
+  `dry_run = 1` rows entirely **outside** the exactly-once ledger so the `log_only` audit row
+  (bounded to one per installment, upserted per observation — R-8) can **never** collide with,
+  block, or be promoted into the single real row an eventual `live` charge inserts. Claim (live path) =
   `INSERT … (dry_run = 0) ON CONFLICT DO NOTHING` (returns true iff this cron tick created it — the
   `insertLedger` pattern, `sequences.ts:324-346`). **A dry-run row is never on the conflict target**,
   so it never suppresses the real INSERT. (This resolves the rev-1 incoherence where a total
@@ -1047,7 +1048,8 @@ prints after "Compiled successfully" and exits 1), `npm run lint` clean, then `n
     handler no-ops: no `autopay_charges` write, and it is recorded as **neither** a `stripe-webhook`
     failure **nor** an autopay success (heartbeat unchanged).
 34. **`log_only` cycle then live flip with pre-existing dry-run rows (BLOCKER-2, test (d)).** Run a
-    full `log_only` cycle (writes one-or-more `dry_run=1` rows for installment P), then flip to `live`:
+    full `log_only` cycle (writes **exactly one** upserted `dry_run=1` row for installment P — R-8),
+    then flip to `live`:
     the live tick INSERTs **exactly one** `dry_run=0` row for P (partial index does not collide),
     issues **exactly one** real charge, and **zero** `dry_run=1` rows are mutated/claimed/promoted.
 35. **Re-consent while an active consent exists (M6, test (e)).** A second `setup_intent.succeeded` for
