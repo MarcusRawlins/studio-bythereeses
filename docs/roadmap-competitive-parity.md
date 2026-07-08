@@ -22,11 +22,19 @@ deploy **dark** → Tyler enables.
   predicate; 9b now imports it, behavior-identical). Spec Fable-gated ×2 (caught a concurrent
   double-charge race → fixed with a `link_ready` CAS + canonical-URL convergence + expire-and-remint),
   code Fable-gated ×1 (APPROVE + 5 minors fixed). Enable `UNIFIED_SIGN_PAY=1` when ready.
-- **Phase 13 — Autopay / card-on-file.** MISSING today: every installment is a manual checkout
-  link → dunning. Add a Stripe Customer + SetupIntent (card on file) + **off-session auto-charge**
-  of scheduled installments. ⚠️ **MONEY MOVEMENT** (auto-charges a real card) — build dark behind a
-  flag; enable + first auto-charge need Tyler's explicit go + a money-math/idempotency Fable gate,
-  exactly like Phase 9b. Highest dunning-reduction payoff.
+- **Phase 13 — Autopay / card-on-file.** ✅ **BUILT + five-round review chain + pushed dark
+  2026-07-08** (commit `f96bbe2`) behind `AUTOPAY_ENABLED` (off) with `AUTOPAY_CHARGE_MODE`
+  defaulting `log_only`. Stripe Customer + Checkout `mode=setup` consent (webhook-confirmed only)
+  + off-session auto-charge of due installments via a four-layer exactly-once CAS engine
+  (partial-unique ledger, token claim with in-statement idempotency key, post-claim re-verification
+  incl. amount equality, cross-channel resolution against the manual checkout link). Hard per-charge
+  cap enforced at three layers; bounded retries with SCA/decline manual-link fallback; webhook
+  recording reuses the settle convergence; card data never touches the CRM. Migration `0099`;
+  cron Worker `wrangler.autopay-charge.jsonc` ships un-wired. Review chain: spec REVISE (2
+  BLOCKERs) → rev 2 → verification REVISE (2 MAJORs in the fixes) → rev 2.1 APPROVED FOR BUILD →
+  diff review REQUEST CHANGES (cap bypass, unreachable cron) → fixed → **APPROVED FOR MERGE**.
+  ⚠️ **MONEY GATE UNCHANGED:** enablement runbook (spec §7) = deploy dark → flag on `log_only` →
+  Tyler observes a full dry cycle → **explicit go** → `live` with low cap + pilot allowlist.
 
 ### Tier 2 — high value
 - **Phase 14 — Two-way per-project email.** ✅ **BUILT + Fable-reviewed + pushed dark 2026-07-06**

@@ -124,13 +124,21 @@ The authoritative, always-current list is `docs/roadmap-competitive-parity.md`. 
   `isInquiryIntakeEnabled`, NOT the `=== "1"` idiom used by the monitor/finance/portal flags — flag
   off ⇒ all three routes 404). See `docs/specs/phase-19-embeddable-lead-form.md`.
 
-**Not yet built (parity backlog):** 13 autopay (money-gated), 16 mini-sessions (business-dependent),
-17 kanban board, 18 AI daily brief, 20 structured meeting notes.
+**Also built dark since (per-entry runbooks in `docs/roadmap-competitive-parity.md`):** 17 kanban
+(`PROJECTS_BOARD_VIEW`), 18 AI daily brief (`DAILY_BRIEF_ENABLED`, mig 0096), 20 meeting notes
+(`MEETING_NOTES_ENABLED`, mig 0098), 24 Resend bounce/complaint suppression webhook
+(`RESEND_WEBHOOK_SECRET`, no migration), **13 autopay/card-on-file (`AUTOPAY_ENABLED` +
+`AUTOPAY_CHARGE_MODE=log_only` default, mig 0099 — MONEY-GATED: five-round review chain; the first
+live charge waits for Tyler's explicit go per spec §7)**, 25 email deliverability hardening
+(`SEQUENCES_DAILY_SEND_CAP_ENABLED`, no migration; DMARC check now in config-preflight).
 
-**Confidence backlog:** golden-path end-to-end test (**built** — `src/lib/golden-path.e2e.test.ts`,
-full chain wired, no gaps found), config-verification preflight (**built** —
-`scripts/config-preflight.mjs` / `npm run config:preflight`, see `docs/deploy-next.md` §7), staged
-log→enforce enablement, email deliverability hardening.
+**Not yet built (parity backlog):** 16 mini-sessions only — business-dependent; confirm Tyler runs
+mini-session days before building.
+
+**Confidence backlog: COMPLETE.** Golden-path E2E (**built**), config-verification preflight
+(**built**, now incl. the Phase 25 DMARC DoH check), email deliverability hardening (**built dark**,
+Phase 25). Staged log→enforce enablement is realized as per-feature runbook practice (log_only
+modes, one-flag-at-a-time enablement), not a separate build item.
 
 ---
 
