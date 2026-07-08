@@ -18,6 +18,7 @@ import { logActivity } from "@/lib/activity";
 import { isEmailSuppressed, sendSequenceEmail, type SequenceEmailResult } from "@/lib/email";
 import { formatMoney } from "@/lib/format";
 import { invoiceClientPayableBalanceCents } from "@/lib/invoice-balances";
+import { recordJobRun } from "@/lib/job-runs";
 import { createProjectCommunicationFromSystem } from "@/lib/project-communications";
 import { reconciledInvoicePaymentStatus } from "@/lib/sales";
 import { and, asc, desc, eq, gte, inArray, isNull, ne, or } from "drizzle-orm";
@@ -64,6 +65,20 @@ function maxPerClientPerWeek(): number {
 
 function maxAttempts(): number {
   return intEnv("SEQUENCES_MAX_ATTEMPTS", 2);
+}
+
+// Phase 25 (§3.4) — daily send-volume backstop. Off by default (I4): reads
+// `=== "1"` exactly like every sibling SEQUENCES_* flag's flagOn() idiom above.
+// A blunt, WARN-only circuit breaker against a misconfiguration (or a future
+// refactor) that defeats the per-client weekly cap above — NOT a precise,
+// provider-enforced ceiling (MEDIUM 4: the count-then-claim sequence is not
+// atomic; two overlapping runs can each land under the cap and both send).
+function dailySendCapEnabled(): boolean {
+  return flagOn("SEQUENCES_DAILY_SEND_CAP_ENABLED");
+}
+
+function dailySendCap(): number {
+  return intEnv("SEQUENCES_DAILY_SEND_CAP", 50);
 }
 
 /** A sequence email carries a one-click unsubscribe link signed by
@@ -373,6 +388,26 @@ async function overFrequencyCap(clientId: string | null, now: Date): Promise<boo
   return count >= cap;
 }
 
+// Phase 25 (§3.4, rev 2 MAJOR 1) — the GLOBAL daily send-volume backstop, only ever
+// consulted when dailySendCapEnabled() is true (I4). Mirrors overFrequencyCap's query
+// *shape* above (same table, same `status IN (done, claimed)` filter, same firedAt-
+// cutoff idiom) but NOT its window: overFrequencyCap counts a trailing 7-DAY window
+// (per-client); this counts a trailing 24-HOUR window (global, across every client),
+// sized to runDueSequences' once-daily cadence. `claimed` MUST count — it is
+// TERMINAL-UNKNOWN ("a send may or may not have happened", src/db/schema.ts's own
+// sequence_sends comment), exactly the maybe-reached-an-inbox risk this backstop
+// exists to bound, not exclude (rev 1's bug).
+async function dailySendCapTripped(now: Date): Promise<{ tripped: boolean; count: number; cap: number }> {
+  const cap = dailySendCap();
+  const cutoff = addDays(now, -1).toISOString();
+  const rows = await db
+    .select({ status: sequenceSends.status })
+    .from(sequenceSends)
+    .where(and(eq(sequenceSends.mode, "auto_send"), gte(sequenceSends.firedAt, cutoff)));
+  const count = rows.filter((row) => row.status === "done" || row.status === "claimed").length;
+  return { tripped: count >= cap, count, cap };
+}
+
 // -------------------------- Pre-event conditions ---------------------------
 
 async function evaluateCondition(condition: StepCondition, projectId: string): Promise<boolean> {
@@ -464,6 +499,9 @@ type RunSummary = {
   failed: number;
   stuck: number;
   checked: number;
+  // Phase 25 (§3.4) — count of auto-send attempts (fresh OR retry) blocked this run by the
+  // global daily send cap. Distinct from cappedSkips (the per-client weekly cap above).
+  dailyCapSkips: number;
 };
 
 async function enroll(
@@ -609,6 +647,17 @@ async function autoSendStep(
   // (no claim, no send); the step re-evaluates once the secret is set.
   if (!unsubscribeConfigured()) return;
 
+  // Phase 25 (§3.4, I5) — the daily send cap, only when enabled (I4). Fails toward
+  // under-send exactly like the unsubscribe-secret gate above: no claim, no send; the
+  // step stays due and re-evaluates next run.
+  if (dailySendCapEnabled()) {
+    const capState = await dailySendCapTripped(now);
+    if (capState.tripped) {
+      summary.dailyCapSkips += 1;
+      return;
+    }
+  }
+
   // CLAIM-FIRST: own the dedupeKey BEFORE the send so a crash/retry can never
   // double-send. If we did not insert (conflict) another run already owns it.
   const claimed = await insertLedger({
@@ -719,10 +768,28 @@ async function retryFailedSends(now: Date, summary: RunSummary): Promise<void> {
     const ctx = await buildContext(seq, enrollment, now);
     if (!ctx) continue;
 
+    // Phase 25 (§3.4, rev 2 MAJOR 1, I5) — the daily send cap also blocks a retry
+    // dispatch, only when enabled (I4). Re-read fresh on each iteration so a burst of
+    // eligible retries cannot ride past the cap by counting stale (MAJOR 1's rev-1 bug):
+    // the row stays "failed" (retryable next run), never claimed while capped.
+    if (dailySendCapEnabled()) {
+      const capState = await dailySendCapTripped(now);
+      if (capState.tripped) {
+        summary.dailyCapSkips += 1;
+        continue;
+      }
+    }
+
     // B2: compare-and-swap claim BEFORE sending. Only one overlapping run wins.
+    // Phase 25 (rev 2 MAJOR 1) — also refresh firedAt to "now": the retry eligibility
+    // gate above requires firedAt OLDER than the 24h backoff cutoff, so leaving firedAt
+    // untouched left every retry dispatch's ledger row permanently OUTSIDE the daily
+    // cap's trailing-24h count window — checked against the cap, never consuming it.
+    // firedAt now consistently means "last attempt time" across the per-client cap, the
+    // stuck-send cutoff (surfaceStuckSends), and this daily cap.
     const claimed = await db
       .update(sequenceSends)
-      .set({ status: "claimed", attempts: row.attempts + 1 })
+      .set({ status: "claimed", attempts: row.attempts + 1, firedAt: now.toISOString() })
       .where(and(eq(sequenceSends.id, row.id), eq(sequenceSends.status, "failed")))
       .returning({ id: sequenceSends.id });
     if (claimed.length === 0) continue; // another overlapping run already claimed it
@@ -923,6 +990,7 @@ export async function runDueSequences(now: Date = new Date()): Promise<RunSummar
     failed: 0,
     stuck: 0,
     checked: 0,
+    dailyCapSkips: 0,
   };
 
   await surfaceStuckSends(now, summary);
@@ -946,6 +1014,25 @@ export async function runDueSequences(now: Date = new Date()): Promise<RunSummar
   }
 
   await retryFailedSends(now, summary);
+
+  // Phase 25 (§3.4, I6, rev 2 MINOR 8) — the cap-tripped heartbeat, gated by the SAME
+  // flag as the cap check itself. With the flag off this block never runs at all — no
+  // new job_runs row of this JobName is ever written, in either direction. This is what
+  // makes I4's "byte-for-byte no-op while off" claim hold: an unconditional ok:true reset
+  // would itself be a behavior change on a dark run (a new row every day), and would
+  // falsely surface "configured" on /system-status before Tyler ever flips the flag.
+  if (dailySendCapEnabled()) {
+    if (summary.dailyCapSkips > 0) {
+      const capState = await dailySendCapTripped(now);
+      await recordJobRun(
+        "sequences-daily-cap-tripped",
+        false,
+        `${capState.count} auto-sends in the trailing 24h reached the SEQUENCES_DAILY_SEND_CAP of ${capState.cap}`,
+      );
+    } else {
+      await recordJobRun("sequences-daily-cap-tripped", true);
+    }
+  }
 
   return summary;
 }

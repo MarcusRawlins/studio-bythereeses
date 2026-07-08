@@ -244,6 +244,144 @@ export function evaluateResendDomains(body, { expectedDomain }) {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. DMARC (Phase 25, §3.1) — a live, read-only DNS-over-HTTPS check. Unlike the
+//    Resend domain check above (Resend's own opinion on SPF+DKIM), DMARC lives at
+//    a fixed, ESP-agnostic location (_dmarc.<apex>) and is NOT reported by Resend's
+//    API at all — this is the only place in the pipeline that verifies it exists.
+//    Deliberately NOT SPF/DKIM: those record names are Resend-account-specific and
+//    not guessable from this repo (see docs/email-deliverability.md §3.1-§3.2);
+//    a hardcoded guess would produce a false FAIL the moment Resend's naming
+//    convention shifts. Runs UNCONDITIONALLY (no API key needed — DNS is public);
+//    a missing/malformed record renders FAIL (not SKIP) because sending is already
+//    live today — see the MEDIUM 6 discussion in docs/specs/
+//    phase-25-email-deliverability-hardening.md §3.1.
+// ---------------------------------------------------------------------------
+
+// Pure: given the raw TXT record strings found at _dmarc.<domain> (already
+// quote-stripped / multi-string-concatenated by the caller), decide pass/fail.
+// `pass` is about presence + parseability, never about policy strictness
+// (p=none is a perfectly valid PASS — moving to quarantine/reject is Tyler's
+// own multi-week-paced decision, never something this script fails on).
+export function evaluateDmarcRecord(txtRecords, { domain } = {}) {
+  const records = Array.isArray(txtRecords) ? txtRecords : [];
+  const location = domain ? `_dmarc.${domain}` : "_dmarc.<domain>";
+  const dmarcRecords = records.filter((record) => typeof record === "string" && record.trim().startsWith("v=DMARC1"));
+
+  if (dmarcRecords.length === 0) {
+    return { pass: false, policy: null, hasRua: false, detail: `No DMARC record found at ${location} (expected a "v=DMARC1; p=...;" TXT record).` };
+  }
+  // RFC 7489 §6.6.3 — more than one DMARC record at the same name means NO effective
+  // policy at all; receivers must treat it as if no record existed.
+  if (dmarcRecords.length > 1) {
+    return {
+      pass: false,
+      policy: null,
+      hasRua: false,
+      detail: `Multiple DMARC records found at ${location} (${dmarcRecords.length}); RFC 7489 treats this as no policy — remove the duplicate.`,
+    };
+  }
+
+  const tags = parseDmarcTags(dmarcRecords[0]);
+  const policy = tags.get("p") || null;
+  const hasRua = tags.has("rua") && Boolean(tags.get("rua"));
+  if (!policy) {
+    return { pass: false, policy: null, hasRua, detail: `DMARC record found at ${location} but is missing the required p= tag.` };
+  }
+  return {
+    pass: true,
+    policy,
+    hasRua,
+    detail: `DMARC record found at ${location} (p=${policy}${hasRua ? ", rua configured" : ", no rua configured"}).`,
+  };
+}
+
+function parseDmarcTags(record) {
+  const tags = new Map();
+  for (const part of record.split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex === -1) continue;
+    const key = trimmed.slice(0, eqIndex).trim().toLowerCase();
+    const value = trimmed.slice(eqIndex + 1).trim();
+    if (key) tags.set(key, value);
+  }
+  return tags;
+}
+
+// Strip DoH's surrounding literal quotes from one TXT answer string, e.g.
+// `"v=DMARC1; p=none"` -> `v=DMARC1; p=none`. A single TXT record can be split by
+// the resolver across multiple quoted character-strings within ONE Answer entry's
+// `data` field (e.g. `"v=DMARC1; " "p=none; rua=mailto:a@b.com"`) — concatenate all
+// such pieces into one logical record rather than treating them as separate/
+// duplicate records (that would spuriously trip the new duplicate-record FAIL).
+function unwrapDohTxtData(data) {
+  if (typeof data !== "string") return "";
+  const quoted = data.match(/"(?:[^"\\]|\\.)*"/g);
+  if (quoted && quoted.length > 0) {
+    return quoted.map((piece) => piece.slice(1, -1)).join("");
+  }
+  return data.trim();
+}
+
+// A DNS type code/name that is NOT TXT (e.g. a stray CNAME row, type 5) must be
+// skipped before scanning for v=DMARC1. An entry with no `type` field at all is
+// treated as a TXT candidate (Google's DoH JSON always includes it for a real
+// query, but test fixtures may omit it for brevity).
+function isTxtAnswerEntry(entry) {
+  if (!entry || typeof entry !== "object") return false;
+  const { type } = entry;
+  if (type === undefined || type === null) return true;
+  return type === 16 || type === "TXT";
+}
+
+// Extract the logical TXT record strings from a Google DoH JSON response body.
+// An absent/empty Answer array (NXDOMAIN / no TXT records at that name) is a
+// valid, well-formed "no DMARC record" response — returns [] (never throws), which
+// evaluateDmarcRecord already renders as the missing-record FAIL, not a network error.
+function extractDmarcTxtRecords(body) {
+  const answers = Array.isArray(body?.Answer) ? body.Answer : [];
+  return answers
+    .filter(isTxtAnswerEntry)
+    .map((entry) => unwrapDohTxtData(entry.data))
+    .filter((value) => value.length > 0);
+}
+
+// checkDmarc (MINOR 11) is a deliberate, single deviation from its unexported
+// siblings checkStripe/checkResend/checkTwilio — it MUST be exported so
+// scripts/config-preflight.test.mjs can drive it directly without going through
+// main()'s full env/report plumbing. Don't "fix" this asymmetry either way.
+export async function checkDmarc(env, deps = defaultDeps) {
+  const domain = resendSendingDomain(env);
+  if (!domain) {
+    return [{ section: "DNS (DMARC)", name: "dmarc", status: "FAIL", detail: "Could not determine a sending domain from RESEND_FROM_EMAIL." }];
+  }
+  try {
+    const response = await deps.fetchJson(`https://dns.google/resolve?name=${encodeURIComponent(`_dmarc.${domain}`)}&type=TXT`);
+    if (!response.ok) {
+      return [{ section: "DNS (DMARC)", name: "dmarc", status: "FAIL", detail: `DNS-over-HTTPS query returned HTTP ${response.status}.` }];
+    }
+    // Diff-review Finding 1: Google DoH reports an UPSTREAM resolver failure as HTTP 200 with a
+    // non-zero RCODE in the body's `Status` field (e.g. 2 = SERVFAIL) and no Answer — which would
+    // otherwise flow into the missing-record path and render the false "No DMARC record found"
+    // claim the spec explicitly rules out for resolver outages. Status 0 (NOERROR) and 3 (NXDOMAIN
+    // — a genuine "no such record") are the only shapes that may proceed to record evaluation.
+    const rcode = typeof response.json?.Status === "number" ? response.json.Status : 0;
+    if (rcode !== 0 && rcode !== 3) {
+      return [{
+        section: "DNS (DMARC)", name: "dmarc", status: "FAIL",
+        detail: `DNS resolver error (DoH Status ${rcode}) querying _dmarc.${domain} — transient upstream DNS trouble, NOT a missing record; re-run before touching DNS.`,
+      }];
+    }
+    const txtRecords = extractDmarcTxtRecords(response.json);
+    const evaluation = evaluateDmarcRecord(txtRecords, { domain });
+    return [{ section: "DNS (DMARC)", name: "dmarc", status: evaluation.pass ? "PASS" : "FAIL", detail: evaluation.detail }];
+  } catch (error) {
+    return [{ section: "DNS (DMARC)", name: "dmarc", status: "FAIL", detail: `Network error: ${errorMessage(error)}` }];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 5. Twilio — GET account info (key validity + account active) + optionally
 //    assert the configured TWILIO_FROM_NUMBER exists among incoming numbers.
 // ---------------------------------------------------------------------------
@@ -607,6 +745,9 @@ async function main() {
   const checks = [
     checkStripe(env),
     checkResend(env),
+    // Phase 25 — DMARC runs unconditionally (no API key needed; DNS is public), unlike
+    // every check above, each of which is individually skippable on a missing secret.
+    checkDmarc(env),
     checkTwilio(env),
     checkDeadman(env),
   ];

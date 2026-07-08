@@ -12,7 +12,7 @@ import { AUTOPAY_CONSENT_VERSION } from "@/lib/autopay-consent";
 import { autopayEnabled } from "@/lib/autopay-flags";
 import { readJobRuns } from "@/lib/job-runs";
 import { getAgentFinanceReport } from "@/lib/agent-finance";
-import { and, eq, inArray, lt, ne } from "drizzle-orm";
+import { and, eq, gte, inArray, lt, ne } from "drizzle-orm";
 
 export type HealthSeverity = "ok" | "info" | "warn" | "critical";
 
@@ -138,6 +138,12 @@ const WEBHOOK_JOBS: Record<string, WebhookJobConfig> = {
   // Phase 24 (CR-6) — WARN-only, mirrors twilio-inbound/inbound-inquiry: a failing bounce/
   // complaint webhook degrades deliverability hygiene, not money state, so it should never page.
   "resend-webhook": { label: "Resend bounce/complaint webhook", warnFailures: 3, criticalFailures: Number.POSITIVE_INFINITY },
+  // Phase 25 (§3.4, I6-I7) — the sequences daily send-cap circuit breaker heartbeat. WARN-only,
+  // never CRITICAL: a tripped cap means the backstop WORKED, not that anything is broken. Only
+  // ever WRITTEN (either ok:true or ok:false) when SEQUENCES_DAILY_SEND_CAP_ENABLED === "1"
+  // (rev 2 MINOR 8) — with the flag off, no row of this JobName ever exists, so this reuses the
+  // missing-row branch below ("info"/not-yet-configured) indefinitely, not just on a fresh install.
+  "sequences-daily-cap-tripped": { label: "Sequences daily send cap", warnFailures: 1, criticalFailures: Number.POSITIVE_INFINITY },
 };
 
 // Stripe signature-misconfiguration signal (FIX 4). A rotated/wrong STRIPE_WEBHOOK_SECRET makes
@@ -156,6 +162,12 @@ const STRIPE_WEBHOOK_SUCCESS_FRESH_MS = 24 * HOUR_MS; // a success this recent m
 const RESEND_REJECT_FRESH_MS = 6 * HOUR_MS;
 const RESEND_REJECT_MIN_COUNT = 2;
 const RESEND_WEBHOOK_SUCCESS_FRESH_MS = 24 * HOUR_MS;
+
+// Phase 25 (§3.5) — trailing-7-day bounce/complaint COUNT thresholds (not environment-
+// configurable; there's no operational reason Tyler would need to retune these per-deploy).
+const EMAIL_SUPPRESSION_WINDOW_MS = 7 * 24 * HOUR_MS;
+const EMAIL_INCIDENT_WARN_COUNT = 5;
+const EMAIL_COMPLAINT_WARN_COUNT = 1;
 
 const BACKUP_STALE_MS = 36 * HOUR_MS; // matches deploy:preflight's <=36h D1 check
 const SEQUENCE_STUCK_MS = 2 * HOUR_MS; // a claimed send older than a run interval
@@ -278,6 +290,15 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
 
   // --- Event-driven webhook/inbound handlers (error-rate) ----------------------------------
   for (const [name, cfg] of Object.entries(WEBHOOK_JOBS)) {
+    // Phase 25 (diff-review Finding 2): the cap-tripped counter's self-reset (the next clean day's
+    // ok:true) only runs while SEQUENCES_DAILY_SEND_CAP_ENABLED is on — so if Tyler trips the cap
+    // and then turns the flag OFF while investigating, the last row stays ok:false forever and this
+    // loop would WARN indefinitely about a backstop that is no longer active. Gate this one entry's
+    // evaluation on the flag (precedent: the resend-webhook-signature WARN gates on its secret
+    // being set) — flag off ⇒ the signal is absent entirely, matching the feature being off.
+    if (name === "sequences-daily-cap-tripped" && process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED !== "1") {
+      continue;
+    }
     const row = jobByName.get(name);
     if (!row) {
       signals.push({
@@ -386,6 +407,39 @@ export async function computeSystemHealth(options?: ComputeHealthOptions): Promi
     });
   } catch {
     // Best-effort; a read failure here must not affect any other signal.
+  }
+
+  // --- Email bounce/complaint rate, trailing 7 days (Phase 25 §3.5 — WARN-only) -------------
+  // Additive alongside the lifetime INFO signal above (Phase 24, untouched by this phase). A
+  // COUNT, not a true send-volume rate: no reliable cross-sender send denominator exists yet
+  // (sequence auto-sends, admin-approved sequence-draft sends, project-thread sends, and
+  // un-ledgered transactional booking/portal mail) — building one is a real project of its own,
+  // out of scope here. Also undercounts INCIDENTS (not just the rate): email_suppressions writes
+  // are INSERT ... ON CONFLICT DO NOTHING keyed on the PK `email` (resend-webhook.ts's
+  // insertSuppression, "earliest-writer-wins") — a second bounce/complaint for an
+  // already-suppressed address inserts no new row and is not counted. Best-effort, own try/catch
+  // (a read failure here must not affect any other signal, nor the lifetime signal above), WARN-
+  // at-most (I7), never CRITICAL, no alertKey.
+  try {
+    const cutoff = new Date(nowMs - EMAIL_SUPPRESSION_WINDOW_MS).toISOString();
+    const rows = await db
+      .select({ source: emailSuppressions.source, suppressedAt: emailSuppressions.suppressedAt })
+      .from(emailSuppressions)
+      .where(gte(emailSuppressions.suppressedAt, cutoff));
+    const bounceCount7d = rows.filter((row) => row.source === "bounce").length;
+    const complaintCount7d = rows.filter((row) => row.source === "complaint").length;
+    const total = bounceCount7d + complaintCount7d;
+    const severity: HealthSeverity =
+      complaintCount7d >= EMAIL_COMPLAINT_WARN_COUNT || total >= EMAIL_INCIDENT_WARN_COUNT ? "warn" : "ok";
+    signals.push({
+      key: "email-bounce-complaint-rate-7d",
+      label: "Email bounce/complaint rate (7d)",
+      severity,
+      detail: `${bounceCount7d} bounce(s), ${complaintCount7d} complaint(s) in the trailing 7 days (count-based proxy, not a true send-volume rate — see phase-25 spec §3.5).`,
+      value: total,
+    });
+  } catch {
+    // Best-effort; a read failure here must not affect any other signal (test 24).
   }
 
   // --- Backup freshness (non-required; missing → not-configured) ----------------------------

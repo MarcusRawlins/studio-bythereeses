@@ -8,6 +8,8 @@ import {
   STRIPE_REQUIRED_EVENTS,
   evaluateResendDomains,
   resendSendingDomain,
+  evaluateDmarcRecord,
+  checkDmarc,
   evaluateTwilioAccount,
   evaluateTwilioFromNumber,
   evaluateCronWranglerConfigs,
@@ -196,6 +198,124 @@ import {
   assert.equal(report.totalFail, 0);
   assert.equal(report.totalSkip, 1);
   assert.equal(report.totalPass, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 25 (§3.1, §6 tests 1-7) — DMARC evaluator + checkDmarc network layer.
+// ---------------------------------------------------------------------------
+
+// 8 (spec test 1). Valid record -> pass, policy, hasRua.
+{
+  const result = evaluateDmarcRecord(["v=DMARC1; p=none; rua=mailto:hello@bythereeses.com; pct=100"]);
+  assert.equal(result.pass, true);
+  assert.equal(result.policy, "none");
+  assert.equal(result.hasRua, true);
+}
+
+// 9 (spec test 2). Missing record (empty TXT array) -> pass:false, detail names the
+// missing record and its expected location.
+{
+  const result = evaluateDmarcRecord([], { domain: "bythereeses.com" });
+  assert.equal(result.pass, false);
+  assert.match(result.detail, /No DMARC record found/i);
+  assert.match(result.detail, /_dmarc\.bythereeses\.com/);
+}
+
+// 10 (spec test 3). Malformed (unrelated TXT record at the same name) -> pass:false, not a throw.
+{
+  assert.doesNotThrow(() => evaluateDmarcRecord(["some-unrelated-txt-value"]));
+  const result = evaluateDmarcRecord(["some-unrelated-txt-value"]);
+  assert.equal(result.pass, false);
+}
+
+// 11 (spec test 4, MEDIUM 3). Duplicate v=DMARC1 records -> pass:false, RFC 7489 "no policy" cited.
+{
+  const result = evaluateDmarcRecord([
+    "v=DMARC1; p=none; rua=mailto:a@x.com",
+    "v=DMARC1; p=reject",
+  ]);
+  assert.equal(result.pass, false);
+  assert.match(result.detail, /multiple DMARC records/i);
+  assert.match(result.detail, /RFC 7489/);
+}
+
+// 12 (spec test 5, MEDIUM 3). Missing required p= tag -> pass:false, detail names it.
+{
+  const result = evaluateDmarcRecord(["v=DMARC1; rua=mailto:hello@bythereeses.com"]);
+  assert.equal(result.pass, false);
+  assert.match(result.detail, /p=/);
+}
+
+// 13 (spec test 6). checkDmarc network layer + DoH response-shape edge cases (MINOR 11).
+{
+  // Quote-stripping + basic PASS.
+  const passDeps = { fetchJson: async () => ({ ok: true, status: 200, json: { Answer: [{ data: '"v=DMARC1; p=none; rua=mailto:hello@bythereeses.com"' }] } }) };
+  const passRows = await checkDmarc({ RESEND_FROM_EMAIL: "The Reeses <hello@bythereeses.com>" }, passDeps);
+  assert.equal(passRows.length, 1);
+  assert.equal(passRows[0].section, "DNS (DMARC)");
+  assert.equal(passRows[0].status, "PASS");
+
+  // Multi-string TXT concatenation (split by the resolver into two quoted pieces for ONE record)
+  // must NOT be treated as two separate/duplicate records.
+  const splitDeps = {
+    fetchJson: async () => ({
+      ok: true,
+      status: 200,
+      json: { Answer: [{ type: 16, data: '"v=DMARC1; p=none; " "rua=mailto:hello@bythereeses.com"' }] },
+    }),
+  };
+  const splitRows = await checkDmarc({ RESEND_FROM_EMAIL: "The Reeses <hello@bythereeses.com>" }, splitDeps);
+  assert.equal(splitRows[0].status, "PASS", "a TXT value split across multiple quoted strings is concatenated, not treated as a duplicate record");
+
+  // Absent Answer array (NXDOMAIN) -> the same "missing record" FAIL as test 2, not a network FAIL.
+  const nxdomainDeps = { fetchJson: async () => ({ ok: true, status: 200, json: { Status: 3 } }) };
+  const nxdomainRows = await checkDmarc({ RESEND_FROM_EMAIL: "The Reeses <hello@bythereeses.com>" }, nxdomainDeps);
+  assert.equal(nxdomainRows[0].status, "FAIL");
+  assert.match(nxdomainRows[0].detail, /No DMARC record found/i);
+
+  // A CNAME-type Answer entry must be skipped, not inspected for v=DMARC1.
+  const cnameDeps = {
+    fetchJson: async () => ({
+      ok: true,
+      status: 200,
+      json: { Answer: [{ type: 5, data: '"v=DMARC1; p=none"' }] }, // type 5 = CNAME; must be ignored
+    }),
+  };
+  const cnameRows = await checkDmarc({ RESEND_FROM_EMAIL: "The Reeses <hello@bythereeses.com>" }, cnameDeps);
+  assert.equal(cnameRows[0].status, "FAIL", "a CNAME-type Answer entry must be skipped, not read as a DMARC record");
+
+  // Network error (thrown) -> one FAIL row with a network-error detail, never an uncaught throw.
+  const throwDeps = { fetchJson: async () => { throw new Error("dns resolver unreachable"); } };
+  const throwRows = await checkDmarc({ RESEND_FROM_EMAIL: "The Reeses <hello@bythereeses.com>" }, throwDeps);
+  assert.equal(throwRows[0].status, "FAIL");
+  assert.match(throwRows[0].detail, /Network error/);
+
+  // Diff-review Finding 1: Google DoH reports an UPSTREAM resolver failure as HTTP 200 +
+  // { Status: 2 } (SERVFAIL) with no Answer. That must render a RESOLVER-ERROR detail — never the
+  // false "No DMARC record found" claim (the spec explicitly rules that out for resolver outages,
+  // or Tyler burns time re-adding a record that exists). NXDOMAIN (Status 3) stays a genuine
+  // missing-record FAIL (asserted above).
+  const servfailDeps = { fetchJson: async () => ({ ok: true, status: 200, json: { Status: 2 } }) };
+  const servfailRows = await checkDmarc({ RESEND_FROM_EMAIL: "The Reeses <hello@bythereeses.com>" }, servfailDeps);
+  assert.equal(servfailRows[0].status, "FAIL");
+  assert.match(servfailRows[0].detail, /resolver error/i, "SERVFAIL renders a resolver-error detail");
+  assert.doesNotMatch(servfailRows[0].detail, /No DMARC record found/i, "SERVFAIL never claims the record is missing");
+}
+
+// 14 (spec test 7). checkDmarc runs UNCONDITIONALLY (no SKIP branch) regardless of which other
+// env vars are set/unset, and is exported (unlike checkStripe/checkResend/checkTwilio).
+{
+  assert.equal(typeof checkDmarc, "function", "checkDmarc must be exported (MINOR 11)");
+  const emptyEnvDeps = { fetchJson: async () => ({ ok: true, status: 200, json: {} }) };
+  const rowsNoEnv = await checkDmarc({}, emptyEnvDeps);
+  assert.equal(rowsNoEnv.length, 1, "checkDmarc always produces exactly one row, even with zero env vars set");
+
+  const fullEnvDeps = { fetchJson: async () => ({ ok: true, status: 200, json: {} }) };
+  const rowsFullEnv = await checkDmarc(
+    { RESEND_FROM_EMAIL: "The Reeses <hello@bythereeses.com>", STRIPE_SECRET_KEY: "sk_x", TWILIO_ACCOUNT_SID: "AC_x", TWILIO_AUTH_TOKEN: "tok" },
+    fullEnvDeps,
+  );
+  assert.equal(rowsFullEnv.length, 1, "checkDmarc always produces exactly one row regardless of which other providers are configured");
 }
 
 console.log("config preflight tests passed");

@@ -269,6 +269,124 @@ async function main() {
     "unparseable since-date fails toward CRITICAL (preserved behavior)",
   );
 
+  // ---- Phase 25 (§3.4, tests 18-19) — cap-tripped signal severity + not-configured branch ----
+  // Reset job_runs to a healthy baseline first (prior tests above left required-job rows deleted /
+  // future-dated on purpose) so the assertions below isolate THIS signal's own severity.
+  db.prepare("DELETE FROM job_runs").run();
+  db.prepare("DELETE FROM refund_initiations").run();
+  for (const name of ["scheduler-reminders", "sequence-runner", "systems-monitor"]) {
+    upsertJobRun(name, { lastRunAt: iso(5 * 60 * 1000), lastSuccessAt: iso(5 * 60 * 1000), lastStatus: "ok" });
+  }
+  upsertJobRun("sequences-daily-cap-tripped", {
+    lastRunAt: iso(5 * 60 * 1000),
+    lastStatus: "error",
+    lastError: "12 auto-sends in the trailing 24h reached the SEQUENCES_DAILY_SEND_CAP of 10",
+    consecutiveFailures: 1,
+  });
+  // Flag ON + tripped row -> WARN, never critical.
+  process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED = "1";
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  const capSignal = findSignal(report.signals, "sequences-daily-cap-tripped");
+  assert.ok(capSignal, "a recorded cap-tripped heartbeat produces a signal while the flag is on");
+  assert.equal(capSignal!.severity, "warn", "cap-tripped heartbeat -> WARN, never critical");
+  assert.notEqual(report.overall, "critical", "a WARN-only cap signal must never make the overall report critical by itself");
+
+  // Diff-review Finding 2: flag turned OFF while the last row is still the tripped ok:false —
+  // WITHOUT the flag gate this would WARN indefinitely (the self-reset only runs while the flag is
+  // on, so the row can never clear). With the gate, the signal is ABSENT entirely: the feature is
+  // off, so its backstop stops reporting.
+  delete process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED;
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  assert.equal(
+    findSignal(report.signals, "sequences-daily-cap-tripped"),
+    undefined,
+    "flag off + a stale tripped row -> signal absent (never a frozen indefinite WARN)",
+  );
+
+  // Flag ON + no heartbeat row at all -> not-configured (info), via the existing WEBHOOK_JOBS
+  // missing-row branch — reachable INDEFINITELY, not just on a fresh install (MINOR 8/12).
+  process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED = "1";
+  db.prepare("DELETE FROM job_runs WHERE job_name = 'sequences-daily-cap-tripped'").run();
+  for (let i = 0; i < 3; i += 1) {
+    report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+    assert.equal(
+      findSignal(report.signals, "sequences-daily-cap-tripped")!.severity,
+      "info",
+      "flag on, no heartbeat row -> not-configured INFO, reachable across repeated computeSystemHealth calls",
+    );
+  }
+  delete process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED;
+
+  // ---- Phase 25 (§3.5, tests 20-24) — bounce/complaint-rate signal (trailing 7 days) ----
+  function seedSuppression(email: string, source: string, msAgo: number) {
+    db.prepare("INSERT INTO email_suppressions (email, suppressed_at, source) VALUES (?, ?, ?)").run(email, iso(msAgo), source);
+  }
+  const DAY = 24 * HOUR;
+
+  // test 20: below threshold -> ok, value 2.
+  db.prepare("DELETE FROM email_suppressions").run();
+  seedSuppression("bounce1@example.com", "bounce", 1 * DAY);
+  seedSuppression("bounce2@example.com", "bounce", 2 * DAY);
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  let bc = findSignal(report.signals, "email-bounce-complaint-rate-7d");
+  assert.ok(bc, "bounce/complaint-rate signal present");
+  assert.equal(bc!.severity, "ok", "2 bounces, 0 complaints -> below threshold -> ok");
+  assert.equal(bc!.value, 2);
+
+  // test 21: combined bounce+complaint threshold (>=5) -> warn.
+  db.prepare("DELETE FROM email_suppressions").run();
+  for (let i = 0; i < 3; i += 1) seedSuppression(`bounce-combo-${i}@example.com`, "bounce", 1 * DAY);
+  for (let i = 0; i < 2; i += 1) seedSuppression(`complaint-combo-${i}@example.com`, "complaint", 1 * DAY);
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  bc = findSignal(report.signals, "email-bounce-complaint-rate-7d");
+  assert.equal(bc!.severity, "warn", "3 bounce + 2 complaint (combined 5) -> warn");
+  assert.equal(bc!.value, 5);
+
+  // test 22: a single complaint ALONE trips warn, independent of the combined threshold.
+  db.prepare("DELETE FROM email_suppressions").run();
+  seedSuppression("solo-complaint@example.com", "complaint", 1 * DAY);
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  bc = findSignal(report.signals, "email-bounce-complaint-rate-7d");
+  assert.equal(bc!.severity, "warn", "a single complaint alone -> warn (complaint-alone threshold)");
+  assert.equal(bc!.value, 1);
+
+  // test 23: window boundary — exactly 8 days old is excluded; 6 days old is included.
+  db.prepare("DELETE FROM email_suppressions").run();
+  seedSuppression("old-8d@example.com", "bounce", 8 * DAY);
+  seedSuppression("recent-6d@example.com", "bounce", 6 * DAY);
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  bc = findSignal(report.signals, "email-bounce-complaint-rate-7d");
+  assert.equal(bc!.value, 1, "an 8-day-old suppression is excluded from the trailing-7-day window; a 6-day-old one is included");
+
+  // test 24: a read failure degrades to signal-skipped, not a thrown page (best-effort, mirrors
+  // every other block in computeSystemHealth).
+  db.exec("ALTER TABLE email_suppressions RENAME TO email_suppressions_test24_bak");
+  let degradedReport: Awaited<ReturnType<typeof computeSystemHealth>> | undefined;
+  try {
+    degradedReport = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  } finally {
+    db.exec("ALTER TABLE email_suppressions_test24_bak RENAME TO email_suppressions");
+  }
+  assert.ok(degradedReport, "computeSystemHealth must still return a report when the email_suppressions read throws");
+  assert.ok(
+    !findSignal(degradedReport.signals, "email-bounce-complaint-rate-7d"),
+    "bounce/complaint-rate signal is simply absent that cycle on a read failure, not a thrown page",
+  );
+
+  // test 25: the EXISTING lifetime email-suppressions signal (Phase 24) is unchanged — additive,
+  // not a rewrite. Same key, severity ("info"), and detail shape as before this phase.
+  db.prepare("DELETE FROM email_suppressions").run();
+  seedSuppression("lifetime-check@example.com", "unsubscribe_link", 1 * DAY);
+  report = await computeSystemHealth({ now: NOW, requiredJobEnabledAt: ENABLED_AT });
+  const lifetimeSignal = findSignal(report.signals, "email-suppressions");
+  assert.ok(lifetimeSignal, "the Phase-24 lifetime email-suppressions signal must still exist");
+  assert.equal(lifetimeSignal!.severity, "info", "the lifetime signal's severity stays info — untouched by this phase");
+  assert.match(
+    lifetimeSignal!.detail,
+    /^1 suppressed address\(es\) \(unsubscribe 1, bounce 0, complaint 0\); most recent .+\.$/,
+    "the lifetime signal's detail shape is byte-identical to before this phase",
+  );
+
   console.log("system-health tests passed");
 }
 

@@ -98,7 +98,13 @@ export type JobName =
   // EMAIL inquiries are auto-marked spam. Recording this (instead of letting it stay silent) makes
   // a cross-channel starvation event visible. NON-ALERTING (not in the health catalog) — a raw
   // counter/heartbeat, a follow-up (per-source scoping) is deferred unless it fires in practice.
-  | "lead-form-global-flood";
+  | "lead-form-global-flood"
+  // Phase 25 (§3.4) — the sequences daily send-cap circuit breaker. Mirrors
+  // lead-form-global-flood's shape exactly: NON-ALERTING (WARN-only in system-health.ts,
+  // never CRITICAL) — a tripped cap means the backstop WORKED, not that anything broke.
+  // Only ever recorded (either ok:true or ok:false) when
+  // SEQUENCES_DAILY_SEND_CAP_ENABLED === "1" — a dark run never writes this row at all.
+  | "sequences-daily-cap-tripped";
 
 export type JobRunRecord = {
   jobName: string;

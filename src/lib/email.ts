@@ -342,3 +342,30 @@ function whenSafe(value: string) {
     return value;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 25 (§3.2) — sender classification guard, kept in sync (both directions) by
+// src/lib/email-deliverability-guard.test.ts. Every exported FUNCTION in this module
+// must have an entry here:
+//   "transactional" — carries NO List-Unsubscribe header (booking/portal/ops/inquiry
+//                      mail; a client did not opt into recurring mail by receiving it).
+//   "sequence"      — MUST carry the RFC 8058 List-Unsubscribe/List-Unsubscribe-Post
+//                      pair (the one-click unsubscribe flow at
+//                      src/app/api/email/unsubscribe/route.ts feeds off this).
+//   "helper"        — not a mail sender at all (isEmailSuppressed is a predicate used
+//                      by both transactional and sequence senders) — exempt from the
+//                      header-presence/-absence assertions entirely.
+// A new export with no entry here fails the guard test loudly ("classify this export
+// as transactional, sequence, or helper before merging") instead of silently drifting
+// the audit's already-verified classification (docs/email-deliverability.md).
+export const SENDER_CLASSIFICATION: Record<string, "transactional" | "sequence" | "helper"> = {
+  sendProjectEmail: "transactional",
+  isEmailSuppressed: "helper",
+  sendSequenceEmail: "sequence",
+  sendInquiryReplyEmail: "transactional",
+  sendAdminAlertEmail: "transactional",
+  sendPortalMagicLinkEmail: "transactional",
+  sendBookingEmails: "transactional",
+  sendBookingReminderEmail: "transactional",
+  sendBookingCancellationEmail: "transactional",
+};

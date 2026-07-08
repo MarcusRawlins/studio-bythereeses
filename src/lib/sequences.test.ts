@@ -309,6 +309,246 @@ async function main() {
   assert.equal(ledger("project-b2").find((r) => r.stepKey === "dunning-day-14")?.status, "done", "b2 retry row ends done (single send)");
 
   // =========================================================================
+  // M. DAILY SEND CAP (Phase 25 §3.4) — SEQUENCES_DAILY_SEND_CAP_ENABLED /
+  //    SEQUENCES_DAILY_SEND_CAP: a global, dark-by-default backstop independent
+  //    of the per-client weekly cap above. Filler ledger rows use a clientId/
+  //    projectId NOT tied to any real fixture so they never trip the per-client
+  //    cap for the enrollment actually under test in each sub-case. Start from a
+  //    clean slate: freeze every pre-existing 'active' enrollment (so none of
+  //    them get reconsidered by the main enrollment loop below — several have
+  //    an un-fired/blocked step from earlier sections) and clear stray
+  //    done/claimed auto_send ledger rows (e.g. project-stuck's 'old-claim')
+  //    that would otherwise contaminate the global daily-cap count query,
+  //    which scans the WHOLE table regardless of enrollment status.
+  // =========================================================================
+  // Full reset between sub-cases below: stop EVERY 'active' enrollment (so nothing —
+  // not even this section's own prior fixtures — gets reconsidered by the main
+  // enrollment loop) and wipe the auto_send ledger (the global daily-cap count query
+  // scans the WHOLE table regardless of project/enrollment status, so a prior
+  // sub-case's own successful send would otherwise silently contaminate the next
+  // sub-case's "clean baseline" assumption).
+  function resetDailyCapState() {
+    database.prepare("UPDATE sequence_enrollments SET status = 'stopped' WHERE status = 'active'").run();
+    database.prepare("DELETE FROM sequence_sends WHERE mode = 'auto_send'").run();
+  }
+
+  function seedAutoSendRow(id: string, firedAt: string, status: "done" | "claimed" = "done") {
+    database.prepare(
+      "INSERT INTO sequence_sends (id, project_id, client_id, sequence_key, step_key, dedupe_key, channel, mode, status, attempts, fired_at) VALUES (?, 'filler-daily-cap-project', 'filler-daily-cap-client', 'dunning', ?, ?, 'email', 'auto_send', ?, 0, ?)",
+    ).run(id, id, id, status, firedAt);
+  }
+
+  resetDailyCapState();
+  delete process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED;
+  delete process.env.SEQUENCES_DAILY_SEND_CAP;
+
+  // ---- M1 (test 12): flag OFF is a hard no-op — the cap is never consulted, even
+  //      when the trailing-24h count already sits well over the (unread) cap. ----
+  for (let i = 0; i < 60; i += 1) seedAutoSendRow(`cap-off-${i}`, NOW.toISOString());
+  addProject("project-cap-off");
+  addClient("client-cap-off", "capoff@example.com");
+  link("project-cap-off", "client-cap-off");
+  addOverdueInvoice("invoice-cap-off", "project-cap-off", "2026-06-16");
+  resendMode = "ok";
+  const resendBeforeCapOff = resendCalls;
+  await seq.runDueSequences(NOW);
+  assert.equal(resendCalls - resendBeforeCapOff, 1, "flag OFF: cap not consulted, auto-send proceeds normally despite 60 seeded auto-sends");
+  assert.equal(ledger("project-cap-off").find((r) => r.stepKey === "dunning-day-14")?.status, "done", "flag off auto-send completes normally");
+
+  // ---- M2 (test 13): flag ON + cap=2, with 2 'done' rows already in the trailing
+  //      24h -> the 3rd eligible step is BLOCKED (zero Resend calls, no ledger row
+  //      claimed, step remains due / re-evaluates on a simulated next run). ----
+  resetDailyCapState();
+  process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED = "1";
+  process.env.SEQUENCES_DAILY_SEND_CAP = "2";
+  seedAutoSendRow("cap-trip-1", NOW.toISOString());
+  seedAutoSendRow("cap-trip-2", NOW.toISOString());
+  addProject("project-cap-trip");
+  addClient("client-cap-trip", "captrip@example.com");
+  link("project-cap-trip", "client-cap-trip");
+  addOverdueInvoice("invoice-cap-trip", "project-cap-trip", "2026-06-16");
+  const resendBeforeCapTrip = resendCalls;
+  await seq.runDueSequences(NOW);
+  assert.equal(resendCalls - resendBeforeCapTrip, 0, "tripped cap: zero Resend calls");
+  assert.equal(ledger("project-cap-trip").filter((r) => r.stepKey === "dunning-day-14").length, 0, "tripped cap: NO ledger row claimed for the blocked step");
+  await seq.runDueSequences(NOW); // simulated next run, same seeded volume still trips
+  assert.equal(ledger("project-cap-trip").filter((r) => r.stepKey === "dunning-day-14").length, 0, "capped step stays re-evaluable across runs (never claimed, so never 'used up')");
+
+  // ---- M3 (test 14): trailing-24h window, NOT a calendar day — a row fired 25h
+  //      ago does not count toward the cap; one fired 23h ago does. ----
+  resetDailyCapState();
+  process.env.SEQUENCES_DAILY_SEND_CAP = "1";
+  const twentyFiveHoursAgo = new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString();
+  seedAutoSendRow("cap-window-25h", twentyFiveHoursAgo);
+  addProject("project-cap-window-old");
+  addClient("client-cap-window-old", "capwindowold@example.com");
+  link("project-cap-window-old", "client-cap-window-old");
+  addOverdueInvoice("invoice-cap-window-old", "project-cap-window-old", "2026-06-16");
+  const resendBeforeWindowOld = resendCalls;
+  await seq.runDueSequences(NOW);
+  assert.equal(resendCalls - resendBeforeWindowOld, 1, "a row fired 25h ago is OUTSIDE the 24h window -> does not count -> send proceeds");
+
+  resetDailyCapState();
+  const twentyThreeHoursAgo = new Date(NOW.getTime() - 23 * 60 * 60 * 1000).toISOString();
+  seedAutoSendRow("cap-window-23h", twentyThreeHoursAgo);
+  addProject("project-cap-window-new");
+  addClient("client-cap-window-new", "capwindownew@example.com");
+  link("project-cap-window-new", "client-cap-window-new");
+  addOverdueInvoice("invoice-cap-window-new", "project-cap-window-new", "2026-06-16");
+  const resendBeforeWindowNew = resendCalls;
+  await seq.runDueSequences(NOW);
+  assert.equal(resendCalls - resendBeforeWindowNew, 0, "a row fired 23h ago IS inside the 24h window -> counts -> cap=1 blocks the send");
+
+  // ---- M4 (test 15): the retry path also respects the daily cap, and a
+  //      successful retry dispatch REFRESHES firedAt (rev 2 MAJOR 1) so it lands
+  //      inside the NEXT run's trailing-24h count. ----
+  resetDailyCapState();
+  delete process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED;
+  resendMode = "reject";
+  addProject("project-cap-retry");
+  addClient("client-cap-retry", "capretry@example.com");
+  link("project-cap-retry", "client-cap-retry");
+  addOverdueInvoice("invoice-cap-retry", "project-cap-retry", "2026-06-16");
+  await seq.runDueSequences(NOW); // auto-send attempt rejects -> "failed"
+  assert.equal(ledger("project-cap-retry").find((r) => r.stepKey === "dunning-day-14")?.status, "failed", "cap-retry fixture failed on first attempt");
+  const originalFiredAt = (
+    database.prepare("SELECT fired_at AS firedAt FROM sequence_sends WHERE project_id = 'project-cap-retry' AND step_key = 'dunning-day-14'").get() as { firedAt: string }
+  ).firedAt;
+
+  const NOWRETRY_CAP = new Date(NOW.getTime() + 25 * 60 * 60 * 1000); // past the 24h retry backoff, business hours
+
+  // (a) cap ENABLED and already tripped -> the retry must NOT claim/send; the row stays 'failed'.
+  process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED = "1";
+  process.env.SEQUENCES_DAILY_SEND_CAP = "1";
+  seedAutoSendRow("cap-retry-filler", NOWRETRY_CAP.toISOString());
+  resendMode = "ok";
+  const resendBeforeCappedRetry = resendCalls;
+  await seq.runDueSequences(NOWRETRY_CAP);
+  assert.equal(resendCalls - resendBeforeCappedRetry, 0, "tripped cap blocks the retry dispatch too");
+  assert.equal(
+    ledger("project-cap-retry").find((r) => r.stepKey === "dunning-day-14")?.status,
+    "failed",
+    "blocked retry row stays failed (retryable next run), never claimed while capped",
+  );
+
+  // (b) cap NOT tripped -> the retry proceeds, and firedAt is refreshed to ~now (not left at the
+  //     original failed-send timestamp). NOTE: deliberately NOT resetDailyCapState() here — that
+  //     would stop project-cap-retry's still-active enrollment, and retryFailedSends REQUIRES an
+  //     active enrollment to dispatch a retry. Only clear the filler row from (a).
+  database.prepare("DELETE FROM sequence_sends WHERE id = 'cap-retry-filler'").run();
+  process.env.SEQUENCES_DAILY_SEND_CAP = "50";
+  const resendBeforeCleanRetry = resendCalls;
+  await seq.runDueSequences(NOWRETRY_CAP);
+  assert.equal(resendCalls - resendBeforeCleanRetry, 1, "un-capped retry dispatches exactly once");
+  const retriedRow = database
+    .prepare("SELECT status, fired_at AS firedAt FROM sequence_sends WHERE project_id = 'project-cap-retry' AND step_key = 'dunning-day-14'")
+    .get() as { status: string; firedAt: string };
+  assert.equal(retriedRow.status, "done", "un-capped retry succeeds (resendMode=ok)");
+  assert.notEqual(retriedRow.firedAt, originalFiredAt, "retry CAS refreshes firedAt (rev 2 MAJOR 1) — no longer the original failed-send timestamp");
+  assert.ok(
+    new Date(retriedRow.firedAt).getTime() > new Date(originalFiredAt).getTime(),
+    "refreshed firedAt is later than the original failed-send timestamp",
+  );
+
+  // ---- M5 (test 16): the count filters done OR claimed — a direct regression guard
+  //      against rev 1's bug (which excluded 'claimed' and would have under-counted
+  //      by exactly one, letting this seed's send through). ----
+  resetDailyCapState();
+  process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED = "1";
+  process.env.SEQUENCES_DAILY_SEND_CAP = "3";
+  seedAutoSendRow("cap-doneclaimed-1", NOW.toISOString(), "done");
+  seedAutoSendRow("cap-doneclaimed-2", NOW.toISOString(), "done");
+  seedAutoSendRow("cap-doneclaimed-3", NOW.toISOString(), "claimed"); // the ambiguous, TERMINAL-UNKNOWN row
+  addProject("project-cap-doneclaimed");
+  addClient("client-cap-doneclaimed", "capdoneclaimed@example.com");
+  link("project-cap-doneclaimed", "client-cap-doneclaimed");
+  addOverdueInvoice("invoice-cap-doneclaimed", "project-cap-doneclaimed", "2026-06-16");
+  resendMode = "ok";
+  const resendBeforeDoneClaimed = resendCalls;
+  await seq.runDueSequences(NOW);
+  assert.equal(resendCalls - resendBeforeDoneClaimed, 0, "2 done + 1 claimed (cap=3) reads AT-cap -> blocked ('claimed' must count, rev-1 regression)");
+
+  // ---- M6 (test 17): a burst of eligible retries cannot exceed the cap by riding
+  //      outside the count window — the classic rev-1 burst bug this cap exists to
+  //      close (cap=50 + 100 stale-failed retries could produce up to 140 dispatches
+  //      before rev 2's fix; here cap=5 against 20 eligible failed rows). ----
+  resetDailyCapState();
+  delete process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED;
+  resendMode = "reject";
+  const BURST_N = 20;
+  for (let i = 0; i < BURST_N; i += 1) {
+    const pid = `project-cap-burst-${i}`;
+    const cid = `client-cap-burst-${i}`;
+    addProject(pid);
+    addClient(cid, `capburst${i}@example.com`);
+    link(pid, cid);
+    addOverdueInvoice(`invoice-cap-burst-${i}`, pid, "2026-06-16");
+  }
+  await seq.runDueSequences(NOW); // all 20 auto-send attempts reject -> "failed"
+  for (let i = 0; i < BURST_N; i += 1) {
+    assert.equal(ledger(`project-cap-burst-${i}`).find((r) => r.stepKey === "dunning-day-14")?.status, "failed", `burst fixture ${i} failed on first attempt`);
+  }
+
+  process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED = "1";
+  process.env.SEQUENCES_DAILY_SEND_CAP = "5";
+  resendMode = "ok";
+  const NOWBURSTRETRY = new Date(NOW.getTime() + 25 * 60 * 60 * 1000);
+  const resendBeforeBurst = resendCalls;
+  await seq.runDueSequences(NOWBURSTRETRY);
+  assert.ok(resendCalls - resendBeforeBurst <= 5, `no more than 5 dispatches across the burst retry run (got ${resendCalls - resendBeforeBurst})`);
+  const burstDoneCount = Array.from({ length: BURST_N }).filter(
+    (_, i) => ledger(`project-cap-burst-${i}`).find((r) => r.stepKey === "dunning-day-14")?.status === "done",
+  ).length;
+  assert.ok(burstDoneCount <= 5, `no more than 5 burst rows end up done (got ${burstDoneCount})`);
+  assert.ok(burstDoneCount >= 1, "at least one retry should succeed before the cap trips");
+
+  // ---- M7 (test 18): heartbeat recorded on trip vs. no-trip, GATED by the flag
+  //      (I4/I6, rev 2 MINOR 8) — with the flag OFF, no row of this JobName is
+  //      EVER written, in either direction. ----
+  const heartbeatRow = () =>
+    database
+      .prepare("SELECT last_status AS lastStatus, last_error AS lastError FROM job_runs WHERE job_name = 'sequences-daily-cap-tripped'")
+      .get() as { lastStatus: string; lastError: string | null } | undefined;
+
+  database.prepare("DELETE FROM job_runs WHERE job_name = 'sequences-daily-cap-tripped'").run();
+  database.prepare("DELETE FROM sequence_sends WHERE mode = 'auto_send'").run();
+
+  // (a) flag OFF: even a run whose seeded volume would trivially trip any real-world cap never
+  //     writes ANY heartbeat row for this JobName.
+  delete process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED;
+  for (let i = 0; i < 60; i += 1) seedAutoSendRow(`heartbeat-off-${i}`, NOW.toISOString());
+  await seq.runDueSequences(NOW);
+  assert.equal(heartbeatRow(), undefined, "flag OFF: no heartbeat row of this JobName ever exists (I4/I6 byte-for-byte no-op)");
+
+  // (b) flag ON + cap tripped -> ok:false, detail names the count/cap.
+  process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED = "1";
+  process.env.SEQUENCES_DAILY_SEND_CAP = "5";
+  addProject("project-heartbeat-trip");
+  addClient("client-heartbeat-trip", "heartbeattrip@example.com");
+  link("project-heartbeat-trip", "client-heartbeat-trip");
+  addOverdueInvoice("invoice-heartbeat-trip", "project-heartbeat-trip", "2026-06-16");
+  await seq.runDueSequences(NOW);
+  const trippedRow = heartbeatRow();
+  assert.ok(trippedRow, "flag ON + tripped cap -> a heartbeat row IS recorded");
+  assert.equal(trippedRow!.lastStatus, "error", "tripped cap heartbeat recorded as a failure (ok:false)");
+  assert.match(trippedRow!.lastError ?? "", /reached the SEQUENCES_DAILY_SEND_CAP of 5/, "heartbeat detail names the count/cap");
+
+  // (c) flag ON + NOT tripped -> ok:true (self-resets to healthy the next clean day).
+  database.prepare("DELETE FROM sequence_sends WHERE mode = 'auto_send'").run();
+  process.env.SEQUENCES_DAILY_SEND_CAP = "50";
+  addProject("project-heartbeat-clean");
+  addClient("client-heartbeat-clean", "heartbeatclean@example.com");
+  link("project-heartbeat-clean", "client-heartbeat-clean");
+  addOverdueInvoice("invoice-heartbeat-clean", "project-heartbeat-clean", "2026-06-16");
+  await seq.runDueSequences(NOW);
+  const cleanRow = heartbeatRow();
+  assert.ok(cleanRow, "a heartbeat row exists after a clean (non-tripped) run");
+  assert.equal(cleanRow!.lastStatus, "ok", "no trip -> heartbeat self-resets to ok");
+
+  delete process.env.SEQUENCES_DAILY_SEND_CAP_ENABLED;
+  delete process.env.SEQUENCES_DAILY_SEND_CAP;
+
+  // =========================================================================
   // I. NO AGENT PATH — the MCP surface never imports the runner or the sender.
   // =========================================================================
   const mcpSource = fs.readFileSync(path.join(process.cwd(), "src", "lib", "studio-mcp.ts"), "utf8");
